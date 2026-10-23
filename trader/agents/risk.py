@@ -1,0 +1,57 @@
+"""Risk Manager agent: the safety officer. It can veto any trade.
+
+It decides HOW MUCH to buy and WHERE to exit (stop-loss / take-profit), and
+blocks trades that break the limits in .env.
+"""
+from __future__ import annotations
+
+from ..config import Settings
+
+
+class RiskManagerAgent:
+    name = "risk"
+
+    def __init__(self, settings: Settings):
+        self.s = settings
+
+    def review(self, decision: dict, symbol: str, price: float, atr: float, portfolio: dict) -> dict:
+        """portfolio: {cash, equity, open_positions, day_start_equity}"""
+        action = decision["action"]
+        if action == "HOLD":
+            return {"approved": False, "reason": "HOLD - nothing to do"}
+
+        if action == "SELL":  # closing a position always allowed - it reduces risk
+            return {"approved": True, "reason": "closing position"}
+
+        # ---- BUY checks ----
+        if decision["confidence"] < self.s.min_confidence:
+            return {"approved": False, "reason": f"confidence {decision['confidence']:.2f} < minimum {self.s.min_confidence}"}
+        if portfolio["open_positions"] >= self.s.max_open_positions:
+            return {"approved": False, "reason": f"already {portfolio['open_positions']} open positions (max {self.s.max_open_positions})"}
+        day_pnl = portfolio["equity"] / portfolio["day_start_equity"] - 1
+        if day_pnl <= -self.s.max_daily_loss_pct:
+            return {"approved": False, "reason": f"daily loss limit hit ({day_pnl:.2%}) - trading paused until tomorrow"}
+
+        budget = min(portfolio["equity"] * self.s.max_position_pct, portfolio["cash"] * 0.98)
+        if budget < 10:
+            return {"approved": False, "reason": f"not enough free cash (${portfolio['cash']:.2f})"}
+        stop = price - self.s.stop_loss_atr * atr
+        take = price + self.s.take_profit_atr * atr
+        if stop <= 0:
+            return {"approved": False, "reason": "volatility too high for a sensible stop-loss"}
+        return {
+            "approved": True,
+            "reason": "within limits",
+            "quote_amount": round(budget, 2),
+            "stop_loss": stop,
+            "take_profit": take,
+            "risk_pct_of_equity": round(budget * (price - stop) / price / portfolio["equity"] * 100, 3),
+        }
+
+    @staticmethod
+    def exit_signal(position: dict, price: float) -> str | None:
+        if price <= position["stop_loss"]:
+            return "stop-loss"
+        if price >= position["take_profit"]:
+            return "take-profit"
+        return None
