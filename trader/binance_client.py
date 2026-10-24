@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
@@ -12,6 +13,12 @@ import requests
 
 class BinanceError(RuntimeError):
     pass
+
+
+def scrub(text) -> str:
+    """Error texts quote the request URL; drop the request signature so logs stay shareable.
+    (The API key travels in a header and the secret never leaves this machine.)"""
+    return re.sub(r"signature=[0-9a-fA-F]+", "signature=<redacted>", str(text))
 
 
 class BinanceClient:
@@ -32,16 +39,19 @@ class BinanceClient:
     def _request(self, method: str, path: str, params: dict | None = None, signed: bool = False):
         params = dict(params or {})
         headers = {}
-        if signed:
-            if not (self.api_key and self.api_secret):
-                raise BinanceError("Testnet API key/secret missing - set them in .env")
-            params["timestamp"] = int(time.time() * 1000)
-            params.setdefault("recvWindow", 5000)
-            headers["X-MBX-APIKEY"] = self.api_key
-            url = f"{self.base_url}{path}?{self.sign(params)}"
-            resp = self.session.request(method, url, headers=headers, timeout=self.timeout)
-        else:
-            resp = self.session.request(method, f"{self.base_url}{path}", params=params, timeout=self.timeout)
+        try:
+            if signed:
+                if not (self.api_key and self.api_secret):
+                    raise BinanceError("Testnet API key/secret missing - set them in .env")
+                params["timestamp"] = int(time.time() * 1000)
+                params.setdefault("recvWindow", 5000)
+                headers["X-MBX-APIKEY"] = self.api_key
+                url = f"{self.base_url}{path}?{self.sign(params)}"
+                resp = self.session.request(method, url, headers=headers, timeout=self.timeout)
+            else:
+                resp = self.session.request(method, f"{self.base_url}{path}", params=params, timeout=self.timeout)
+        except requests.RequestException as e:  # keep the type (callers rely on it), drop the signature
+            raise requests.RequestException(scrub(e)) from None
         try:
             data = resp.json()
         except ValueError:

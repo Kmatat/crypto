@@ -171,6 +171,23 @@ Messages also arrive automatically:
 - **Security:** your keys are stored only on your server, in a file only your user can read. The
   Binance keys are demo keys with fake money. Never put real-money Binance keys into this demo.
 
+## Security checklist (10 minutes, do it once)
+
+The server holds only demo keys and fake money, but it is connected to real accounts. Protect those:
+
+| Account | What to do | Why |
+|---|---|---|
+| **Oracle Cloud** | Turn on multi-factor authentication (Oracle asks for it at signup; keep it on). Under *Billing → Budgets*, create a budget of $1 with an email alert | This account has your credit card. An alert tells you if anything ever starts costing money |
+| **Binance** | Use 2FA on your main Binance account. Only ever paste **testnet** keys into this desk; never real-money keys | The desk is wired to the demo exchange only, so real keys would not even work, but they should never sit on a server |
+| **GitHub** | Use 2FA. The token you created is read-only for one repository and expires in 90 days; make a new one the same way when it does | Whoever controls the repository controls the code the server runs |
+| **Telegram** | Pair the bot with the one-time code the setup shows you (it does this automatically). Don't share the bot token | Only the chat that sent the code receives alerts and can give commands; everyone else is ignored |
+| **Claude (Anthropic)** | In the Anthropic console, set a monthly spending limit (e.g. $150) on top of the desk's own daily cap | Two independent caps on the only part of this setup that costs money |
+| **Server** | Keep the SSH key file somewhere safe and never email it. Nothing else to install: Oracle allows only SSH in, the desk only makes outgoing connections, and it runs in a sandbox that can't change the system | A lost key file is the only way someone else gets onto the server |
+
+What is already handled for you: your keys are stored on the server in a file only your user can read; they
+never appear in the logs or in Telegram messages; the code refuses to run in any real-money mode; and the
+Risk Manager's limits (10% per trade, 3 positions, 3% daily loss stop) bound what a bad decision can cost.
+
 ## Troubleshooting
 
 | Problem | Solution |

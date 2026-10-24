@@ -28,8 +28,15 @@ class Telegram:
     def enabled(self) -> bool:
         return bool(self.token and self.chat_id)
 
+    def redact(self, text) -> str:
+        """Network errors quote the request URL, which contains the bot token: never let it reach the logs."""
+        return str(text).replace(self.token, "<bot-token>") if self.token else str(text)
+
     def call(self, method: str, timeout: float = 15, **params) -> dict:
-        r = requests.post(API.format(token=self.token, method=method), json=params, timeout=timeout)
+        try:
+            r = requests.post(API.format(token=self.token, method=method), json=params, timeout=timeout)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Telegram unreachable: {self.redact(e)}") from None
         data = r.json()
         if not data.get("ok"):
             raise RuntimeError(data.get("description", f"HTTP {r.status_code}"))
@@ -42,7 +49,7 @@ class Telegram:
             self.call("sendMessage", chat_id=self.chat_id, text=text[:MAX_LEN], disable_web_page_preview=True)
             return True
         except (requests.RequestException, ValueError, RuntimeError) as e:
-            log.warning("Telegram send failed: %s", e)
+            log.warning("Telegram send failed: %s", self.redact(e))
             return False
 
     def send_once(self, key: str, text: str, every_hours: float = 6) -> bool:
@@ -56,13 +63,15 @@ class Telegram:
     def bot_username(self) -> str:
         return self.call("getMe")["username"]
 
-    def latest_chat_id(self) -> str | None:
-        """Chat id of the most recent person who messaged the bot (used once, during setup)."""
+    def latest_chat_id(self, code: str) -> str | None:
+        """Chat id of whoever sent the pairing `code` to the bot (used once, during setup).
+        Matching on a code, not on "the latest message", stops a stranger who finds the bot
+        at the wrong moment from becoming its owner."""
         updates = self.call("getUpdates", timeout=15)
         for upd in reversed(updates):
-            chat = (upd.get("message") or {}).get("chat")
-            if chat:
-                return str(chat["id"])
+            msg = upd.get("message") or {}
+            if msg.get("chat") and code in (msg.get("text") or ""):
+                return str(msg["chat"]["id"])
         return None
 
     # ---- commands ----
@@ -78,12 +87,12 @@ class Telegram:
             pending = self.call("getUpdates", offset=-1, timeout=15)
             offset = pending[-1]["update_id"] + 1 if pending else None
         except Exception as e:
-            log.warning("Telegram listener start failed: %s", e)
+            log.warning("Telegram listener start failed: %s", self.redact(e))
         while True:
             try:
                 offset = self.handle(self._get_updates(offset), handlers, offset)
             except Exception as e:
-                log.warning("Telegram polling error: %s", e)
+                log.warning("Telegram polling error: %s", self.redact(e))
                 time.sleep(15)
 
     def handle(self, updates: list[dict], handlers: dict[str, Callable[[], str]], offset: int | None) -> int | None:
@@ -106,8 +115,11 @@ class Telegram:
 
     def _get_updates(self, offset: int | None) -> list[dict]:
         # Long polling: Telegram holds the request up to 50s until a message arrives.
-        r = requests.post(API.format(token=self.token, method="getUpdates"),
-                          json={"offset": offset, "timeout": 50, "allowed_updates": ["message"]}, timeout=65)
+        try:
+            r = requests.post(API.format(token=self.token, method="getUpdates"),
+                              json={"offset": offset, "timeout": 50, "allowed_updates": ["message"]}, timeout=65)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Telegram unreachable: {self.redact(e)}") from None
         data = r.json()
         if not data.get("ok"):
             raise RuntimeError(data.get("description", f"HTTP {r.status_code}"))

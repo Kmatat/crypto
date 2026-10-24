@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import getpass
 import os
+import secrets
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -255,15 +256,16 @@ class Wizard:
             pass
         else:
             chat_id = ""
-            self.say(f"   Now open https://t.me/{username} in Telegram, press START (or send 'hi'),")
+            code = f"{secrets.randbelow(9000) + 1000}"  # one-time pairing code: only its sender becomes the owner
+            self.say(f"   Now open https://t.me/{username} in Telegram, press START, and send this code: {code}")
             while not chat_id:
                 self._ask("   then come back here and press Enter... ")
                 try:
-                    chat_id = Telegram(token).latest_chat_id() or ""
+                    chat_id = Telegram(token).latest_chat_id(code) or ""
                 except Exception as e:
                     self.say(f"   Could not read messages: {e}")
                 if not chat_id:
-                    self.say("   No message found yet.")
+                    self.say(f"   No message containing {code} found yet.")
                     if not self.yes("   Try again?", True):
                         self.v["TELEGRAM_BOT_TOKEN"] = self.v["TELEGRAM_CHAT_ID"] = ""
                         return

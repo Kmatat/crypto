@@ -25,7 +25,8 @@ class FakeTelegram:
             raise RuntimeError("Unauthorized")
         return "desk_bot"
 
-    def latest_chat_id(self):
+    def latest_chat_id(self, code=None):
+        assert code and code.isdigit() and len(code) == 4  # the wizard pairs with a one-time code
         return "999"
 
     def send(self, text):
@@ -307,3 +308,34 @@ def test_wizard_max_coins_never_below_core_count(wiz):
     env, make = wiz
     make(["2", "", "n", "n", "btc,eth,sol", "", "2", "4", ""]).run()  # 2 < 3 core coins: asked again
     assert dotenv_values(env)["MAX_COINS"] == "4"
+
+
+def test_secrets_never_reach_logs(caplog, monkeypatch):
+    import requests as rq
+    from trader.binance_client import BinanceClient, scrub
+
+    tg = Telegram("123456:SECRET-TOKEN", "1")
+
+    def boom(*a, **k):
+        raise rq.ConnectionError("Max retries exceeded with url: /bot123456:SECRET-TOKEN/sendMessage")
+    monkeypatch.setattr(rq, "post", boom)
+    with caplog.at_level("WARNING"):
+        assert tg.send("hello") is False
+    assert "SECRET-TOKEN" not in caplog.text and "<bot-token>" in caplog.text
+
+    assert scrub("url: /api/v3/order?symbol=BTCUSDT&timestamp=1&signature=abc123def") == \
+        "url: /api/v3/order?symbol=BTCUSDT&timestamp=1&signature=<redacted>"
+    c = BinanceClient("https://127.0.0.1:9", "key", "secret", timeout=0.2)
+    with pytest.raises(rq.RequestException) as err:
+        c.balances()
+    assert "signature=<redacted>" in str(err.value) and "key" not in str(err.value).split("?")[0][-10:]
+
+
+def test_pairing_code_picks_the_right_chat(monkeypatch):
+    tg = Telegram("t")
+    monkeypatch.setattr(tg, "call", lambda method, **p: [
+        {"update_id": 1, "message": {"chat": {"id": 7}, "text": "hi"}},            # stranger pressed START
+        {"update_id": 2, "message": {"chat": {"id": 42}, "text": "4821"}},         # owner sent the code
+        {"update_id": 3, "message": {"chat": {"id": 8}, "text": "hello there"}},   # another stranger, later
+    ])
+    assert tg.latest_chat_id("4821") == "42" and tg.latest_chat_id("0000") is None

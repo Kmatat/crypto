@@ -85,6 +85,20 @@ ExecStart=$APP_DIR/.venv/bin/python -m trader run
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=60
+# Sandbox: the desk only needs the network and its own data folder. If the process were ever
+# taken over (a bad dependency, a bug), it could not gain root, touch the system, or edit its own code.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$APP_DIR/data
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
