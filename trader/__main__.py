@@ -18,9 +18,9 @@ import time
 
 from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
-from .notify import Telegram, trade_messages
+from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
-from .report import performance, print_report, report_text, status_text
+from .report import performance, print_report, report_text, status_text, watchlist_text
 
 log = logging.getLogger("trader")
 
@@ -28,8 +28,10 @@ HELP_TEXT = (
     "🤖 Crypto trading desk commands\n"
     "/status - open positions and each coin's latest decision with the reason\n"
     "/report - performance so far (profit, win rate, order success)\n"
+    "/watchlist - which coins the desk watches and why\n"
     "/help - this list\n\n"
-    "You also get a message for every buy, sell or failed order, and a daily report."
+    "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
+    "changes, and a daily report."
 )
 
 
@@ -39,7 +41,7 @@ def print_cycle(n: int, summary: list[dict]) -> None:
         if "error" in r:
             print(f"{r['symbol']:9s} ERROR {r['error']}")
             continue
-        line = f"{r['symbol']:9s} {r['action']:4s}"
+        line = f"{r['symbol']:9s} {r['action']:4s}{'*' if str(r.get('source', '')).startswith('claude') else ' '}"
         if "confidence" in r:
             line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={r['price']:.2f}  risk: {r['risk']}"
         if "reason" in r:
@@ -75,6 +77,13 @@ def cmd_check(s: Settings) -> int:
         step("Binance testnet account", lambda: {k: v for k, v in c.balances().items() if k in ("USDT", "BTC", "ETH", "SOL")})
     step("News feeds", lambda: f"{len(NewsAgent().fetch_headlines())} headlines")
     step("Forex (ECB rates)", lambda: ForexAgent().run()["regime"])
+    if s.auto_coins:
+        def scout():
+            from .agents.scout import MarketScoutAgent
+            testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) if s.mode == "testnet" else None
+            cands = MarketScoutAgent(BinanceClient(PUBLIC_BASE_URL), testnet, None, s).candidates()
+            return f"{len(cands)} liquid coins to choose from, e.g. " + ", ".join(c["symbol"][:-4] for c in cands[:8])
+        step("Market scout", scout)
     if s.anthropic_key:
         def claude():
             ok = ClaudeJSON(s.claude_model, s.anthropic_key).ask(
@@ -120,8 +129,22 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     today = now.date().isoformat()
     if not tg.enabled or now.hour < s.daily_report_hour_utc or bot.journal.get("last_daily_report") == today:
         return
-    if tg.send(report_text(performance(bot.journal, bot.last_price), title=f"☀️ Daily report {today}")):
+    text = report_text(performance(bot.journal, bot.last_price), title=f"☀️ Daily report {today}")
+    text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
+    if tg.send(text):
         bot.journal.set("last_daily_report", today)
+
+
+def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
+    lines = [f"Next check in about {bot.pace['minutes']} min: {bot.pace['reason']} ({bot.pace['source']})"]
+    if bot.llm:
+        cap = f" of ${s.ai_daily_budget_usd:.2f} daily cap" if s.ai_daily_budget_usd else ""
+        lines.append(f"Claude spend today: about ${bot.llm.spent_today:.2f}{cap}")
+    return lines
+
+
+def default_watchlist(s: Settings) -> dict:
+    return {"symbols": list(s.symbols), "reasons": {c: "core coin (always watched)" for c in s.symbols}}
 
 
 def cmd_run(s: Settings, args) -> None:
@@ -130,22 +153,31 @@ def cmd_run(s: Settings, args) -> None:
     mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
         "offline test (made-up prices)" if s.offline else "paper trading at real prices"
     ai = f"Claude ({s.claude_model})" if s.use_claude else "built-in rules"
-    print(f"Mode: {mode}  AI: {ai}  symbols: {','.join(s.symbols)}  journal: {s.db_path}")
+    pace = f"every {s.cycle_minutes} min" + (
+        f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if s.use_claude else "")
+    coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
+    print(f"Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
 
     if tg.enabled:
         if bot.journal.get("last_daily_report") is None:  # first start: first daily report tomorrow
             bot.journal.set("last_daily_report", dt.datetime.now(dt.timezone.utc).date().isoformat())
-        tg.send(f"🚀 Trading desk started\nMode: {mode}\nAI: {ai}\nCoins: {', '.join(s.symbols)}\n"
-                f"Budget: ${s.starting_balance:,.0f} · checks every {s.cycle_minutes} min\n\n{HELP_TEXT}")
+        tg.send(f"🚀 Trading desk started\nMode: {mode}\nAI: {ai}\nCoins: {coins}\n"
+                f"Budget: ${s.starting_balance:,.0f} · checks {pace}\n\n{HELP_TEXT}")
+
+        def watched(j: Journal) -> list[str]:
+            return (j.get("watchlist") or default_watchlist(s))["symbols"]
         tg.listen({
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price))),
-            "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, s.symbols)),
+            "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
+                                                                     status_extra(bot, s))),
+            "/watchlist": lambda: with_journal(s, lambda j: watchlist_text(j.get("watchlist") or default_watchlist(s))),
             "/help": lambda: HELP_TEXT,
             "/start": lambda: HELP_TEXT,
         })
 
     limit = 1 if args.once else args.cycles
     n = 0
+    last_minutes = s.cycle_minutes
     try:
         while True:
             n += 1
@@ -160,11 +192,22 @@ def cmd_run(s: Settings, args) -> None:
                 sys.stdout.flush()
             for key, msg in trade_messages(summary):
                 tg.send_once(key, msg) if key else tg.send(msg)
+            if bot.scout_update and (bot.scout_update["added"] or bot.scout_update["removed"]):
+                tg.send(scout_message(bot.scout_update))
+            if bot.pace["minutes"] != last_minutes:
+                tg.send_once("pace", pace_message(bot.pace), every_hours=1)
+                last_minutes = bot.pace["minutes"]
+            if bot.llm and bot.llm.budget_hit:
+                tg.send_once("ai-budget", f"💸 Claude's daily budget (${s.ai_daily_budget_usd:.2f}) is used up. "
+                                          "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)
             maybe_daily_report(bot, tg, s)
             if limit and n >= limit:
                 break
+            if not args.quiet:
+                print(f"Next check in {bot.pace['minutes']} min: {bot.pace['reason']} ({bot.pace['source']})")
+                sys.stdout.flush()
             if not args.fast:
-                time.sleep(s.cycle_minutes * 60)
+                time.sleep(bot.pace["minutes"] * 60)
     except KeyboardInterrupt:
         print("\nStopped by user.")
     print_report(performance(bot.journal, bot.last_price))

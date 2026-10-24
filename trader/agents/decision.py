@@ -2,16 +2,23 @@
 and decides BUY / SELL / HOLD for one coin.
 
 Spot trading only: BUY opens a position, SELL closes one we hold (no short selling).
+
+To keep AI costs in proportion, Claude is consulted only when the weighted score
+shows a real buy or sell signal, and its view is reused while nothing changed.
+Clear "nothing to do" cases are decided by the rules for free.
 """
 from __future__ import annotations
 
 import json
+import time
 
 from ..llm import ClaudeJSON
 
 WEIGHTS = {"technical": 0.35, "prediction": 0.25, "news": 0.25, "forex": 0.15}
 BUY_THRESHOLD = 0.25
 SELL_THRESHOLD = -0.25
+AI_GATE = 0.15        # ask Claude only when |score| reaches this in the direction we could act
+REUSE_MINUTES = 45    # reuse Claude's view for a coin while its inputs stay about the same
 
 DECISION_SCHEMA = {
     "type": "object",
@@ -39,6 +46,7 @@ class DecisionAgent:
 
     def __init__(self, llm: ClaudeJSON | None = None):
         self.llm = llm
+        self._recent: dict[str, dict] = {}
 
     @staticmethod
     def combined_score(reports: dict) -> float:
@@ -47,8 +55,13 @@ class DecisionAgent:
     def run(self, symbol: str, reports: dict, holding: bool) -> dict:
         score = self.combined_score(reports)
         decision = None
-        if self.llm:
-            decision = self._claude(symbol, reports, holding, score)
+        if self.llm and self.worth_asking(score, holding):
+            decision = self._reuse(symbol, score, holding)
+            if decision is None:
+                decision = self._claude(symbol, reports, holding, score)
+                if decision:
+                    self._recent[symbol] = {"decision": dict(decision), "score": score, "holding": holding,
+                                            "ts": time.time()}
         if decision is None:
             decision = self._rules(score, holding)
         # Enforce spot-trading rules no matter who decided
@@ -57,6 +70,18 @@ class DecisionAgent:
                         "reasoning": decision["reasoning"] + " (Converted to HOLD: not valid for current position.)"}
         decision["combined_score"] = score
         return decision
+
+    @staticmethod
+    def worth_asking(score: float, holding: bool) -> bool:
+        """Only a possible BUY (not holding, positive) or SELL (holding, negative) needs judgement."""
+        return (not holding and score >= AI_GATE) or (holding and score <= -AI_GATE)
+
+    def _reuse(self, symbol: str, score: float, holding: bool) -> dict | None:
+        r = self._recent.get(symbol)
+        if r and time.time() - r["ts"] < REUSE_MINUTES * 60 and r["holding"] == holding \
+                and abs(r["score"] - score) < 0.1:
+            return {**r["decision"], "source": "claude-reused"}
+        return None
 
     @staticmethod
     def _rules(score: float, holding: bool) -> dict:

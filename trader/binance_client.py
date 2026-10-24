@@ -63,6 +63,16 @@ class BinanceClient:
     def price(self, symbol: str) -> float:
         return float(self._request("GET", "/api/v3/ticker/price", {"symbol": symbol})["price"])
 
+    def all_prices(self) -> dict[str, float]:
+        return {r["symbol"]: float(r["price"]) for r in self._request("GET", "/api/v3/ticker/price")}
+
+    def tickers_24h(self) -> list[dict]:
+        """24-hour summary of every trading pair, in one request."""
+        rows = self._request("GET", "/api/v3/ticker/24hr", {"type": "MINI"})
+        return [{"symbol": r["symbol"], "price": float(r["lastPrice"]), "open": float(r["openPrice"]),
+                 "high": float(r["highPrice"]), "low": float(r["lowPrice"]), "quote_volume": float(r["quoteVolume"])}
+                for r in rows]
+
     def symbol_filters(self, symbol: str) -> dict:
         if symbol not in self._filters:
             info = self._request("GET", "/api/v3/exchangeInfo", {"symbol": symbol})

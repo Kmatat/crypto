@@ -67,11 +67,16 @@ def test_wizard_first_run_writes_private_env(wiz):
                "KEY", "SECRET",         # binance keys
                "",                      # budget: default capped to 90% of the 5000 USDT demo balance
                "y", "sk-ant-good", "2",  # Claude yes, key, Sonnet
+               "",                      # Claude daily budget: default $5
                "", "123:abc", "", "7",  # Telegram yes, token, press Enter after messaging bot, report hour
-               "btc, eth"]              # coins
+               "btc, eth",              # core coins
+               "", "",                  # scout may add coins (yes), up to 8
+               ""]                      # check every 15 minutes
     make(answers).run()
     assert not answers  # every question answered, none extra
     v = dotenv_values(env)
+    assert v["AI_DAILY_BUDGET_USD"] == "5" and v["AUTO_COINS"] == "true" and v["MAX_COINS"] == "8"
+    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "2"
     assert v["TRADING_MODE"] == "testnet" and v["BINANCE_TESTNET_API_KEY"] == "KEY"
     assert v["STARTING_BALANCE_USDT"] == "4500"
     assert v["CLAUDE_MODEL"] == "claude-sonnet-5-5" and v["ANTHROPIC_API_KEY"] == "sk-ant-good"
@@ -83,10 +88,12 @@ def test_wizard_first_run_writes_private_env(wiz):
 
 def test_wizard_rerun_keeps_values_on_enter(wiz):
     env, make = wiz
-    make(["", "KEY", "SECRET", "", "y", "sk-ant-good", "", "", "123:abc", "", "", ""]).run()
+    make(["", "KEY", "SECRET", "", "y", "sk-ant-good", "", "3", "", "123:abc", "", "", "", "", "12", "20"]).run()
     before = dotenv_values(env)
-    # Enter everywhere: keep mode, keys, budget, Claude, model, Telegram (+ same chat), hour, coins
-    answers = ["", "", "", "", "", "", "", "", "", "", "", ""]
+    assert before["AI_DAILY_BUDGET_USD"] == "3" and before["MAX_COINS"] == "12" and before["CYCLE_MINUTES"] == "20"
+    # Enter everywhere: keep mode, keys, budget, Claude, model, AI cap, Telegram (+ same chat), hour,
+    # coins, scout, max coins, interval
+    answers = [""] * 16
     w = make(answers)
     w.run()
     assert dotenv_values(env) == before
@@ -100,7 +107,7 @@ def test_wizard_restricted_location_falls_back_to_paper(wiz, monkeypatch):
         raise BinanceError("HTTP 451: Service unavailable from a restricted location")
     monkeypatch.setattr(setup_wizard, "check_binance", blocked)
     make(["", "KEY", "SECRET", "2",   # testnet, keys, then "switch to paper trading"
-          "n", "n", ""]).run()         # no Claude, no Telegram, default coins
+          "n", "n", "", "", "", ""]).run()  # no Claude, no Telegram, default coins, scout, max, interval
     v = dotenv_values(env)
     assert v["TRADING_MODE"] == "simulation" and v["ANTHROPIC_API_KEY"] == "" and v["TELEGRAM_BOT_TOKEN"] == ""
 
@@ -110,17 +117,20 @@ def test_wizard_rejects_unknown_coin_and_bad_claude_key(wiz):
     make(["2", "abc", "2,500",              # paper trading, invalid budget re-asked, then 2,500
           "y", "sk-bad", "", "n",           # Claude key fails, don't retry -> rules
           "n",                              # no Telegram
-          "BTC, NOTACOIN", "SOL"]).run()    # typo is rejected, asked again
+          "BTC, NOTACOIN", "SOL",           # typo is rejected, asked again
+          "n",                              # scout may not add coins
+          "90", "20"]).run()                # interval outside 5-60 is re-asked
     v = dotenv_values(env)
     assert v["ANTHROPIC_API_KEY"] == "" and v["SYMBOLS"] == "SOLUSDT" and v["STARTING_BALANCE_USDT"] == "2500"
+    assert v["AUTO_COINS"] == "false" and v["CYCLE_MINUTES"] == "20"
 
 
 def test_wizard_offers_fresh_journal_when_mode_changes(wiz, tmp_path):
     env, make = wiz
-    make(["2", "", "n", "n", ""]).run()
+    make(["2", "", "n", "n", "", "", "", ""]).run()
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "journal.db").write_text("old")
-    make(["1", "KEY", "SECRET", "", "n", "n", "", "y"]).run()  # switch paper -> testnet
+    make(["1", "KEY", "SECRET", "", "n", "n", "", "", "", "", "y"]).run()  # switch paper -> testnet
     assert not (tmp_path / "data" / "journal.db").exists()
     assert len(list((tmp_path / "data").glob("journal-*.db"))) == 1
 
@@ -172,13 +182,15 @@ def test_disabled_telegram_never_sends():
 # ---------------------------------------------------------------- claude request shape
 class FakeClaude(BaseHTTPRequestHandler):
     requests = []
+    queue = []  # (status, body) replies used in order before falling back to status/body
     status, body = 200, {}
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         FakeClaude.requests.append({"path": self.path, "beta": self.headers.get("anthropic-beta", ""), "body": data})
-        payload = json.dumps(FakeClaude.body).encode()
-        self.send_response(FakeClaude.status)
+        status, body = FakeClaude.queue.pop(0) if FakeClaude.queue else (FakeClaude.status, FakeClaude.body)
+        payload = json.dumps(body).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -194,6 +206,7 @@ def claude_server(monkeypatch):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{srv.server_address[1]}")
     FakeClaude.requests.clear()
+    FakeClaude.queue.clear()
     FakeClaude.status = 200
     yield FakeClaude
     srv.shutdown()
@@ -233,3 +246,64 @@ def test_claude_refusal_and_auth_errors_fall_back_to_rules(claude_server):
     claude_server.status = 401
     claude_server.body = {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}
     assert ClaudeJSON("claude-opus-5-5", "bad").ask("s", "p", SCHEMA) is None
+
+
+def search_turn(text, stop, url=None, searches=0):
+    content = []
+    if searches:
+        content += [{"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+                     "input": {"query": "crypto news today"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+                     "content": [{"type": "web_search_result", "url": url, "title": "News",
+                                  "encrypted_content": "abc", "page_age": None}]}]
+    cites = [{"type": "web_search_result_location", "url": url, "title": "News", "encrypted_index": "x",
+              "cited_text": "..."}] if url else None
+    content.append({"type": "text", "text": text, "citations": cites})
+    return {"id": "msg_s", "type": "message", "role": "assistant", "model": "m", "stop_reason": stop,
+            "stop_sequence": None, "content": content,
+            "usage": {"input_tokens": 1000, "output_tokens": 200, "server_tool_use": {"web_search_requests": searches}}}
+
+
+def test_claude_research_resumes_paused_search_and_collects_sources(claude_server):
+    claude_server.queue += [(200, search_turn("AVAX: upgrade live. ", "pause_turn", "https://news.example/avax", 1)),
+                            (200, search_turn("SUI: unlock next week.", "end_turn", "https://news.example/sui", 1))]
+    llm = ClaudeJSON("claude-opus-5-5", "k")
+    out = llm.research("sys", "find catalysts", max_searches=3)
+    assert out == {"text": "AVAX: upgrade live. SUI: unlock next week.",
+                   "sources": ["https://news.example/avax", "https://news.example/sui"]}
+    first, second = claude_server.requests[-2:]
+    assert first["body"]["tools"] == [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+    resumed = second["body"]["messages"]
+    assert [m["role"] for m in resumed] == ["user", "assistant"]  # paused turn sent back, no extra "continue"
+    assert resumed[1]["content"][0]["type"] == "server_tool_use"
+    # spend = 2 x (1000 in @ $4/M + 200 out @ $20/M) + 2 searches @ $0.01
+    assert llm.spent_today == pytest.approx(2 * (0.004 + 0.004) + 0.02)
+
+
+def test_haiku_uses_basic_web_search_tool(claude_server):
+    claude_server.body = search_turn("notes", "end_turn")
+    ClaudeJSON("claude-haiku-5-5", "k").research("sys", "p")
+    assert claude_server.requests[-1]["body"]["tools"][0]["type"] == "web_search_20250305"
+
+
+def test_daily_budget_stops_claude_calls(claude_server):
+    claude_server.body = message('{"ok": true}')
+    llm = ClaudeJSON("claude-opus-5-5", "k", daily_budget_usd=0.0001)
+    assert llm.ask("s", "p", SCHEMA) == {"ok": True}       # first call allowed, spends ~$0.0001+
+    n = len(claude_server.requests)
+    assert llm.ask("s", "p", SCHEMA) is None and llm.research("s", "p") is None
+    assert len(claude_server.requests) == n and llm.budget_hit  # no further requests sent
+
+
+def test_wizard_moves_old_hourly_setting_to_15_minutes(wiz):
+    env, make = wiz
+    env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nCYCLE_MINUTES=60\nSYMBOLS=BTCUSDT\n")
+    make(["", "", "n", "n", "", "n", ""]).run()  # Enter on the interval question keeps the new default
+    v = dotenv_values(env)
+    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "2"
+
+
+def test_wizard_max_coins_never_below_core_count(wiz):
+    env, make = wiz
+    make(["2", "", "n", "n", "btc,eth,sol", "", "2", "4", ""]).run()  # 2 < 3 core coins: asked again
+    assert dotenv_values(env)["MAX_COINS"] == "4"

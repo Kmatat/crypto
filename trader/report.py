@@ -90,9 +90,26 @@ def report_text(p: dict, title: str = "📊 Performance report") -> str:
     return "\n".join(lines)
 
 
-def status_text(j: Journal, prices: dict[str, float], symbols: list[str]) -> str:
+def watchlist_text(wl: dict) -> str:
+    """Which coins are watched, and why (Telegram /watchlist)."""
+    if wl.get("ts"):
+        how = "AI scout with web research" if wl.get("source") == "claude" else "market scan"
+        lines = [f"🔭 Watchlist (updated {wl['ts'][:16].replace('T', ' ')} UTC by {how})"]
+    else:
+        lines = ["🔭 Watchlist (core coins from your settings)"]
+    if wl.get("summary"):
+        lines.append(wl["summary"])
+    lines += [f"• {s.removesuffix('USDT')}: {wl.get('reasons', {}).get(s, '')}" for s in wl["symbols"]]
+    if wl.get("avoid"):
+        lines.append("Avoiding: " + "; ".join(f"{k.removesuffix('USDT')} ({v})" for k, v in wl["avoid"].items()))
+    if wl.get("sources"):
+        lines.append("Sources: " + " , ".join(wl["sources"][:3]))
+    return "\n".join(lines)
+
+
+def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra: list[str] | None = None) -> str:
     """Open positions plus the latest decision (and its reason) for each coin."""
-    lines = ["📌 Status", f"Free cash: ${j.cash:,.2f}"]
+    lines = ["📌 Status", *(extra or []), f"Free cash: ${j.cash:,.2f}"]
     positions = j.positions()
     for sym, pos in positions.items():
         price = prices.get(sym, pos["entry_price"])

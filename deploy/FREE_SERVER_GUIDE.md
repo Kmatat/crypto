@@ -119,9 +119,19 @@ You can now close the browser. The desk keeps running on the server.
 
 ## Everyday use
 
-**From your phone (Telegram):** send `/status` to your bot to see open positions and why each coin
-was bought or skipped, or `/report` for the performance figures. Every buy, sell or failed order is
-messaged to you automatically, plus a daily report.
+**From your phone (Telegram):**
+
+| Send | You get |
+|---|---|
+| `/status` | Open positions, why each coin was bought or skipped, when the next check is, and today's Claude spend |
+| `/report` | The performance figures |
+| `/watchlist` | Which coins the desk watches, and why the scout picked each one |
+
+Messages also arrive automatically:
+- every buy, sell or failed order;
+- when the scout changes the coin list;
+- when the AI changes how often it checks;
+- a daily report.
 
 **On the server:** open Cloud Shell, run the same `ssh -i ssh-key-*.key ubuntu@YOUR_IP` line, and then:
 

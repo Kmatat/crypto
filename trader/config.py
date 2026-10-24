@@ -16,8 +16,21 @@ TESTNET_BASE_URL = "https://testnet.binance.vision"
 PUBLIC_BASE_URL = "https://data-api.binance.vision"
 
 
+SETTINGS_VERSION = "2"  # 2 = 15-minute checks + AI coin scout
+
+
 def _f(name: str, default: float) -> float:
     return float(os.getenv(name, default))
+
+
+def _b(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def check_minutes(value: str | None, settings_version: str | None) -> int:
+    """Check interval; settings saved before version 2 used a 60-minute default, now 15."""
+    minutes = int(value or 15)
+    return 15 if minutes == 60 and not settings_version else minutes
 
 
 @dataclass
@@ -30,7 +43,15 @@ class Settings:
     claude_model: str = "claude-opus-5-5"
     symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     interval: str = "1h"
-    cycle_minutes: int = 60
+    cycle_minutes: int = 15          # normal time between market checks
+    min_check_minutes: int = 5       # fastest the AI / risk rules may check
+    max_check_minutes: int = 60      # slowest the AI may check
+    auto_coins: bool = True          # let the Market Scout add coins beyond `symbols`
+    max_coins: int = 8               # most coins watched at once (core + scout picks)
+    scout_hours: float = 6           # how often the scout looks for coins
+    min_volume_musd: float = 10      # scout ignores coins with less 24h trading volume (million USD)
+    news_refresh_minutes: int = 30
+    ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
     starting_balance: float = 10_000.0
     max_position_pct: float = 0.10
     max_open_positions: int = 3
@@ -70,7 +91,15 @@ class Settings:
             claude_model=os.getenv("CLAUDE_MODEL", "claude-opus-5-5"),
             symbols=[s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()],
             interval=os.getenv("CANDLE_INTERVAL", "1h"),
-            cycle_minutes=int(os.getenv("CYCLE_MINUTES", 60)),
+            cycle_minutes=check_minutes(os.getenv("CYCLE_MINUTES"), os.getenv("SETTINGS_VERSION")),
+            min_check_minutes=int(os.getenv("MIN_CHECK_MINUTES", 5)),
+            max_check_minutes=int(os.getenv("MAX_CHECK_MINUTES", 60)),
+            auto_coins=_b("AUTO_COINS", True),
+            max_coins=int(os.getenv("MAX_COINS", 8)),
+            scout_hours=_f("SCOUT_HOURS", 6),
+            min_volume_musd=_f("MIN_VOLUME_MUSD", 10),
+            news_refresh_minutes=int(os.getenv("NEWS_REFRESH_MINUTES", 30)),
+            ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
             starting_balance=_f("STARTING_BALANCE_USDT", 10_000),
             max_position_pct=_f("MAX_POSITION_PCT", 0.10),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),

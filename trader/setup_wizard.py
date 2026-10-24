@@ -13,16 +13,21 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from .binance_client import BinanceClient, BinanceError
-from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, TESTNET_BASE_URL
+from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, SETTINGS_VERSION, TESTNET_BASE_URL, check_minutes
 from .llm import MODEL_CHOICES, ClaudeJSON
 from .notify import Telegram
 
 LAYOUT = [
+    ("Settings file format (do not change)", ["SETTINGS_VERSION"]),
     ("Trading mode: testnet = Binance demo account (fake money), simulation = paper trading", [
         "TRADING_MODE", "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET", "STARTING_BALANCE_USDT"]),
-    ("Claude AI (optional - empty key = built-in rules)", ["ANTHROPIC_API_KEY", "CLAUDE_MODEL"]),
+    ("Claude AI (optional - empty key = built-in rules). Daily budget in USD, 0 = no cap", [
+        "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "AI_DAILY_BUDGET_USD"]),
     ("Telegram alerts (optional)", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DAILY_REPORT_HOUR_UTC"]),
-    ("What to trade", ["SYMBOLS", "CANDLE_INTERVAL", "CYCLE_MINUTES"]),
+    ("What to trade: SYMBOLS are always watched; the scout may add coins up to MAX_COINS", [
+        "SYMBOLS", "AUTO_COINS", "MAX_COINS", "SCOUT_HOURS", "MIN_VOLUME_MUSD", "CANDLE_INTERVAL"]),
+    ("Timing: normal check interval, and the range the AI may choose from", [
+        "CYCLE_MINUTES", "MIN_CHECK_MINUTES", "MAX_CHECK_MINUTES", "NEWS_REFRESH_MINUTES"]),
     ("Risk limits (the Risk Manager agent enforces these)", [
         "MAX_POSITION_PCT", "MAX_OPEN_POSITIONS", "MAX_DAILY_LOSS_PCT", "MIN_CONFIDENCE",
         "STOP_LOSS_ATR", "TAKE_PROFIT_ATR"]),
@@ -30,7 +35,9 @@ LAYOUT = [
 DEFAULTS = {
     "TRADING_MODE": "testnet", "STARTING_BALANCE_USDT": "10000", "CLAUDE_MODEL": "claude-opus-5-5",
     "DAILY_REPORT_HOUR_UTC": "6", "SYMBOLS": "BTCUSDT,ETHUSDT,SOLUSDT", "CANDLE_INTERVAL": "1h",
-    "CYCLE_MINUTES": "60", "MAX_POSITION_PCT": "0.10", "MAX_OPEN_POSITIONS": "3", "MAX_DAILY_LOSS_PCT": "0.03",
+    "AI_DAILY_BUDGET_USD": "5", "AUTO_COINS": "true", "MAX_COINS": "8", "SCOUT_HOURS": "6", "MIN_VOLUME_MUSD": "10",
+    "CYCLE_MINUTES": "15", "MIN_CHECK_MINUTES": "5", "MAX_CHECK_MINUTES": "60", "NEWS_REFRESH_MINUTES": "30",
+    "MAX_POSITION_PCT": "0.10", "MAX_OPEN_POSITIONS": "3", "MAX_DAILY_LOSS_PCT": "0.03",
     "MIN_CONFIDENCE": "0.60", "STOP_LOSS_ATR": "2.0", "TAKE_PROFIT_ATR": "3.0",
 }
 
@@ -81,6 +88,9 @@ class Wizard:
         self._ask, self._ask_secret, self.say = ask, ask_secret, say
         self.old = {k: v for k, v in dotenv_values(self.env_path).items()} if self.env_path.exists() else {}
         self.v: dict[str, str] = dict(self.old)
+        if self.v.get("CYCLE_MINUTES"):  # files from before 15-minute checks: move the old 60 default to 15
+            self.v["CYCLE_MINUTES"] = str(check_minutes(self.v["CYCLE_MINUTES"], self.v.get("SETTINGS_VERSION")))
+        self.v["SETTINGS_VERSION"] = SETTINGS_VERSION
 
     # ---- small input helpers ----
     def ask(self, question: str, default: str = "") -> str:
@@ -92,15 +102,22 @@ class Wizard:
         answer = self._ask_secret(f"{question}{hint} (hidden - nothing shows while you paste): ").strip()
         return answer or current
 
-    def ask_amount(self, question: str, default: str) -> str:
+    def ask_amount(self, question: str, default: str, allow_zero: bool = False) -> str:
         while True:
             a = self.ask(question, default).replace(",", "").replace("$", "")
             try:
-                if float(a) > 0:
+                if float(a) > 0 or (allow_zero and float(a) == 0):
                     return a
             except ValueError:
                 pass
             self.say("   Please type a positive number, e.g. 5000")
+
+    def ask_int(self, question: str, default: str, low: int, high: int) -> str:
+        while True:
+            a = self.ask(question, default)
+            if a.isdigit() and low <= int(a) <= high:
+                return a
+            self.say(f"   Please type a whole number from {low} to {high}.")
 
     def yes(self, question: str, default: bool) -> bool:
         answer = self.ask(f"{question} (y/n)", "y" if default else "n").lower()
@@ -193,13 +210,18 @@ class Wizard:
         current = ids.index(self.v["CLAUDE_MODEL"]) + 1 if self.v.get("CLAUDE_MODEL") in ids else 1
         while True:
             key = self.ask_secret("   Claude API key", self.v.get("ANTHROPIC_API_KEY", ""))
-            self.say("   Which model? (cost is a rough estimate for 3 coins checked every hour)")
+            self.say("   Which model? (rough cost with checks every 15 minutes and up to 8 coins)")
             pick = self.choose("   Choose", [f"{label} - {cost}" for _, label, cost in MODEL_CHOICES], current)
             model = ids[pick - 1]
             self.say("   Checking with Claude...")
             if check_claude(model, key):
                 self.say("   ✅ Claude answered.")
                 self.v["ANTHROPIC_API_KEY"], self.v["CLAUDE_MODEL"] = key, model
+                self.say("   Spending cap: once Claude has cost this much in a day, the agents use the free rules")
+                self.say("   until midnight (UTC). This keeps the monthly bill predictable.")
+                self.v["AI_DAILY_BUDGET_USD"] = self.ask_amount(
+                    "   Daily limit for Claude in USD (0 = no limit)", self.v.get("AI_DAILY_BUDGET_USD") or "5",
+                    allow_zero=True)
                 return
             self.say("   ❌ Claude did not answer. Check the key, and that the account has credit.")
             if not self.yes("   Try again?", True):
@@ -259,17 +281,31 @@ class Wizard:
             self.say("   Please type a whole hour from 0 to 23.")
 
     def step_coins(self) -> None:
-        self.say("\nSTEP 4 of 4 - Coins")
+        self.say("\nSTEP 4 of 4 - Coins and timing")
         while True:
-            coins = self.ask("   Coins to trade, comma separated", self.v.get("SYMBOLS") or DEFAULTS["SYMBOLS"])
+            coins = self.ask("   Core coins, always watched (comma separated)", self.v.get("SYMBOLS") or DEFAULTS["SYMBOLS"])
             symbols = [c.strip().upper() for c in coins.split(",") if c.strip()]
             symbols = [s if s.endswith("USDT") else s + "USDT" for s in symbols]
             unknown = [s for s in symbols if not check_symbol(s)]
             if symbols and not unknown:
                 self.v["SYMBOLS"] = ",".join(symbols)
-                return
+                break
             self.say(f"   Binance does not list: {', '.join(unknown) or '(nothing entered)'}. "
                      "Use names like BTCUSDT or just BTC.")
+        self.say("   The Market Scout can add more coins: every 6 hours it scans all Binance coins and, with")
+        self.say("   Claude, searches the web for news to pick the most promising ones (each with a reason).")
+        auto = self.yes("   Let the scout add coins?", self.v.get("AUTO_COINS", "true").lower() != "false")
+        self.v["AUTO_COINS"] = "true" if auto else "false"
+        if auto:
+            low = len(symbols)
+            current = self.v.get("MAX_COINS") or DEFAULTS["MAX_COINS"]
+            self.v["MAX_COINS"] = self.ask_int(f"   Most coins to watch at once ({low}-20)",
+                                               current if current.isdigit() and int(current) >= low else str(low),
+                                               low, 20)
+        self.say("   How often to check the market. With Claude, the AI may check more often (down to 5 min)")
+        self.say("   when big news breaks, or less often (up to 60 min) when markets are quiet.")
+        self.v["CYCLE_MINUTES"] = self.ask_int("   Normal check interval in minutes (5-60)",
+                                               self.v.get("CYCLE_MINUTES") or DEFAULTS["CYCLE_MINUTES"], 5, 60)
 
     def offer_fresh_journal(self) -> None:
         """Changing mode or budget mid-test mixes two experiments; offer a clean start."""

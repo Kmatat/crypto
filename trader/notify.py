@@ -124,8 +124,9 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
     for r in summary:
         sym = r["symbol"]
         if "error" in r:
-            out.append((f"error:{sym}", f"⚠️ {sym}: the cycle failed - {r['error']}\n(The desk keeps running and "
-                                        f"retries next cycle. This alert repeats at most every 6 hours.)"))
+            what = "Market scout" if sym == "SCOUT" else sym
+            out.append((f"error:{sym}", f"⚠️ {what}: {r['error']}\n(The desk keeps running with the coins it has "
+                                        f"and retries. This alert repeats at most every 6 hours.)"))
             continue
         o = r.get("order")
         if not o:
@@ -150,3 +151,26 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
             out.append(("", f"🔴 SELL {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Reason: {why}\n{result}"))
     return out
+
+
+def _coin(symbol: str) -> str:
+    return symbol.removesuffix("USDT")
+
+
+def scout_message(u: dict) -> str:
+    """Alert when the Market Scout changes the watchlist."""
+    how = "AI scout with web research" if u.get("source") == "claude" else "market scan"
+    lines = [f"🔭 Watchlist updated ({how})"]
+    if u.get("summary"):
+        lines.append(u["summary"])
+    lines += [f"➕ {_coin(s)}: {u['reasons'].get(s, '')}" for s in u["added"]]
+    lines += [f"➖ {_coin(s)} (no longer watched)" for s in u["removed"]]
+    if u.get("avoid"):
+        lines.append("Avoiding: " + "; ".join(f"{_coin(k)} ({v})" for k, v in list(u["avoid"].items())[:3]))
+    lines.append("Now watching: " + ", ".join(_coin(s) for s in u["symbols"]))
+    return "\n".join(lines)
+
+
+def pace_message(pace: dict) -> str:
+    who = {"AI": "the AI", "risk": "the risk rules", "settings": "the normal setting"}.get(pace["source"], pace["source"])
+    return f"⏱️ Now checking every {pace['minutes']} min (set by {who}): {pace['reason']}"
