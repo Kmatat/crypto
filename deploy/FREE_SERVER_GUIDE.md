@@ -126,6 +126,8 @@ You can now close the browser. The desk keeps running on the server.
 | `/status` | Open positions (with 🛡️ when the stop-loss and take-profit are live on Binance), why each coin was bought or skipped, when the next check is, and today's Claude spend |
 | `/report` | The performance figures |
 | `/watchlist` | Which coins the desk watches, and why the scout picked each one |
+| `/version` | Which code version is running, and whether a newer one is waiting |
+| `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |
 
 Messages also arrive automatically:
 - every buy, sell or failed order;
@@ -143,7 +145,16 @@ Messages also arrive automatically:
 | `desk setup` | Change keys, coins, Claude or Telegram settings |
 | `desk stop` / `desk start` | Pause or resume trading |
 | `desk reset` | Start the demo again from zero (old results are kept in a backup file) |
-| `desk update` | Install the latest version of the code |
+| `desk update` | Install the latest version now (normally not needed: it happens automatically) |
+| `desk version` | Which version is running |
+
+## Updates happen by themselves
+
+When I publish improvements, your server notices within about 30 minutes, tests the new code, installs
+it, restarts the desk and sends you a Telegram message such as *"🔄 Updated to version a1b2c3d and
+restarted. What changed: ..."*. If a new version fails its tests or doesn't start, the server keeps the
+old version and tells you. You never need to open the terminal for an update; `/update` on Telegram
+installs one immediately if you don't want to wait.
 
 ## How to judge the demo after 3–4 weeks
 
@@ -166,8 +177,9 @@ Messages also arrive automatically:
 - **Binance resets the demo exchange** from time to time, roughly monthly. Balances return to
   default and sometimes the keys stop working. You'll get a Telegram alert. Create new keys at
   testnet.binance.vision, then run `desk setup`, and `desk reset` for a clean restart.
-- **The GitHub token expires** after 90 days. It's only needed for `desk update`, and the desk
-  keeps running without it.
+- **The GitHub token expires** after 90 days. It's needed only for downloading updates, and the
+  desk keeps trading without it; `/version` will mention when checks start failing. Create a new
+  token the same way, then on the server run `git -C ~/crypto-desk fetch` once and paste it.
 - **Security:** your keys are stored only on your server, in a file only your user can read. The
   Binance keys are demo keys with fake money. Never put real-money Binance keys into this demo.
 

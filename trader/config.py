@@ -52,6 +52,7 @@ class Settings:
     min_volume_musd: float = 10      # scout ignores coins with less 24h trading volume (million USD)
     news_refresh_minutes: int = 30
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
+    auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     starting_balance: float = 10_000.0
     max_position_pct: float = 0.10
     max_open_positions: int = 3
@@ -100,6 +101,7 @@ class Settings:
             min_volume_musd=_f("MIN_VOLUME_MUSD", 10),
             news_refresh_minutes=int(os.getenv("NEWS_REFRESH_MINUTES", 30)),
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
+            auto_update=_b("AUTO_UPDATE", True),
             starting_balance=_f("STARTING_BALANCE_USDT", 10_000),
             max_position_pct=_f("MAX_POSITION_PCT", 0.10),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),

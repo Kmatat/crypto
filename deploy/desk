@@ -29,8 +29,8 @@ case "${1:-help}" in
   check)   "$PY" -m trader check ;;
   reset)   $SUDO systemctl stop "$SERVICE"; "$PY" -m trader reset; $SUDO systemctl start "$SERVICE"
            echo "The demo starts fresh from now on." ;;
-  update)  git pull --ff-only && .venv/bin/pip install -q -r requirements.txt \
-             && $SUDO systemctl restart "$SERVICE" && echo "Updated to the latest version and restarted." ;;
+  update)  "$PY" -m trader update --force ;;
+  version) "$PY" -m trader version ;;
   *) cat <<'EOF'
 desk status    is it running? latest activity and performance
 desk report    full performance report
@@ -41,7 +41,8 @@ desk restart   restart
 desk setup     change keys or settings (restarts afterwards)
 desk check     test connections to Binance, news, forex, Claude, Telegram
 desk reset     start the demo from scratch (old results kept in a backup file)
-desk update    download the latest code version and restart
+desk update    install the latest code now (tested first, restarts itself; also happens automatically)
+desk version   which version is running, and whether a newer one exists
 EOF
   ;;
 esac

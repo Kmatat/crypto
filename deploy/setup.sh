@@ -85,6 +85,7 @@ ExecStart=$APP_DIR/.venv/bin/python -m trader run
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=60
+TimeoutStopSec=600
 # Sandbox: the desk only needs the network and its own data folder. If the process were ever
 # taken over (a bad dependency, a bug), it could not gain root, touch the system, or edit its own code.
 NoNewPrivileges=yes
@@ -103,8 +104,58 @@ SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 EOF
+  # --- over-the-air updates: a separate small job that may change the code (the desk itself cannot) ---
+  $SUDO tee /etc/systemd/system/$SERVICE-update.service >/dev/null <<UNIT
+[Unit]
+Description=Crypto desk: fetch, test and install code updates from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=$RUN_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/.venv/bin/python -m trader update
+Environment=PYTHONUNBUFFERED=1
+TimeoutStartSec=1800
+UNIT
+  $SUDO tee /etc/systemd/system/$SERVICE-update.timer >/dev/null <<UNIT
+[Unit]
+Description=Check for crypto desk code updates every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
+UNIT
+  $SUDO tee /etc/systemd/system/$SERVICE-update.path >/dev/null <<UNIT
+[Unit]
+Description=Install a crypto desk update as soon as it is requested on Telegram
+
+[Path]
+PathExists=$APP_DIR/data/update-requested
+Unit=$SERVICE-update.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  if [ "$(id -u)" -ne 0 ]; then  # the updater may restart the desk, and only that, without a password
+    SYSTEMCTL="$(command -v systemctl)"
+    echo "$RUN_USER ALL=(root) NOPASSWD: $SYSTEMCTL restart $SERVICE, $SYSTEMCTL start $SERVICE, $SYSTEMCTL stop $SERVICE" > /tmp/sudoers.$$
+    if $SUDO visudo -cf /tmp/sudoers.$$ >/dev/null; then
+      $SUDO install -m 440 /tmp/sudoers.$$ /etc/sudoers.d/$SERVICE
+    else
+      warn "Could not install the sudo rule for automatic restarts; updates will need 'desk update'."
+    fi
+    rm -f /tmp/sudoers.$$
+  fi
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$SERVICE" >/dev/null 2>&1
+  $SUDO systemctl enable "$SERVICE" "$SERVICE-update.timer" "$SERVICE-update.path" >/dev/null 2>&1
+  $SUDO systemctl restart "$SERVICE-update.timer" "$SERVICE-update.path"
+  .venv/bin/python -m trader update --check-only >/dev/null 2>&1 || true   # records the current version
   $SUDO systemctl restart "$SERVICE"
   sleep 3
   if systemctl is-active --quiet "$SERVICE"; then
@@ -125,4 +176,8 @@ Everyday commands (type them on this server):
   desk logs      watch the agents live (Ctrl+C to stop watching)
   desk setup     change keys or settings
   desk help      all commands
+
+Updates: when new code is published, the server installs it by itself within about 30 minutes
+(it runs the tests first and rolls back if anything fails) and tells you on Telegram.
+Send /update to your bot to install right away, or /version to see what is running.
 EOF

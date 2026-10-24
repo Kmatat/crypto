@@ -100,6 +100,24 @@ Default weights for the rule-based decision: technical 35%, forecast 25%, news 2
 
 Try it with no setup at all: `python -m trader run --offline --cycles 300 --fast`
 
+## Updates without a terminal
+
+The server keeps itself current. A small update job runs every 30 minutes (and immediately when you
+send `/update` on Telegram):
+
+1. Looks for new code on GitHub. Nothing new → nothing happens.
+2. Downloads it, installs libraries, and **runs the automated test suite first**.
+3. Only if the tests pass does it restart the desk, which finishes its current market check before
+   stopping, so an update can never interrupt an order halfway.
+4. Confirms the new version is running. If the tests fail or it crashes on start, the previous version
+   is **restored automatically**.
+5. Tells you the outcome on Telegram, with a one-line summary of what changed.
+
+`/version` shows what is running and whether a newer version exists. Set `AUTO_UPDATE=false` in `.env`
+to be notified about new versions instead of installing them automatically. Anyone who can push code to
+the GitHub repository can change what the server runs, so protect that account with two-factor
+authentication (see the security checklist in the server guide).
+
 ## Reading the report
 
 | Metric | What it tells you |
@@ -180,6 +198,7 @@ trader/
   report.py         performance metrics
   notify.py         Telegram alerts and /status, /report commands
   setup_wizard.py   the setup questions (python -m trader setup)
+  updater.py        over-the-air updates: fetch, test, restart, roll back (python -m trader update)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer

@@ -13,8 +13,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import signal
 import sys
-import time
+import threading
 
 from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
@@ -29,6 +30,8 @@ HELP_TEXT = (
     "/status - open positions and each coin's latest decision with the reason\n"
     "/report - performance so far (profit, win rate, order success)\n"
     "/watchlist - which coins the desk watches and why\n"
+    "/version - which code version is running, and whether a newer one exists\n"
+    "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
     "/help - this list\n\n"
     "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
     "changes, and a daily report."
@@ -144,6 +147,10 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
 
 def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
     lines = [f"Next check in about {bot.pace['minutes']} min: {bot.pace['reason']} ({bot.pace['source']})"]
+    from .updater import read_status
+    if (st := read_status()) and st.get("behind"):
+        lines.append("🆕 A new code version is available - send /update" if not st.get("auto_update")
+                     else "🆕 A new code version is available - it installs automatically within 30 min")
     if bot.llm:
         cap = f" of ${s.ai_daily_budget_usd:.2f} daily cap" if s.ai_daily_budget_usd else ""
         lines.append(f"Claude spend today: about ${bot.llm.spent_today:.2f}{cap}")
@@ -173,7 +180,18 @@ def cmd_run(s: Settings, args) -> None:
 
         def watched(j: Journal) -> list[str]:
             return (j.get("watchlist") or default_watchlist(s))["symbols"]
+
+        def update_now() -> str:
+            from .updater import request_update, updater_installed
+            if not updater_installed():
+                return "Automatic updates are not set up on this machine. On the server, run:  desk update"
+            request_update()
+            return "⏳ Checking GitHub for new code now. You'll get a message with the result within a few minutes."
+
+        from .updater import version_text
         tg.listen({
+            "/update": update_now,
+            "/version": version_text,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price))),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
                                                                      status_extra(bot, s))),
@@ -185,8 +203,10 @@ def cmd_run(s: Settings, args) -> None:
     limit = 1 if args.once else args.cycles
     n = 0
     last_minutes = s.cycle_minutes
+    stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
-        while True:
+        while not stop.is_set():
             n += 1
             try:
                 summary = bot.run_cycle()
@@ -213,10 +233,12 @@ def cmd_run(s: Settings, args) -> None:
             if not args.quiet:
                 print(f"Next check in {bot.pace['minutes']} min: {bot.pace['reason']} ({bot.pace['source']})")
                 sys.stdout.flush()
-            if not args.fast:
-                time.sleep(bot.pace["minutes"] * 60)
+            if not args.fast and stop.wait(bot.pace["minutes"] * 60):
+                break
     except KeyboardInterrupt:
         print("\nStopped by user.")
+    if stop.is_set():
+        print("Stopping after finishing the current check (restart or update).")
     print_report(performance(bot.journal, bot.last_price))
 
 
@@ -234,6 +256,10 @@ def main() -> None:
     sub.add_parser("check")
     sub.add_parser("setup")
     sub.add_parser("reset")
+    sub.add_parser("version")
+    upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
+    upd.add_argument("--check-only", action="store_true")
+    upd.add_argument("--force", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -241,6 +267,13 @@ def main() -> None:
         from .setup_wizard import run_wizard
         run_wizard()
         return
+    if args.cmd == "version":
+        from .updater import version_text
+        print(version_text())
+        return
+    if args.cmd == "update":
+        from .updater import main as update_main
+        sys.exit(update_main(sys.argv[2:]))
     s = Settings.load(offline=getattr(args, "offline", False))
     if args.cmd == "check":
         sys.exit(1 if cmd_check(s) else 0)
