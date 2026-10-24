@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
+ROOT = Path(__file__).resolve().parent.parent
+ENV_PATH = ROOT / ".env"
+
 TESTNET_BASE_URL = "https://testnet.binance.vision"
-# Public market data (prices/candles) - no account needed.
-PUBLIC_BASE_URL = "https://api.binance.com"
+# Binance's public market-data-only service: real prices/candles, no account needed,
+# and not blocked by country (unlike trading endpoints).
+PUBLIC_BASE_URL = "https://data-api.binance.vision"
 
 
 def _f(name: str, default: float) -> float:
@@ -33,7 +38,10 @@ class Settings:
     min_confidence: float = 0.60
     stop_loss_atr: float = 2.0
     take_profit_atr: float = 3.0
-    db_path: str = "data/journal.db"
+    db_path: str = str(ROOT / "data" / "journal.db")
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
+    daily_report_hour_utc: int = 6
 
     @property
     def use_claude(self) -> bool:
@@ -41,13 +49,18 @@ class Settings:
 
     @classmethod
     def load(cls, offline: bool = False) -> "Settings":
-        load_dotenv()
+        load_dotenv(ENV_PATH)
         mode = os.getenv("TRADING_MODE", "simulation").strip().lower()
         if mode not in ("simulation", "testnet"):
             raise SystemExit(
                 f"TRADING_MODE={mode!r} is not allowed. This phase supports only "
                 "'simulation' or 'testnet' (no real money)."
             )
+        db_path = Path(os.getenv("JOURNAL_DB", "data/journal.db"))
+        if not db_path.is_absolute():
+            db_path = ROOT / db_path
+        if offline:
+            db_path = db_path.with_name(db_path.stem + "_offline" + db_path.suffix)
         return cls(
             mode=mode,
             offline=offline,
@@ -65,5 +78,8 @@ class Settings:
             min_confidence=_f("MIN_CONFIDENCE", 0.60),
             stop_loss_atr=_f("STOP_LOSS_ATR", 2.0),
             take_profit_atr=_f("TAKE_PROFIT_ATR", 3.0),
-            db_path=os.getenv("JOURNAL_DB", "data/journal.db").replace(".db", "_offline.db" if offline else ".db"),
+            db_path=str(db_path),
+            telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            daily_report_hour_utc=int(os.getenv("DAILY_REPORT_HOUR_UTC", 6)),
         )

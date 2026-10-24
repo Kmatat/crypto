@@ -13,6 +13,16 @@ import anthropic
 
 log = logging.getLogger(__name__)
 
+# Models that accept server-side refusal fallbacks ("fallbacks": "default").
+FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+
+# Choices offered by the setup wizard: (model id, label, rough monthly cost at default settings)
+MODEL_CHOICES = [
+    ("claude-opus-5-5", "Claude Opus 5.5 - best judgement", "about $60/month"),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5 - balanced", "about $30/month"),
+    ("claude-haiku-5-5", "Claude Haiku 5.5 - fastest, cheapest", "about $2/month"),
+]
+
 
 class ClaudeJSON:
     def __init__(self, model: str, api_key: str):
@@ -20,17 +30,20 @@ class ClaudeJSON:
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3, timeout=120)
 
     def ask(self, system: str, prompt: str, schema: dict, effort: str = "medium") -> dict | None:
+        params = dict(
+            model=self.model,
+            max_tokens=16000,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+        )
         try:
-            resp = self.client.beta.messages.create(
-                model=self.model,
-                max_tokens=16000,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+            if self.model in FALLBACK_MODELS:
                 # If a safety classifier declines, re-run on Anthropic's recommended fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
+                resp = self.client.beta.messages.create(
+                    **params, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            else:
+                resp = self.client.messages.create(**params)
         except anthropic.RateLimitError:
             log.warning("Claude rate limited - using rule-based fallback")
             return None

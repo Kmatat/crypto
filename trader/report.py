@@ -9,6 +9,8 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
     orders = j.db.execute("SELECT ok, COUNT(*) n FROM orders GROUP BY ok").fetchall()
     ok = sum(r["n"] for r in orders if r["ok"])
     total_orders = sum(r["n"] for r in orders)
+    gaps = [abs(r["avg_price"] / r["market_price"] - 1) * 100 for r in j.db.execute(
+        "SELECT avg_price, market_price FROM orders WHERE ok=1 AND market_price > 0 AND avg_price > 0")]
     trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades ORDER BY id")]
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
@@ -35,6 +37,7 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
         "orders_sent": total_orders,
         "orders_filled": ok,
         "execution_success_rate_pct": round(ok / total_orders * 100, 1) if total_orders else None,
+        "avg_price_gap_pct": round(sum(gaps) / len(gaps), 3) if gaps else None,
         "closed_trades": len(trades),
         "win_rate_pct": round(len(wins) / len(trades) * 100, 1) if trades else None,
         "avg_win": round(gross_win / len(wins), 2) if wins else None,
@@ -48,6 +51,7 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
 
 EXPLAIN = {
     "execution_success_rate_pct": "orders the exchange confirmed as FILLED (technical reliability)",
+    "avg_price_gap_pct": "how far demo fill prices were from the real market (small = demo results are realistic)",
     "win_rate_pct": "closed trades that made money",
     "profit_factor": "money won / money lost; above 1.0 = profitable overall, 1.5+ is good",
     "max_drawdown_pct": "worst drop from a peak - how painful the bad stretch was",
@@ -60,3 +64,53 @@ def print_report(p: dict) -> None:
         note = f"   <- {EXPLAIN[k]}" if k in EXPLAIN else ""
         print(f"{k:28s} {v}{note}")
     print("================================================\n")
+
+
+def _pct(v) -> str:
+    return "n/a" if v is None else f"{v}%"
+
+
+def report_text(p: dict, title: str = "📊 Performance report") -> str:
+    """Short, phone-friendly version of the report (used for Telegram)."""
+    lines = [
+        title,
+        f"Balance: ${p['equity']:,.2f} ({p['return_pct']:+.2f}% vs ${p['starting_balance']:,.0f} start)",
+        f"Profit/loss: closed ${p['realized_pnl']:+,.2f} · open ${p['unrealized_pnl']:+,.2f}",
+        f"Orders filled: {p['orders_filled']}/{p['orders_sent']} ({_pct(p['execution_success_rate_pct'])})",
+        f"Closed trades: {p['closed_trades']} · win rate {_pct(p['win_rate_pct'])}"
+        + (f" · profit factor {p['profit_factor']}" if p["profit_factor"] is not None else ""),
+        f"Worst drop from peak: {p['max_drawdown_pct']}%",
+    ]
+    if p["avg_price_gap_pct"] is not None:
+        lines.append(f"Demo vs real price gap: {p['avg_price_gap_pct']}%")
+    if p["open_positions"]:
+        lines.append("Holding: " + ", ".join(p["open_positions"]))
+    d = p["decisions"]
+    lines.append(f"Decisions so far: {d.get('BUY', 0)} buy · {d.get('SELL', 0)} sell · {d.get('HOLD', 0)} hold")
+    return "\n".join(lines)
+
+
+def status_text(j: Journal, prices: dict[str, float], symbols: list[str]) -> str:
+    """Open positions plus the latest decision (and its reason) for each coin."""
+    lines = ["📌 Status", f"Free cash: ${j.cash:,.2f}"]
+    positions = j.positions()
+    for sym, pos in positions.items():
+        price = prices.get(sym, pos["entry_price"])
+        pnl = price * pos["qty"] - pos["cost"]
+        lines.append(f"• {sym}: bought ${pos['entry_price']:,.4g}, now ${price:,.4g} ({pnl:+,.2f} USDT) "
+                     f"· stop ${pos['stop_loss']:,.4g} · target ${pos['take_profit']:,.4g}")
+    if not positions:
+        lines.append("No open positions.")
+    lines.append("")
+    lines.append("Latest decisions:")
+    found = False
+    for sym in symbols:
+        r = j.db.execute("SELECT ts, action, confidence, reasoning, risk_reason FROM decisions WHERE symbol=? "
+                         "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+        if r:
+            found = True
+            lines.append(f"• {sym} {r['action']} ({r['confidence']:.0%}) at {r['ts'][11:16]} UTC: {r['reasoning']}"
+                         f" [risk: {r['risk_reason']}]")
+    if not found:
+        lines.append("None yet - the first check is still running. Try again in a minute.")
+    return "\n".join(lines)

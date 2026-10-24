@@ -128,6 +128,35 @@ def test_testnet_broker_rounds_and_accounts_for_fees():
     assert fake.sent[1] == ("SELL", 0.01)
 
 
+def test_testnet_partial_fill_is_kept_and_bnb_fee_not_mispriced():
+    class Thin(FakeTestnet):
+        def market_order(self, symbol, side, qty, cid):
+            half = qty / 2  # thin book: half filled, rest expired
+            return {"status": "EXPIRED", "orderId": 2, "executedQty": str(half), "cummulativeQuoteQty": str(half * 50_000),
+                    "fills": [{"price": "50000", "qty": str(half), "commission": "0.01", "commissionAsset": "BNB"}]}
+
+        def get_order(self, symbol, cid):
+            raise AssertionError("final status was already known")
+    res = ExecutionAgent(TestnetBroker(Thin())).execute("BUY", "BTCUSDT", quote_amount=1000)
+    assert res["ok"] and res["partial"] and res["qty"] == pytest.approx(0.01)
+    assert res["fee_quote"] == 0  # BNB fee is not valued at the BTC price
+
+    j = Journal(":memory:", 10_000)
+    j.open_position("BTCUSDT", {"qty": 1.0, "avg_price": 100.0, "quote": 100.0}, 90, 120)
+    trade = j.close_position("BTCUSDT", {"qty": 0.4, "avg_price": 110.0, "quote": 44.0}, "signal")
+    assert trade["cost"] == pytest.approx(40) and trade["pnl"] == pytest.approx(4)
+    left = j.positions()["BTCUSDT"]
+    assert left["qty"] == pytest.approx(0.6) and left["cost"] == pytest.approx(60)
+
+
+def test_testnet_order_with_nothing_filled_is_a_failure():
+    class Empty(FakeTestnet):
+        def market_order(self, symbol, side, qty, cid):
+            return {"status": "EXPIRED", "orderId": 3, "executedQty": "0", "cummulativeQuoteQty": "0", "fills": []}
+    res = ExecutionAgent(TestnetBroker(Empty())).execute("BUY", "BTCUSDT", quote_amount=1000)
+    assert not res["ok"] and "nothing filled" in res["error"]
+
+
 def test_execution_reports_failures_without_crashing():
     class Bad:
         def buy(self, *a):

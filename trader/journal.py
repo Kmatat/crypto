@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   combined_score REAL, reasoning TEXT, risk_approved INTEGER, risk_reason TEXT, reports TEXT);
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY, ts TEXT, symbol TEXT, side TEXT, ok INTEGER, order_id TEXT, qty REAL,
-  avg_price REAL, quote REAL, fee REAL, reason TEXT, error TEXT);
+  avg_price REAL, quote REAL, fee REAL, reason TEXT, error TEXT, market_price REAL);
 CREATE TABLE IF NOT EXISTS positions (
   symbol TEXT PRIMARY KEY, qty REAL, entry_price REAL, cost REAL, stop_loss REAL, take_profit REAL, opened_at TEXT);
 CREATE TABLE IF NOT EXISTS closed_trades (
@@ -35,9 +35,17 @@ class Journal:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         if self.get("cash") is None:
             self.set("cash", starting_balance)
             self.set("starting_balance", starting_balance)
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the first release to older journal files."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(orders)")}
+        if "market_price" not in cols:
+            self.db.execute("ALTER TABLE orders ADD COLUMN market_price REAL")
+            self.db.commit()
 
     # ---- key/value state ----
     def get(self, key: str):
@@ -62,14 +70,21 @@ class Journal:
         self.set("cash", self.cash - fill["quote"])
 
     def close_position(self, symbol: str, fill: dict, reason: str) -> dict:
+        """Record a sale. A partial sale (thin testnet order book) keeps the rest of the position open."""
         p = self.positions()[symbol]
-        pnl = fill["quote"] - p["cost"]
+        sold = min(1.0, fill["qty"] / p["qty"]) if p["qty"] else 1.0
+        cost = p["cost"] * sold
+        pnl = fill["quote"] - cost
         trade = {"symbol": symbol, "opened_at": p["opened_at"], "closed_at": now(), "entry_price": p["entry_price"],
-                 "exit_price": fill["avg_price"], "qty": fill["qty"], "cost": p["cost"], "proceeds": fill["quote"],
-                 "pnl": pnl, "pnl_pct": pnl / p["cost"] * 100, "exit_reason": reason}
+                 "exit_price": fill["avg_price"], "qty": fill["qty"], "cost": cost, "proceeds": fill["quote"],
+                 "pnl": pnl, "pnl_pct": pnl / cost * 100, "exit_reason": reason}
         self.db.execute("INSERT INTO closed_trades (symbol, opened_at, closed_at, entry_price, exit_price, qty, cost,"
                         " proceeds, pnl, pnl_pct, exit_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)", tuple(trade.values()))
-        self.db.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        if sold >= 0.999:  # leftover dust from rounding to the exchange's step size is ignored
+            self.db.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        else:
+            self.db.execute("UPDATE positions SET qty = qty - ?, cost = cost - ? WHERE symbol=?",
+                            (fill["qty"], cost, symbol))
         self.set("cash", self.cash + fill["quote"])
         return trade
 
@@ -84,10 +99,11 @@ class Journal:
 
     def log_order(self, symbol: str, side: str, result: dict, reason: str) -> None:
         self.db.execute(
-            "INSERT INTO orders (ts, symbol, side, ok, order_id, qty, avg_price, quote, fee, reason, error)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO orders (ts, symbol, side, ok, order_id, qty, avg_price, quote, fee, reason, error,"
+            " market_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (now(), symbol, side, int(result["ok"]), result.get("order_id"), result.get("qty"),
-             result.get("avg_price"), result.get("quote"), result.get("fee_quote"), reason, result.get("error")))
+             result.get("avg_price"), result.get("quote"), result.get("fee_quote"), reason, result.get("error"),
+             result.get("market_price")))
         self.db.commit()
 
     def log_equity(self, equity: float) -> None:

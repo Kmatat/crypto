@@ -1,12 +1,16 @@
 """Orchestrator: runs one trading cycle across all agents.
 
 For every coin, each cycle:
-  1. Market Data   -> latest candles
+  1. Market Data   -> latest candles (real Binance market prices)
   2. Risk exits    -> sell immediately if stop-loss / take-profit was hit
   3. Technical, Prediction, News, Forex agents -> independent reports
   4. Decision agent -> BUY / SELL / HOLD with confidence and reasoning
   5. Risk Manager  -> approve or veto, set size + stop-loss + take-profit
   6. Execution     -> place the order, confirm it FILLED, record it
+
+Analysis always uses real market data. In testnet mode the orders go to the
+Binance Spot Testnet, whose prices can drift from the real market; each order
+records the real price next to the fill price so the report can show the gap.
 """
 from __future__ import annotations
 
@@ -34,15 +38,8 @@ class Orchestrator:
         self.journal = journal or Journal(s.db_path, s.starting_balance)
         llm = ClaudeJSON(s.claude_model, s.anthropic_key) if s.use_claude else None
 
-        if s.offline:
-            data_client = None
-        elif s.mode == "testnet":
-            # Testnet has its own (thinner) order book; use its prices so fills match analysis.
-            data_client = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret)
-        else:
-            data_client = BinanceClient(PUBLIC_BASE_URL)
-
-        self.market = MarketDataAgent(data_client, s.interval, offline=s.offline)
+        market_client = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
+        self.market = MarketDataAgent(market_client, s.interval, offline=s.offline)
         self.technical = TechnicalAnalysisAgent()
         self.prediction = PredictionAgent()
         self.news = NewsAgent(llm, offline=s.offline)
@@ -50,7 +47,10 @@ class Orchestrator:
         self.decision = DecisionAgent(llm)
         self.risk = RiskManagerAgent(s)
         self.last_price: dict[str, float] = {}
-        broker = TestnetBroker(data_client) if s.mode == "testnet" else PaperBroker(lambda sym: self.last_price[sym])
+        if s.mode == "testnet" and not s.offline:
+            broker = TestnetBroker(BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret))
+        else:
+            broker = PaperBroker(lambda sym: self.last_price[sym])
         self.execution = ExecutionAgent(broker)
 
     # ---- portfolio helpers ----
@@ -66,8 +66,16 @@ class Orchestrator:
     # ---- the cycle ----
     def run_cycle(self) -> list[dict]:
         coins = [sym.removesuffix("USDT") for sym in self.s.symbols]
-        news = self.news.run(coins)
-        forex = self.forex.run()
+        try:
+            news = self.news.run(coins)
+        except Exception:
+            log.exception("News agent failed - treating news as neutral")
+            news = {"_mood": "news agent error"}
+        try:
+            forex = self.forex.run()
+        except Exception:
+            log.exception("Forex agent failed - treating macro as neutral")
+            forex = ForexAgent._neutral("forex agent error")
         summary = []
         for sym in self.s.symbols:
             try:
@@ -103,16 +111,18 @@ class Orchestrator:
 
         if verdict["approved"] and decision["action"] == "BUY":
             fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
+            fill["market_price"] = price
             self.journal.log_order(sym, "BUY", fill, "signal")
             if fill["ok"]:
                 self.journal.open_position(sym, fill, verdict["stop_loss"], verdict["take_profit"])
-            result["order"] = fill
+            result.update(order=fill, stop_loss=verdict["stop_loss"], take_profit=verdict["take_profit"])
         elif verdict["approved"] and decision["action"] == "SELL":
             result.update(self._sell(sym, position, "signal"))
         return result
 
     def _sell(self, sym: str, position: dict, reason: str) -> dict:
         fill = self.execution.execute("SELL", sym, qty=position["qty"])
+        fill["market_price"] = self.last_price[sym]
         self.journal.log_order(sym, "SELL", fill, reason)
         out = {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
         if fill["ok"]:

@@ -69,30 +69,36 @@ class TestnetBroker:
             # exchange by our own ID instead of blindly re-sending (avoids double orders).
             time.sleep(2)
             resp = self.client.get_order(symbol, client_id)
-        if resp.get("status") != "FILLED":
-            resp = self._wait_filled(symbol, client_id)
+        if resp.get("status") in (None, "NEW", "PARTIALLY_FILLED"):  # still working: wait for the final state
+            resp = self._wait_done(symbol, client_id)
         exec_qty = float(resp["executedQty"])
+        if exec_qty <= 0:
+            raise BinanceError(f"order ended as {resp['status']} with nothing filled")
         quote = float(resp["cummulativeQuoteQty"])
-        fills = resp.get("fills", [])
-        fee_quote = sum(float(x["commission"]) * (float(x["price"]) if x["commissionAsset"] != "USDT" else 1)
-                        for x in fills)
-        if side == "BUY":
-            base = symbol.removesuffix("USDT")
-            exec_qty -= sum(float(x["commission"]) for x in fills if x["commissionAsset"] == base)
-        else:
-            quote -= sum(float(x["commission"]) for x in fills if x["commissionAsset"] == "USDT")
-        return {"status": resp["status"], "order_id": str(resp["orderId"]), "qty": exec_qty,
-                "avg_price": float(resp["cummulativeQuoteQty"]) / float(resp["executedQty"]),
-                "quote": quote, "fee_quote": fee_quote}
+        avg_price = quote / exec_qty
+        base = symbol.removesuffix("USDT")
+        fee_quote = 0.0
+        for x in resp.get("fills", []):
+            c = float(x["commission"])
+            if x["commissionAsset"] == "USDT":
+                fee_quote += c
+                if side == "SELL":
+                    quote -= c
+            elif x["commissionAsset"] == base:
+                fee_quote += c * float(x["price"])
+                if side == "BUY":
+                    exec_qty -= c
+            # fees paid in another coin (e.g. BNB discount) don't change our USDT or coin amounts
+        # A MARKET order on the thin testnet book can fill partly and expire; keep what we actually got.
+        return {"status": "FILLED", "partial": resp["status"] != "FILLED", "order_id": str(resp["orderId"]),
+                "qty": exec_qty, "avg_price": avg_price, "quote": quote, "fee_quote": fee_quote}
 
-    def _wait_filled(self, symbol: str, client_id: str, attempts: int = 5) -> dict:
+    def _wait_done(self, symbol: str, client_id: str, attempts: int = 5) -> dict:
         for _ in range(attempts):
             time.sleep(1)
             o = self.client.get_order(symbol, client_id)
-            if o["status"] in ("FILLED", "CANCELED", "REJECTED", "EXPIRED"):
+            if o["status"] in ("FILLED", "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH"):
                 break
-        if o["status"] != "FILLED":
-            raise BinanceError(f"order {client_id} ended as {o['status']}")
         return o
 
 

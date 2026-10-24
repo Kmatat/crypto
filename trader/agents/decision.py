@@ -67,8 +67,13 @@ class DecisionAgent:
         if score <= SELL_THRESHOLD and holding:
             return {"action": "SELL", "confidence": confidence, "source": "rules",
                     "reasoning": f"Weighted signal score {score:+.2f} is below the sell threshold {SELL_THRESHOLD}."}
-        return {"action": "HOLD", "confidence": confidence, "source": "rules",
-                "reasoning": f"Weighted signal score {score:+.2f} is not strong enough to act."}
+        if score <= SELL_THRESHOLD:
+            why = f"Signals are negative (score {score:+.2f}); staying in cash - we only buy on positive signals."
+        elif score >= BUY_THRESHOLD:
+            why = f"Signals are still positive (score {score:+.2f}); keeping the position."
+        else:
+            why = f"Signals are mixed (score {score:+.2f}); waiting for a clearer move."
+        return {"action": "HOLD", "confidence": confidence, "source": "rules", "reasoning": why}
 
     def _claude(self, symbol: str, reports: dict, holding: bool, score: float) -> dict | None:
         prompt = (

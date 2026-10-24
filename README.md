@@ -8,6 +8,9 @@ recorded so you can judge performance before any real money is involved.
 > **Real-money trading is turned off on purpose.** The only allowed modes are `simulation`
 > and `testnet`. If `TRADING_MODE` is set to anything else, the program refuses to start.
 
+**Quickest start: run it 24/7 on a free server, with alerts on your phone.**
+Follow the click-by-click guide in [deploy/FREE_SERVER_GUIDE.md](deploy/FREE_SERVER_GUIDE.md).
+
 ---
 
 ## How the desk works
@@ -49,19 +52,20 @@ Default weights for the rule-based decision: technical 35%, forecast 25%, news 2
 | Mode | Needs | Prices | Orders | Purpose |
 |---|---|---|---|---|
 | `run --offline` | nothing | Made-up (random walk) | Simulated locally | Check that the machinery works. **The profit numbers mean nothing** |
-| `TRADING_MODE=simulation` | internet | Real Binance prices | Simulated locally (paper trading) | Test the strategy on real markets with no account |
-| `TRADING_MODE=testnet` | free Binance Testnet keys | Binance Testnet | **Real API orders, fake money** | Full rehearsal: the same API calls a live account would use |
+| `TRADING_MODE=simulation` | internet | Real Binance prices | Simulated locally (paper trading) | Test the strategy on real markets with no account. Works from any country |
+| `TRADING_MODE=testnet` | free Binance Testnet keys | Real Binance prices for analysis | **Real API orders on the testnet, fake money** | Full rehearsal: the same API calls a live account would use. Needs a country Binance supports |
 
 ## Setup (about 10 minutes)
 
 1. Install Python 3.10 or newer, then run:
    ```bash
    pip install -r requirements.txt
-   cp .env.example .env
+   python -m trader setup
    ```
-2. **Get demo-account keys:** go to <https://testnet.binance.vision>, log in with GitHub, and
-   click *Generate HMAC_SHA256 Key*. Put the key and secret into `.env`, then set `TRADING_MODE=testnet`.
-3. *(Optional, recommended)* add an `ANTHROPIC_API_KEY` to `.env` so Claude reads the news and makes the final decision.
+2. The setup asks a few questions and checks each key right away: trading mode, Binance demo
+   keys (from <https://testnet.binance.vision> → *Generate HMAC_SHA256 Key*), Claude (optional)
+   and Telegram alerts (optional). It saves everything in `.env`. Run it again any time to change something.
+3. *(Optional, recommended)* add Claude so it reads the news and makes the final decision with a written reason.
 4. Check that every connection works:
    ```bash
    python -m trader check
@@ -80,6 +84,7 @@ Try it with no setup at all: `python -m trader run --offline --cycles 300 --fast
 | Metric | What it tells you |
 |---|---|
 | `execution_success_rate_pct` | Share of orders Binance confirmed as filled. **This is the "all trades successful" number**, and it should be 100% |
+| `avg_price_gap_pct` | How far demo fill prices were from the real market. Small (under ~0.2%) means the demo results are realistic |
 | `win_rate_pct` | Share of closed trades that made money |
 | `profit_factor` | Money won divided by money lost. Above 1.0 means profitable; 1.5 or more is good |
 | `max_drawdown_pct` | The worst drop from a high point, i.e. how painful the bad stretch was |
@@ -105,11 +110,12 @@ There are two different kinds of success:
 
 ## Known challenges and limitations
 
-- **Location restrictions.** Binance blocks some countries, including the US, and many cloud
-  servers. Run this from a computer or server in a location Binance supports.
+- **Location restrictions.** Real prices come from Binance's public market-data service, which
+  works from anywhere. Demo *orders* are blocked from some countries, including the US, and from
+  many US cloud servers. The free server guide uses Frankfurt, Germany.
 - **The testnet isn't the real market.** It has thinner order books, its prices can drift from
-  the real market, and Binance sometimes resets testnet balances. Expect results to differ somewhat
-  when you go live.
+  the real market, and Binance resets it from time to time. Analysis uses real prices, and every
+  order records the real price next to the demo fill price, so the report shows the gap.
 - **Spot only, no short selling.** The desk only makes money when prices rise. In a falling
   market it stays in cash, which is by design.
 - **Forex data is daily** (European Central Bank rates), so it describes the general backdrop,
@@ -117,8 +123,9 @@ There are two different kinds of success:
 - **Simple forecasts.** The Forecaster is a transparent trend model, not a black box. It's
   one vote among several, and you shouldn't treat it as a crystal ball.
 - **AI cost.** With Claude enabled, each cycle makes about one call per coin plus one for the
-  news, so roughly 100 calls a day on hourly cycles with 3 coins. Without a key, everything still
-  works using the rules.
+  news, so roughly 100 calls a day on hourly cycles with 3 coins. Rough monthly cost: Opus 5.5
+  about $60, Sonnet 5.5 about $30, Haiku 5.5 about $2. Without a key, everything still works,
+  for free, using the rules.
 - **Before going live** you need at least several weeks of testnet results across different
   market conditions, a review of the journal, and an explicit code change to allow live mode.
 
@@ -132,5 +139,11 @@ trader/
   llm.py            Claude calls with structured (JSON) answers
   journal.py        SQLite record of everything
   report.py         performance metrics
+  notify.py         Telegram alerts and /status, /report commands
+  setup_wizard.py   the setup questions (python -m trader setup)
+deploy/
+  FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
+  setup.sh          one-command server installer
+  desk              everyday server commands (desk status, desk report, ...)
 tests/         automated tests (python -m pytest)
 ```
