@@ -128,6 +128,10 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
             out.append((f"error:{sym}", f"⚠️ {what}: {r['error']}\n(The desk keeps running with the coins it has "
                                         f"and retries. This alert repeats at most every 6 hours.)"))
             continue
+        if err := r.get("protect_error"):
+            out.append((f"protect:{sym}", f"🛡️ Could not place the stop-loss / take-profit for {sym} on Binance: {err}\n"
+                                          f"The desk checks this coin every 5 minutes itself meanwhile and keeps "
+                                          f"retrying. (Repeats at most every 6 hours.)"))
         o = r.get("order")
         if not o:
             continue
@@ -139,15 +143,22 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
                 hint = "\nThe testnet account is short of funds (Binance resets testnet balances from time to time)."
             out.append((f"order:{sym}:{r['action']}", f"❌ {r['action']} {sym} FAILED: {o['error']}{hint}"))
         elif r["action"] == "BUY":
+            shield = {"exchange": " · 🛡️ both placed on Binance", "emulated": " · 🛡️ simulated exchange orders"}.get(
+                r.get("protected"), "")
             out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
-                            f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}\n"
+                            f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}{shield}\n"
                             f"Confidence {r['confidence']:.0%}. Why: {r['reasoning']}"))
         else:
             t = r.get("trade") or {}
             result = f"{'✅ Profit' if t.get('pnl', 0) > 0 else '🔻 Loss'} {t.get('pnl', 0):+,.2f} USDT " \
                      f"({t.get('pnl_pct', 0):+.2f}%)" if t else ""
             why = {"stop-loss": "stop-loss hit (limits the loss)", "take-profit": "take-profit target reached",
-                   "signal": "the agents' signal turned negative"}.get(r.get("reason"), r.get("reason", ""))
+                   "signal": "the agents' signal turned negative",
+                   "stop-loss (exchange)": "stop-loss order fired on Binance (instant protection)",
+                   "take-profit (exchange)": "take-profit order filled on Binance",
+                   "stop-loss (emulated)": "stop-loss hit between checks (simulated exchange order)",
+                   "take-profit (emulated)": "take-profit hit between checks (simulated exchange order)",
+                   }.get(r.get("reason"), r.get("reason", ""))
             out.append(("", f"🔴 SELL {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Reason: {why}\n{result}"))
     return out

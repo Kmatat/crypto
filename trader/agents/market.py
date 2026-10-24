@@ -24,6 +24,20 @@ class MarketDataAgent:
             return self._synthetic_candles(symbol, limit)
         return self.client.klines(symbol, self.interval, limit)
 
+    def range_since(self, symbol: str, since_ms: int) -> tuple[float, float, int] | None:
+        """(lowest, highest, time of the last minute) traded since `since_ms` - the price path
+        between two checks, used to emulate exchange-side stop orders in paper trading."""
+        if self.offline or self.client is None:
+            series = self._synthetic.get(symbol)
+            if not series:
+                return None
+            last = series[-1]  # offline: the newest synthetic candle is "what happened since the last check"
+            return last["low"], last["high"], last["time"]
+        rows = self.client.klines(symbol, "1m", limit=1000, start_ms=since_ms)
+        if not rows:
+            return None
+        return min(r["low"] for r in rows), max(r["high"] for r in rows), rows[-1]["time"]
+
     def _synthetic_candles(self, symbol: str, limit: int) -> list[dict]:
         """Random-walk prices for offline testing. Each call advances one candle."""
         series = self._synthetic.get(symbol)

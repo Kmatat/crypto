@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY, ts TEXT, symbol TEXT, side TEXT, ok INTEGER, order_id TEXT, qty REAL,
   avg_price REAL, quote REAL, fee REAL, reason TEXT, error TEXT, market_price REAL);
 CREATE TABLE IF NOT EXISTS positions (
-  symbol TEXT PRIMARY KEY, qty REAL, entry_price REAL, cost REAL, stop_loss REAL, take_profit REAL, opened_at TEXT);
+  symbol TEXT PRIMARY KEY, qty REAL, entry_price REAL, cost REAL, stop_loss REAL, take_profit REAL, opened_at TEXT,
+  protected TEXT DEFAULT 'none', protection TEXT);
 CREATE TABLE IF NOT EXISTS closed_trades (
   id INTEGER PRIMARY KEY, symbol TEXT, opened_at TEXT, closed_at TEXT, entry_price REAL, exit_price REAL,
   qty REAL, cost REAL, proceeds REAL, pnl REAL, pnl_pct REAL, exit_reason TEXT);
@@ -45,7 +46,11 @@ class Journal:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(orders)")}
         if "market_price" not in cols:
             self.db.execute("ALTER TABLE orders ADD COLUMN market_price REAL")
-            self.db.commit()
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(positions)")}
+        if "protected" not in cols:  # exchange-side stop-loss / take-profit orders
+            self.db.execute("ALTER TABLE positions ADD COLUMN protected TEXT DEFAULT 'none'")
+            self.db.execute("ALTER TABLE positions ADD COLUMN protection TEXT")
+        self.db.commit()
 
     # ---- key/value state ----
     def get(self, key: str):
@@ -62,12 +67,25 @@ class Journal:
 
     # ---- positions ----
     def positions(self) -> dict[str, dict]:
-        return {r["symbol"]: dict(r) for r in self.db.execute("SELECT * FROM positions")}
+        out = {}
+        for r in self.db.execute("SELECT * FROM positions"):
+            p = dict(r)
+            p["protected"] = p.get("protected") or "none"
+            p["protection"] = json.loads(p["protection"]) if p.get("protection") else None
+            out[p["symbol"]] = p
+        return out
 
     def open_position(self, symbol: str, fill: dict, stop: float, take: float) -> None:
-        self.db.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+        self.db.execute("INSERT INTO positions (symbol, qty, entry_price, cost, stop_loss, take_profit, opened_at)"
+                        " VALUES (?,?,?,?,?,?,?)",
                         (symbol, fill["qty"], fill["avg_price"], fill["quote"], stop, take, now()))
         self.set("cash", self.cash - fill["quote"])
+
+    def set_protection(self, symbol: str, protection: dict | None, state: str) -> None:
+        """state: exchange (OCO live on Binance) | emulated (paper) | partial (one leg part-filled) | none."""
+        self.db.execute("UPDATE positions SET protected=?, protection=? WHERE symbol=?",
+                        (state, json.dumps(protection) if protection else None, symbol))
+        self.db.commit()
 
     def close_position(self, symbol: str, fill: dict, reason: str) -> dict:
         """Record a sale. A partial sale (thin testnet order book) keeps the rest of the position open."""

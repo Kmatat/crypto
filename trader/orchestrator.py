@@ -3,14 +3,18 @@
 Each cycle:
   0. Market Scout  -> every few hours, refresh which coins to watch (AI web research)
   1. Market Data   -> latest candles for every watched coin (real Binance market prices)
-  2. Risk exits    -> sell immediately if stop-loss / take-profit was hit
+  2. Protection    -> for each position: did the exchange-side stop-loss / take-profit
+                      (OCO pair) fire since the last check? Record the exit. Positions
+                      without exchange protection get the desk-side exit check and a
+                      new attempt to protect them
   3. News (+ pace), Forex, Technical, Prediction agents -> independent reports
   4. Decision agent -> BUY / SELL / HOLD with confidence and reasoning
   5. Risk Manager  -> approve or veto; buys are ranked so the strongest signals
                       get the limited position slots first
-  6. Execution     -> place the order, confirm it FILLED, record it
-  7. Pace          -> when to check again: normally 15 min, the AI may speed up
-                      or slow down, and positions close to an exit force 5 min
+  6. Execution     -> place the order, confirm it FILLED, record it, then place the
+                      stop-loss + take-profit pair on the exchange right away
+  7. Pace          -> when to check again: normally 15 min, the AI may speed up or
+                      slow down; an UNPROTECTED position close to an exit forces 5 min
 
 Analysis always uses real market data. In testnet mode the orders go to the
 Binance Spot Testnet, whose prices can drift from the real market; each order
@@ -57,8 +61,10 @@ class Orchestrator:
         self.decision = DecisionAgent(self.llm)
         self.risk = RiskManagerAgent(s)
         self.last_price: dict[str, float] = {}
-        broker = TestnetBroker(testnet) if testnet else PaperBroker(lambda sym: self.last_price[sym])
+        broker = TestnetBroker(testnet) if testnet else \
+            PaperBroker(lambda sym: self.last_price[sym], range_fn=self.market.range_since)
         self.execution = ExecutionAgent(broker)
+        self.protect_errors: dict[str, str] = {}  # symbol -> last reason protection could not be placed
         self.pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         self.scout_update: dict | None = None  # set when the watchlist changed this cycle
         self._scout_retry_at = 0.0
@@ -114,7 +120,7 @@ class Orchestrator:
         wl = self.watchlist()
         symbols = list(dict.fromkeys(wl["symbols"] + list(self.journal.positions())))
 
-        # 1-2. prices, analysis, and immediate exits
+        # 1-2. prices, analysis, exchange-side exits, desk-side backup exits
         ctx: dict[str, dict] = {}
         for sym in symbols:
             try:
@@ -123,9 +129,18 @@ class Orchestrator:
                 self.last_price[sym] = price
                 position = self.journal.positions().get(sym)
                 technical = self.technical.run(candles)
-                if position and (why := self.risk.exit_signal(position, price)):
-                    summary.append(self._sell(sym, position, why))
-                    continue
+                if position:
+                    position, exit_result = self._sync_protection(sym, position)
+                    if exit_result:
+                        summary.append(exit_result)
+                    if position is None:
+                        continue
+                    if not self._is_protected(position):
+                        if why := self.risk.exit_signal(position, price):  # desk-side backup
+                            summary.append(self._sell(sym, position, why))
+                            continue
+                        if err := self._protect(sym, position):
+                            summary.append({"symbol": sym, "protect_error": err})
                 ctx[sym] = {"price": price, "technical": technical, "prediction": self.prediction.run(candles),
                             "closes": [c["close"] for c in candles]}
             except Exception as e:  # one bad coin must not stop the others
@@ -186,6 +201,13 @@ class Orchestrator:
                     self.journal.log_order(sym, "BUY", fill, "signal")
                     if fill["ok"]:
                         self.journal.open_position(sym, fill, verdict["stop_loss"], verdict["take_profit"])
+                        position = self.journal.positions()[sym]
+                        if err := self._protect(sym, position):
+                            result["protect_error"] = err
+                            if why := self.risk.exit_signal(position, self.last_price[sym]):
+                                result.update(self._sell(sym, position, why))  # already past an exit level
+                        else:
+                            result["protected"] = self.journal.positions()[sym]["protected"]
                     result.update(order=fill, stop_loss=verdict["stop_loss"], take_profit=verdict["take_profit"])
                 summary.append(result)
             except Exception as e:
@@ -220,20 +242,87 @@ class Orchestrator:
         near = []
         for sym, p in self.journal.positions().items():
             c = ctx.get(sym)
+            if self._is_protected(p):
+                continue  # the exchange watches this one every second; no need to hurry
             if c and c["technical"]["atr"] > 0:
                 gap = min(c["price"] - p["stop_loss"], p["take_profit"] - c["price"]) / c["technical"]["atr"]
                 if gap < 0.5:  # within half a typical move of its stop-loss or target
                     near.append(sym)
         if near and pace["minutes"] > s.min_check_minutes:
             pace = {"minutes": s.min_check_minutes, "source": "risk",
-                    "reason": f"{', '.join(near)} close to its stop-loss or target"}
+                    "reason": f"{', '.join(near)} close to its stop-loss or target without exchange protection"}
         return pace
 
+    # ---- protection (stop-loss / take-profit orders living on the exchange) ----
+    @staticmethod
+    def _is_protected(position: dict) -> bool:
+        return position.get("protected") in ("exchange", "emulated")
+
+    def _protect(self, sym: str, position: dict) -> str | None:
+        """Place the OCO pair for a position. Returns an error text when it could not be placed."""
+        if not self.execution.can_protect:
+            return None
+        res = self.execution.protect(sym, position["qty"], position["stop_loss"], position["take_profit"])
+        if res["ok"]:
+            self.journal.set_protection(sym, res["protection"], res["protection"]["kind"])
+            self.protect_errors.pop(sym, None)
+            return None
+        self.journal.set_protection(sym, None, "none")
+        self.protect_errors[sym] = res["error"]
+        return res["error"]
+
+    def _sync_protection(self, sym: str, position: dict) -> tuple[dict | None, dict | None]:
+        """Ask the exchange what happened to the protective orders since the last check.
+        Returns (position or None when it was closed, summary entry for an exit or None)."""
+        prot = position.get("protection")
+        if not prot:
+            return position, None
+        status = self.execution.protection_status(sym, prot)
+        state = status["state"]
+        if state == "exited":  # a partial fill leaves the rest open (and unprotected) for the caller to handle
+            exit_result = self._record_exchange_exit(sym, status)
+            return self.journal.positions().get(sym), exit_result
+        if state == "protected":
+            if status["protection"] != prot:
+                self.journal.set_protection(sym, status["protection"], prot["kind"])
+            return self.journal.positions()[sym], None
+        if state == "executing":  # one leg is part-filled, the other is gone: desk watches the rest
+            self.journal.set_protection(sym, prot, "partial")
+        elif state == "gone":  # cancelled or wiped (Binance resets the testnet now and then): re-protect
+            log.warning("Protection for %s disappeared (%s) - placing it again", sym, status.get("detail"))
+            self.journal.set_protection(sym, None, "none")
+        # "unknown" (network problem): keep the record, try again next cycle
+        return self.journal.positions()[sym], None
+
+    def _record_exchange_exit(self, sym: str, status: dict) -> dict:
+        fill = {"ok": True, **status["fill"], "market_price": self.last_price.get(sym)}
+        kind = "exchange" if status["protection"]["kind"] == "exchange" else "emulated"
+        reason = f"{status['reason']} ({kind})"
+        self.journal.log_order(sym, "SELL", fill, reason)
+        trade = self.journal.close_position(sym, fill, reason)
+        if sym in self.journal.positions():  # part of the position is left: protect it again
+            self.journal.set_protection(sym, None, "none")
+        return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill, "trade": trade}
+
     def _sell(self, sym: str, position: dict, reason: str) -> dict:
+        if position.get("protection"):  # free the coins first: open orders lock them
+            status = self.execution.unprotect(sym, position["protection"])
+            if status["state"] == "exited":
+                return self._record_exchange_exit(sym, status)
+            if status["state"] == "error":
+                fill = {"ok": False, "error": status["detail"], "market_price": self.last_price[sym]}
+                self.journal.log_order(sym, "SELL", fill, reason)
+                return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
+            self.journal.set_protection(sym, None, "none")
+            position = self.journal.positions()[sym]
         fill = self.execution.execute("SELL", sym, qty=position["qty"])
         fill["market_price"] = self.last_price[sym]
         self.journal.log_order(sym, "SELL", fill, reason)
         out = {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
         if fill["ok"]:
             out["trade"] = self.journal.close_position(sym, fill, reason)
+            if sym in self.journal.positions():
+                self._protect(sym, self.journal.positions()[sym])  # partial sale: protect the remainder
+        elif self.journal.positions().get(sym):
+            self._protect(sym, self.journal.positions()[sym])  # sale failed: put the protection back
         return out

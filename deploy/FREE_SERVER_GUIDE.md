@@ -123,7 +123,7 @@ You can now close the browser. The desk keeps running on the server.
 
 | Send | You get |
 |---|---|
-| `/status` | Open positions, why each coin was bought or skipped, when the next check is, and today's Claude spend |
+| `/status` | Open positions (with 🛡️ when the stop-loss and take-profit are live on Binance), why each coin was bought or skipped, when the next check is, and today's Claude spend |
 | `/report` | The performance figures |
 | `/watchlist` | Which coins the desk watches, and why the scout picked each one |
 

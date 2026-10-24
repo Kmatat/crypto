@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from urllib.parse import urlencode
 
 import requests
@@ -52,8 +52,11 @@ class BinanceClient:
         return data
 
     # ---- market data ---------------------------------------------------
-    def klines(self, symbol: str, interval: str = "1h", limit: int = 200) -> list[dict]:
-        rows = self._request("GET", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    def klines(self, symbol: str, interval: str = "1h", limit: int = 200, start_ms: int | None = None) -> list[dict]:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_ms:
+            params["startTime"] = start_ms
+        rows = self._request("GET", "/api/v3/klines", params)
         return [
             {"time": r[0], "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
              "close": float(r[4]), "volume": float(r[5])}
@@ -76,12 +79,16 @@ class BinanceClient:
     def symbol_filters(self, symbol: str) -> dict:
         if symbol not in self._filters:
             info = self._request("GET", "/api/v3/exchangeInfo", {"symbol": symbol})
-            f = {x["filterType"]: x for x in info["symbols"][0]["filters"]}
+            sym = info["symbols"][0]
+            f = {x["filterType"]: x for x in sym["filters"]}
             notional = f.get("NOTIONAL") or f.get("MIN_NOTIONAL") or {}
             self._filters[symbol] = {
                 "step_size": f.get("LOT_SIZE", {}).get("stepSize", "0.00000100"),
                 "min_qty": float(f.get("LOT_SIZE", {}).get("minQty", 0)),
                 "min_notional": float(notional.get("minNotional", 5)),
+                "tick_size": f.get("PRICE_FILTER", {}).get("tickSize", "0.00000001"),
+                "oco_allowed": bool(sym.get("ocoAllowed", False)),
+                "order_types": list(sym.get("orderTypes", [])),
             }
         return self._filters[symbol]
 
@@ -100,6 +107,42 @@ class BinanceClient:
     def get_order(self, symbol: str, client_id: str) -> dict:
         return self._request("GET", "/api/v3/order", {"symbol": symbol, "origClientOrderId": client_id}, signed=True)
 
+    def get_order_by_id(self, symbol: str, order_id: int | str) -> dict:
+        return self._request("GET", "/api/v3/order", {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    def my_trades(self, symbol: str, order_id: int | str) -> list[dict]:
+        """The individual fills of one order (needed for exact fees on orders that fill later)."""
+        return self._request("GET", "/api/v3/myTrades", {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    # ---- protective orders: one-cancels-the-other (OCO) sell pair ---------
+    def oco_sell(self, symbol: str, quantity: float, take_profit: float, stop_loss: float, list_client_id: str,
+                 stop_type: str = "STOP_LOSS", stop_limit: float | None = None) -> dict:
+        """Place a take-profit (limit) and a stop-loss on the exchange; when one fills the other is cancelled.
+
+        Binance requires: take-profit price > last price > stop price. Fails fast with a
+        clear BinanceError when the market has already moved past either level.
+        """
+        f = self.symbol_filters(symbol)
+        params = {
+            "symbol": symbol, "side": "SELL", "quantity": format_qty(quantity, f["step_size"]),
+            "listClientOrderId": list_client_id, "newOrderRespType": "FULL",
+            "aboveType": "LIMIT_MAKER", "abovePrice": format_price(take_profit, f["tick_size"]),
+            "aboveClientOrderId": f"{list_client_id}-tp",
+            "belowType": stop_type, "belowStopPrice": format_price(stop_loss, f["tick_size"]),
+            "belowClientOrderId": f"{list_client_id}-sl",
+        }
+        if stop_type == "STOP_LOSS_LIMIT":
+            params["belowPrice"] = format_price(stop_limit if stop_limit else stop_loss, f["tick_size"])
+            params["belowTimeInForce"] = "GTC"
+        return self._request("POST", "/api/v3/orderList/oco", params, signed=True)
+
+    def order_list(self, list_client_id: str) -> dict:
+        return self._request("GET", "/api/v3/orderList", {"origClientOrderId": list_client_id}, signed=True)
+
+    def cancel_order_list(self, symbol: str, list_client_id: str) -> dict:
+        return self._request("DELETE", "/api/v3/orderList", {"symbol": symbol, "listClientOrderId": list_client_id},
+                             signed=True)
+
 
 def round_step(qty: float, step_size: str) -> float:
     """Round a quantity DOWN to the exchange's allowed step (e.g. 0.00001 BTC)."""
@@ -111,3 +154,11 @@ def format_qty(qty: float, step_size: str) -> str:
     step = Decimal(step_size).normalize()
     places = max(0, -step.as_tuple().exponent)
     return f"{round_step(qty, step_size):.{places}f}"
+
+
+def format_price(price: float, tick_size: str) -> str:
+    """Round a price to the exchange's allowed tick (e.g. 0.01 USDT for BTC)."""
+    tick = Decimal(tick_size).normalize()
+    places = max(0, -tick.as_tuple().exponent)
+    rounded = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+    return f"{rounded:.{places}f}"

@@ -28,6 +28,7 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
     gross_win = sum(t["pnl"] for t in wins)
     gross_loss = -sum(t["pnl"] for t in losses)
     decisions = j.db.execute("SELECT action, COUNT(*) n FROM decisions GROUP BY action").fetchall()
+    exchange_exits = sum(1 for t in trades if "(exchange)" in t["exit_reason"] or "(emulated)" in t["exit_reason"])
     return {
         "starting_balance": start,
         "equity": round(equity, 2),
@@ -39,6 +40,7 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
         "execution_success_rate_pct": round(ok / total_orders * 100, 1) if total_orders else None,
         "avg_price_gap_pct": round(sum(gaps) / len(gaps), 3) if gaps else None,
         "closed_trades": len(trades),
+        "exits_by_exchange_orders": exchange_exits,
         "win_rate_pct": round(len(wins) / len(trades) * 100, 1) if trades else None,
         "avg_win": round(gross_win / len(wins), 2) if wins else None,
         "avg_loss": round(-gross_loss / len(losses), 2) if losses else None,
@@ -52,6 +54,7 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
 EXPLAIN = {
     "execution_success_rate_pct": "orders the exchange confirmed as FILLED (technical reliability)",
     "avg_price_gap_pct": "how far demo fill prices were from the real market (small = demo results are realistic)",
+    "exits_by_exchange_orders": "trades closed by the stop-loss / take-profit orders sitting on the exchange",
     "win_rate_pct": "closed trades that made money",
     "profit_factor": "money won / money lost; above 1.0 = profitable overall, 1.5+ is good",
     "max_drawdown_pct": "worst drop from a peak - how painful the bad stretch was",
@@ -114,8 +117,11 @@ def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra:
     for sym, pos in positions.items():
         price = prices.get(sym, pos["entry_price"])
         pnl = price * pos["qty"] - pos["cost"]
+        shield = {"exchange": "🛡️ stop & target live on Binance", "emulated": "🛡️ simulated exchange orders",
+                  "partial": "⚠️ partly filled on Binance, desk watching the rest",
+                  }.get(pos.get("protected"), "⚠️ desk-side checks only (exchange orders not placed yet)")
         lines.append(f"• {sym}: bought ${pos['entry_price']:,.4g}, now ${price:,.4g} ({pnl:+,.2f} USDT) "
-                     f"· stop ${pos['stop_loss']:,.4g} · target ${pos['take_profit']:,.4g}")
+                     f"· stop ${pos['stop_loss']:,.4g} · target ${pos['take_profit']:,.4g} · {shield}")
     if not positions:
         lines.append("No open positions.")
     lines.append("")

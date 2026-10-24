@@ -75,6 +75,13 @@ def cmd_check(s: Settings) -> int:
     if s.mode == "testnet":
         c = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret)
         step("Binance testnet account", lambda: {k: v for k, v in c.balances().items() if k in ("USDT", "BTC", "ETH", "SOL")})
+
+        def oco():
+            missing = [sym for sym in s.symbols if not c.symbol_filters(sym)["oco_allowed"]]
+            if missing:
+                raise RuntimeError(f"not available for {', '.join(missing)} - the desk will watch those itself")
+            return f"supported for {', '.join(s.symbols)}"
+        step("Stop-loss orders on the exchange (OCO)", oco)
     step("News feeds", lambda: f"{len(NewsAgent().fetch_headlines())} headlines")
     step("Forex (ECB rates)", lambda: ForexAgent().run()["regime"])
     if s.auto_coins:
