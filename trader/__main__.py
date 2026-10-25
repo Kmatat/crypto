@@ -20,7 +20,7 @@ import sys
 import threading
 from pathlib import Path
 
-from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
+from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
@@ -49,6 +49,7 @@ HELP_TEXT = (
     "/health - is everything working? last check, errors, settings problems, updates, and why buys were refused\n"
     "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
     "/diagnose [days] - the desk's records versus its own rules replayed on the same prices: what stopped each buy signal\n"
+    "/aibudget [usd] - Claude's daily budget and where it went today; /aibudget 3 sets $3 a day, /aibudget default resets\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
@@ -345,6 +346,52 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
         tg.send_once("lab", f"⚠️ The weekly strategy lab failed: {e}. The champion strategy keeps trading.")
 
 
+def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
+    """/aibudget: show Claude's daily cap and today's spend per agent; '/aibudget 3' sets $3 a day (kept across restarts,
+    applied at once); '/aibudget default' goes back to the settings file. Changes are logged in the diary."""
+    llm = bot.llm
+    if not llm:
+        return "Claude is not configured on this desk (no API key), so there is no AI budget. The free rules decide."
+    arg = arg.strip().lower().lstrip("$")
+    if arg in ("default", "reset"):
+        j.set("ai_budget_override", None)
+        llm.daily_budget = bot.base.ai_daily_budget_usd
+        llm.pct_daily_budget = bot.base.starting_balance * bot.base.ai_pct_month() / 100 / 30 if bot.base.ai_pct_month() else 0.0
+        llm.budget_hit = False
+        j.event("owner", f"Claude's daily budget back to the settings: ${llm.effective_daily_budget():.2f}")
+        return f"✅ Claude's daily budget is back to the settings file: ${llm.effective_daily_budget():.2f} a day."
+    if arg:
+        try:
+            usd = float(arg)
+        except ValueError:
+            return "Usage: /aibudget, /aibudget 3 (dollars a day) or /aibudget default"
+        if not 0 < usd <= AI_BUDGET_CEILING_USD:
+            return f"Choose an amount above $0 and at most ${AI_BUDGET_CEILING_USD:g} a day."
+        j.set("ai_budget_override", {"usd_per_day": usd, "set_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                                     "by": "owner"})
+        llm.daily_budget, llm.pct_daily_budget = usd, 0.0
+        llm.budget_hit = llm.spent_today >= usd
+        j.event("owner", f"Claude's daily budget set to ${usd:.2f} a day")
+        return (f"✅ Claude may now spend up to ${usd:.2f} a day (at most ${usd * 30:,.0f} a month of real money). It applies "
+                f"now and after restarts; /aibudget default goes back to the settings file.")
+    by = llm.by_caller or {}
+    lines = [f"💸 Claude's budget: ${llm.effective_daily_budget():.2f} a day on {llm.model}; spent today ${llm.spent_today:.2f}"
+             + (" (used up: free rules until 00:00 UTC)" if llm.budget_hit else "")]
+    if j.get("ai_budget_override"):
+        lines.append(f"Set by you with /aibudget on {j.get('ai_budget_override')['set_at'][:10]}.")
+    for name, label in (("news", "News"), ("decision", "Buy/sell decisions"), ("scout", "Coin scout"),
+                        ("research", "Strategy research"), ("review", "Reviews")):
+        c = by.get(name) or {}
+        if c.get("calls"):
+            lines.append(f"• {label}: {c['calls']} calls, ${c['usd']:.2f}")
+    now = dt.datetime.now(dt.timezone.utc)
+    hours = max(1.0, now.hour + now.minute / 60)
+    lines.append(f"At today's pace about ${llm.spent_today / hours * 24 * 30:,.0f} a month. Change it with /aibudget 3 "
+                 f"(dollars a day, at most ${AI_BUDGET_CEILING_USD:g}). A cheaper model (CLAUDE_MODEL=claude-haiku-5-5 in desk "
+                 "setup) does the same work for a fraction of the cost.")
+    return "\n".join(lines)
+
+
 def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict | None:
     """The rule core over the same period and coins, with the strategy in force and real prices (for /diagnose).
     Uses the card's own rules, so it never changes what the live desk decides meanwhile."""
@@ -540,6 +587,9 @@ def cmd_run(s: Settings, args) -> None:
             return (f"🔎 Reading the last {days:g} days of the desk's records and replaying its rules on the same prices. "
                     "The report arrives here in a minute or two.")
 
+        def aibudget_now(arg: str = "") -> str:
+            return with_journal(s, lambda j: ai_budget(bot, j, arg))
+
         def notes_now() -> str:
             if not bot.notes.enabled:
                 return "The notebook is switched off for this journal."
@@ -588,6 +638,7 @@ def cmd_run(s: Settings, args) -> None:
             "/health": health_now,
             "/agents": agents_now,
             "/diagnose": diagnose_now,
+            "/aibudget": aibudget_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
@@ -648,9 +699,9 @@ def cmd_run(s: Settings, args) -> None:
             maybe_weekly_lab(bot, tg, s, trade_lock, should_stop=stop.is_set)
             if bot.llm and bot.llm.budget_hit:
                 cap = bot.llm.effective_daily_budget()
-                why = (f" That cap is {s.ai_budget_pct_month:g}% a month of your ${s.starting_balance:,.0f} starting balance; "
-                       "a bigger demo balance (STARTING_BALANCE_USDT) or a cheaper model raises what it buys. Send /health."
+                why = (f" That cap is {s.ai_pct_month():g}% a month of your ${s.starting_balance:,.0f} starting balance."
                        if bot.llm.pct_daily_budget and cap == bot.llm.pct_daily_budget else "")
+                why += " Send /aibudget to see where it went or raise it."
                 tg.send_once("ai-budget", f"💸 Claude's daily budget (${cap:.2f}) is used up. "
                                           f"The agents use the free built-in rules until 00:00 UTC.{why}", every_hours=12)
             maybe_daily_report(bot, tg, s)

@@ -211,7 +211,11 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   is not consulted on buys the checklist or the risk limits would refuse anyway, and a code-computed
   **scorecard** replays every veto against the real prices that followed: money the vetoes saved, money they
   cost, and the hit rate of the news scores. The daily report shows it; after 50 divergent decisions it gives
-  a verdict. The AI budget is capped at a percentage of the account (`AI_BUDGET_PCT_MONTH`, 0.25%).
+  a verdict. The AI budget is a flat daily cap in real dollars (`AI_DAILY_BUDGET_USD`, $5): send `/aibudget` to see
+  today's spend per agent and `/aibudget 3` to change it from the phone (at most $20 a day; `/aibudget default`
+  goes back to the settings file). An extra cap as a percentage of the account (`AI_BUDGET_PCT_MONTH`) is
+  optional and off on demo money, because a small demo balance would starve Claude (0.25% of $100 a month is one
+  cent a day).
 
 ## Is it working? Health, agents, pulse and watchdog
 

@@ -363,8 +363,10 @@ class Notes:
                 ["Daily loss brake", f"{s.max_daily_loss_pct:.0%}: no new buys for the rest of the day"],
                 ["Overall loss brake", f"{s.max_drawdown_pct:.0%} below the start: pause {s.brake_pause_days} days, "
                                        f"then half size until half the loss is recovered"],
-                ["AI budget", f"${s.ai_daily_budget_usd:.2f} a day and at most {s.ai_budget_pct_month:g}% of the account "
-                              f"a month; the free rules take over when it is spent"],
+                ["AI budget", f"${s.ai_daily_budget_usd:.2f} a day"
+                              + (f" and at most {s.ai_pct_month():g}% of the account a month" if s.ai_pct_month()
+                                 else " (no percentage cap on demo money; the owner's /aibudget changes it)")
+                              + "; the free rules take over when it is spent"],
                 ["Strategy changes", f"at most {MAX_CHANGES} parameters at a time, inside the bounds, after the exam and "
                                      f"the forward test, " + ("promoted automatically" if s.auto_promote else
                                                              "and only with the owner's /approve")],

@@ -100,7 +100,9 @@ class DecisionAgent:
         thr = self.threshold_for(symbol, threshold)
         rules_action = self._rules(score, holding, thr)["action"]
         news_score = float(reports.get("news", {}).get("score", 0) or 0)
-        if not holding and news_score <= NEWS_VETO:
+        # a hard block needs Claude's reading of the news; a keyword count (used when Claude is off or out of budget)
+        # is too crude to forbid a buy on its own - it still counts in the score with its small weight
+        if not holding and news_score <= NEWS_VETO and reports.get("news", {}).get("source") != "keywords":
             return {"action": "HOLD", "confidence": 0.9, "source": "rules", "combined_score": score,
                     "rules_action": rules_action, "threshold": thr,
                     "reasoning": f"Clearly negative news for this coin (news score {news_score:+.2f}); no new buy."}

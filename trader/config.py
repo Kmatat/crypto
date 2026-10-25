@@ -67,7 +67,8 @@ ENV_KEYS = (
     "TRAIL_ATR",
 )
 
-SETTINGS_VERSION = "3"  # 2 = 15-minute checks + AI coin scout; 3 = take-profit default 4 ATR (checklist era)
+SETTINGS_VERSION = "3"
+AI_BUDGET_CEILING_USD = 20.0   # the most the owner's /aibudget accepts per day (real money): a typo cannot run up a bill  # 2 = 15-minute checks + AI coin scout; 3 = take-profit default 4 ATR (checklist era)
 
 
 def _version(v: str | None) -> int:
@@ -128,7 +129,7 @@ class Settings:
     min_volume_musd: float = 10      # scout ignores coins with less 24h trading volume (million USD)
     news_refresh_minutes: int = 30
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
-    ai_budget_pct_month: float = 0.25  # ... and never more than this % of the account per month (0 = off)
+    ai_budget_pct_month: float | None = None  # % of the account a month; unset = off on demo money, 0.25 with real money
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     # ---- strategy laboratory (trader/lab.py): the desk proposes, tests and promotes strategy cards ----
     lab_enabled: bool = True
@@ -166,6 +167,15 @@ class Settings:
     def use_claude(self) -> bool:
         return bool(self.anthropic_key) and not self.offline
 
+    def ai_pct_month(self) -> float:
+        """The percentage-of-account cap on Claude's spend. The demo account is fake money while Claude is paid in real
+        dollars, so tying the AI budget to a fake balance only starves the AI: on demo money there is no percentage
+        cap unless AI_BUDGET_PCT_MONTH is set, and the flat AI_DAILY_BUDGET_USD is the limit. With real money (not
+        supported in this phase) the default would be 0.25% of the account a month."""
+        if self.ai_budget_pct_month is not None:
+            return self.ai_budget_pct_month
+        return 0.0 if self.mode in ("simulation", "testnet") else 0.25
+
     def problems(self) -> list[str]:
         """Settings that make the desk unable to do its job. Reported at start and in /health."""
         out = []
@@ -186,10 +196,11 @@ class Settings:
                        f"the $10 minimum, so " + ("any loss" if position < 10.5 else f"a loss of {(1 - 10 / position):.0%}")
                        + " stops all buying. The demo uses fake money: "
                        "10,000 makes its results comparable with the tests")
-        ai = self.ai_budget_pct_month and self.starting_balance * self.ai_budget_pct_month / 100 / 30
+        pct = self.ai_pct_month()
+        ai = pct and self.starting_balance * pct / 100 / 30
         if self.use_claude and ai and min(ai, self.ai_daily_budget_usd or ai) < 0.10:
             out.append(f"Claude's budget is ${min(ai, self.ai_daily_budget_usd or ai):.2f} a day (AI_BUDGET_PCT_MONTH "
-                       f"{self.ai_budget_pct_month:g}% a month of a ${self.starting_balance:,.0f} balance): about one call a "
+                       f"{pct:g}% a month of a ${self.starting_balance:,.0f} balance): about one call a "
                        "day, so Claude is effectively off and the free rules decide")
         return out
 
@@ -228,7 +239,7 @@ class Settings:
             min_volume_musd=_f("MIN_VOLUME_MUSD", 10),
             news_refresh_minutes=int(os.getenv("NEWS_REFRESH_MINUTES", 30)),
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
-            ai_budget_pct_month=_f("AI_BUDGET_PCT_MONTH", 0.25),
+            ai_budget_pct_month=_f("AI_BUDGET_PCT_MONTH", 0) if os.getenv("AI_BUDGET_PCT_MONTH", "").strip() else None,
             auto_update=_b("AUTO_UPDATE", True),
             lab_enabled=_b("LAB_ENABLED", True),
             head_trader=_b("HEAD_TRADER", True),

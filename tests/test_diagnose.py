@@ -54,9 +54,11 @@ def test_portfolio_tilt_blocks_and_downtime_are_counted():
 def test_a_small_starting_balance_is_reported_with_its_consequences():
     from types import SimpleNamespace
     from trader.health import settings_lines
-    tiny = Settings(starting_balance=100, anthropic_key="k")
+    tiny = Settings(starting_balance=100, anthropic_key="k", ai_budget_pct_month=0.25)
     p = tiny.problems()
     assert any("any loss stops all buying" in x for x in p) and any("Claude is effectively off" in x for x in p)
+    # on demo money there is no percentage cap unless the owner sets one, so a small balance no longer starves Claude
+    assert not any("Claude is effectively off" in x for x in Settings(starting_balance=100, anthropic_key="k").problems())
     assert any("a loss of 17%" in x for x in Settings(starting_balance=120).problems())
     assert Settings(starting_balance=10_000, anthropic_key="k").problems() == []
     s = Settings(offline=True, symbols=["BTCUSDT"], starting_balance=120)

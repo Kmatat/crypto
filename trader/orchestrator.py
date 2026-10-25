@@ -38,7 +38,7 @@ from .agents.risk import RiskManagerAgent
 from .agents.scout import MarketScoutAgent
 from .agents.technical import TechnicalAnalysisAgent
 from .binance_client import BinanceClient
-from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
+from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .llm import ClaudeJSON
 from .notes import Notes, default_dir
@@ -56,10 +56,14 @@ class Orchestrator:
         self.card: StrategyCard | None = None
         self.llm = ClaudeJSON(s.claude_model, s.anthropic_key, s.ai_daily_budget_usd, store=self.journal) \
             if s.use_claude else None
-        if self.llm and s.ai_budget_pct_month:
-            # e.g. 0.25% of $10,000 a month = $25/month = about $0.83 a day: the AI bill stays a small fraction
-            # of any plausible edge, so a cheap model is the only sensible choice at this account size
-            self.llm.pct_daily_budget = s.starting_balance * s.ai_budget_pct_month / 100 / 30
+        if self.llm and s.ai_pct_month():
+            # only when the owner sets AI_BUDGET_PCT_MONTH (demo money has none): e.g. 0.25% of $10,000 a month =
+            # $25/month = about $0.83 a day
+            self.llm.pct_daily_budget = s.starting_balance * s.ai_pct_month() / 100 / 30
+        if self.llm and (override := self.journal.get("ai_budget_override")):
+            # the owner's /aibudget, kept across restarts (never above the hard ceiling, whatever the stored value)
+            self.llm.daily_budget = min(float(override["usd_per_day"]), AI_BUDGET_CEILING_USD)
+            self.llm.pct_daily_budget = 0.0
 
         public = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
         testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) \
@@ -217,7 +221,10 @@ class Orchestrator:
                         summary.append(exit_result)
                     if position is None:
                         continue
-                    position, exit_result = self._trail(sym, position, price, technical["atr"])
+                    # the trailing stop follows finished hourly closes, exactly as the backtest and the laboratory
+                    # measured it; the exchange's stop order still fires on any intra-hour drop
+                    position, exit_result = self._trail(sym, position, self._trail_price(position, closed),
+                                                        technical["atr"])
                     if exit_result:
                         summary.append(exit_result)
                     if position is None:
@@ -288,7 +295,8 @@ class Orchestrator:
                 reports["head"] = {"threshold": thr, "why": why}
                 # Claude costs money: a buy the checklist or the position limit refuses anyway is not worth a call
                 slots_full = position is None and len(positions) >= self.s.max_open_positions
-                news_veto = position is None and news_score <= NEWS_VETO   # refused before any call is made
+                news_veto = position is None and news_score <= NEWS_VETO \
+                    and reports["news"].get("source") != "keywords"   # refused before any call is made
                 eligible = position is not None or not ((review and not review["pass"]) or slots_full or news_veto)
                 pending.append({"symbol": sym, "ctx": c, "reports": reports, "position": position, "score": score,
                                 "threshold": thr, "holding": position is not None, "eligible": eligible,
@@ -435,6 +443,17 @@ class Orchestrator:
         stop, take = c["price"] - self.s.stop_loss_atr * atr, c["price"] + self.s.take_profit_atr * atr
         return self.mentor.review(sym, c["candles"], daily, c["price"], stop, take, atr, btc_daily,
                                   self.journal.last_stop_loss_ms(sym), int(time.time() * 1000))
+
+    def _trail_price(self, position: dict, closed: list[dict]) -> float:
+        """The highest finished-candle close since the position was opened (the entry price before the first one)."""
+        from .backtest import INTERVAL_MS
+        step = INTERVAL_MS.get(self.market.interval, 3_600_000)
+        try:
+            opened = dt.datetime.fromisoformat(position["opened_at"]).timestamp() * 1000
+        except (KeyError, TypeError, ValueError):
+            opened = 0
+        closes = [c["close"] for c in closed if c["time"] + step > opened]
+        return max(closes or [position["entry_price"]])
 
     def _trail(self, sym: str, position: dict, price: float, atr: float) -> tuple[dict | None, dict | None]:
         """Raise the stop-loss as the price makes new highs; re-place the exchange orders when it moves.

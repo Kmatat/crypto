@@ -8,6 +8,7 @@ a simple keyword list is used and the pace stays at the normal setting.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 
@@ -18,6 +19,8 @@ from ..llm import ClaudeJSON
 log = logging.getLogger(__name__)
 
 MAX_FEED_BYTES = 2_000_000
+STOPWORDS = {"with", "from", "after", "over", "into", "amid", "says", "will", "than", "that", "this", "what", "your",
+             "their", "about", "more", "less", "just", "could", "would", "price", "crypto", "market", "today", "week"}
 FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
@@ -43,6 +46,17 @@ POSITIVE = ["surge", "rally", "soar", "jump", "gain", "bull", "record high", "ap
             "inflow", "partnership", "upgrade", "breakout", "all-time high", "buy"]
 NEGATIVE = ["crash", "plunge", "drop", "fall", "bear", "hack", "exploit", "lawsuit", "ban", "sec charges",
             "outflow", "liquidat", "fraud", "selloff", "sell-off", "reject", "delay", "fine"]
+
+# words match at the start of a word, so "gains" counts as "gain" but "Again" does not; "ban" must be the whole word
+# (not "bank" or "band")
+WORD_PATTERNS = {w: re.compile(rf"\b{re.escape(w)}") for w in POSITIVE + NEGATIVE}
+WORD_PATTERNS["ban"] = re.compile(r"\bban(?:s|ned|ning)?\b")
+
+
+def hits(headline: str, words: list[str]) -> int:
+    low = headline.lower()
+    return sum(bool(WORD_PATTERNS[w].search(low)) for w in words)
+
 
 SENTIMENT_SCHEMA = {
     "type": "object",
@@ -133,18 +147,33 @@ class NewsAgent:
         names = COIN_NAMES.get(coin) or [f"{c} token", f"{c} coin", f"${c}"]  # unknown tickers may be plain words
         return any(f" {n} " in words or f" {n}'" in words or f" {n}," in words for n in names)
 
+    @staticmethod
+    def stories(headlines: list[str]) -> list[str]:
+        """One headline per story: the same news is often carried by several feeds with different titles ("Ethereum
+        delays Glamsterdam test ...", "Ethereum Delays Glamsterdam Testnet Fork ..."). Two headlines are one story
+        when they share at least three significant words (the coin's own name does not count)."""
+        names = {n for ns in COIN_NAMES.values() for n in ns}
+
+        def words(h: str) -> set[str]:
+            return {w for w in re.findall(r"[a-z0-9$]+", h.lower()) if len(w) > 3 and w not in STOPWORDS | names}
+        kept: list[tuple[str, set[str]]] = []
+        for h in headlines:
+            w = words(h)
+            if not any(len(w & seen) >= 3 for _, seen in kept):
+                kept.append((h, w))
+        return [h for h, _ in kept]
+
     @classmethod
     def keyword_sentiment(cls, headlines: list[str], coins: list[str]) -> dict:
         result: dict = {}
         for coin in coins:
-            related = [h for h in headlines if cls.mentions(h, coin)]
+            related = cls.stories([h for h in headlines if cls.mentions(h, coin)])
             score = 0
             for h in related:
-                low = h.lower()
-                score += sum(w in low for w in POSITIVE) - sum(w in low for w in NEGATIVE)
+                score += hits(h, POSITIVE) - hits(h, NEGATIVE)
             norm = max(-1.0, min(1.0, score / max(3, len(related))))
-            result[coin] = {"score": round(norm, 3), "summary": f"{len(related)} related headlines (keyword scoring)",
-                            "headlines": related[:5]}
+            result[coin] = {"score": round(norm, 3), "summary": f"{len(related)} related stories (keyword scoring)",
+                            "headlines": related[:5], "source": "keywords"}
         result["_mood"] = "unknown (keyword mode)" if headlines else "no news (offline or feeds down)"
         result["_pace"] = None
         return result
@@ -171,5 +200,5 @@ class NewsAgent:
         for coin in coins:
             c = by_coin.get(coin, {"score": 0, "summary": "no coverage"})
             result[coin] = {"score": max(-1.0, min(1.0, float(c["score"]))), "summary": c["summary"],
-                            "headlines": [h for h in headlines if self.mentions(h, coin)][:5]}
+                            "headlines": [h for h in headlines if self.mentions(h, coin)][:5], "source": "claude"}
         return result

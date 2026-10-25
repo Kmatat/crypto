@@ -5,6 +5,25 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.5.0 - 2026-10-25
+
+- Claude's budget no longer shrinks with a small demo balance. Until now it was the lower of $5 a day and 0.25% of
+  the starting balance a month: on a $100 demo that is one cent a day, so Claude was switched off after one call
+  and the free rules decided everything. On demo money there is now no percentage cap: the flat
+  `AI_DAILY_BUDGET_USD` ($5 a day of real money) applies. `AI_BUDGET_PCT_MONTH` still works if you set it.
+- `/aibudget` on Telegram: Claude's cap, today's spend per agent (news, decisions, coin scout, research, reviews)
+  and the month at today's pace. `/aibudget 3` sets $3 a day at once and keeps it across restarts (at most $20 a
+  day, so a typo cannot run up a bill); `/aibudget default` goes back to the settings file. Each change is logged.
+- Fix: the trailing stop followed the live price inside the hour, while the backtest and the laboratory measured
+  it on finished hourly closes. A brief spike raised the stop and the next ordinary dip sold the position: on the
+  last 90 days of real prices the rules made +0.24% that way against +2.22% as measured. The live desk now raises
+  the stop on finished hourly closes only; the stop order on the exchange still protects against any drop.
+- Fix: keyword news (used when Claude is off or out of budget) counted the same story once per feed. Three titles
+  of one "Ethereum delays Glamsterdam" story gave ETH the worst possible score (-1.0) and blocked every ETH buy.
+  A story now counts once (titles sharing three significant words), words must match whole ("Again" is no
+  longer "gain", "bank" is not "ban"), and a keyword score never blocks a buy on its own: only Claude's reading of
+  the news can (it still counts in the score with its 10% weight).
+
 ## 1.4.6 - 2026-10-25
 
 - Fix: the server rejected 1.4.4 and 1.4.5 because a test failed there and not elsewhere. The update job loads the

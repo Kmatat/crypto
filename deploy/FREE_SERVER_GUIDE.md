@@ -134,6 +134,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/health` | Is everything working? Version, last market check, errors, settings problems, updates, and what happened to every buy signal in the last 24 hours |
 | `/agents` | How many agents are working and what each did; strategies created, promoted, rejected or rolled back; coins added or removed (`/agents 30` for 30 days) |
 | `/diagnose` | "Check the logs" from your phone: the settings in force, every buy signal per coin and what stopped it, order failures, hours the desk was not checking, and how many trades its own rules would have made on the same prices (`/diagnose 3` for 3 days) |
+| `/aibudget` | Claude's daily budget, today's spend per agent and the month at today's pace. `/aibudget 3` lets Claude spend up to $3 a day (real money, at most $20), `/aibudget default` goes back to the settings file. Kept across restarts |
 | `/review` | Claude reads the notebook and sends a plain-language review: what works, what fails, what the lab should test next. Uses a little of the AI budget |
 | `/version` | Which code version is running, and whether a newer one is waiting |
 | `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |
@@ -182,15 +183,16 @@ case to look at.
 ## If the desk says your starting balance is small
 
 The setup proposes 90% of the USDT in your Binance demo wallet as the desk's budget. A demo wallet with little USDT
-gives a budget of a hundred dollars or so: positions of about $10 (the minimum order), a desk that stops buying after
-a small loss, and a Claude budget of a cent a day. The money is fake, so give the demo a realistic budget:
+gives a budget of a hundred dollars or so: positions of about $10 (the minimum order) and a desk that stops buying
+after a small loss. (Since 1.5.0 a small balance no longer shrinks Claude's budget: on demo money Claude gets the
+flat $5 a day, which `/aibudget` changes.) The money is fake, so give the demo a realistic budget:
 
 1. On the server, run `desk setup`. At the first question choose **2) Paper trading** (real prices, simulated
    orders, no wallet limit) and type **10000** as the budget. Keep your other answers with Enter.
    (Or stay with **1) Demo account** if your demo wallet holds at least 10,000 USDT.)
 2. Then run `desk reset --force` so the desk starts a fresh record with the new budget (the old one is kept as a
    backup file).
-3. Send `/health`: the settings problem is gone and Claude's cap reads about $0.83 a day.
+3. Send `/health`: the settings problem is gone.
 
 ## One-time upgrade of a server installed before automatic updates
 

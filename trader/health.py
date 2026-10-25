@@ -458,8 +458,12 @@ def settings_lines(bot) -> list[str]:
               + (f", equity now ${equity:,.2f} (cash ${cash:,.2f})" if equity is not None else "")
               + f"; positions about ${(equity or base.starting_balance) * s.max_position_pct:,.2f} each (minimum order $10)"]
     if bot.llm:
-        budget.append(f"Claude cap ${bot.llm.effective_daily_budget():.2f}/day = the lower of ${base.ai_daily_budget_usd:g}/day "
-                      f"and {base.ai_budget_pct_month:g}% a month of the starting balance; spent today ${bot.llm.spent_today:.2f}")
+        pct = base.ai_pct_month()
+        budget.append(f"Claude cap ${bot.llm.effective_daily_budget():.2f}/day ("
+                      + ("set with /aibudget" if bot.journal.get("ai_budget_override") else
+                         f"the lower of ${base.ai_daily_budget_usd:g}/day and {pct:g}% a month of the balance" if pct else
+                         f"AI_DAILY_BUDGET_USD; no percentage cap on demo money")
+                      + f"); spent today ${bot.llm.spent_today:.2f}")
     if (w := wallet_line(bot)):
         budget.append(w)
     lines = [*budget, f"Strategy in force: stop {s.stop_loss_atr:g} ATR, target {s.take_profit_atr:g} ATR "
