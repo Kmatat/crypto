@@ -253,12 +253,12 @@ class Notes:
         if self._version is None:
             try:
                 if self._version_fn is None:
-                    from .updater import version_text
-                    self._version_fn = version_text
-                first = self._version_fn().splitlines()[0]
-                self._version = first.replace("🏷️ ", "").removeprefix("Running version ").removeprefix("Running version: ")
-            except Exception:  # not a git checkout, git missing: the notebook still works
-                self._version = "unknown"
+                    from .updater import version_string
+                    self._version_fn = version_string
+                self._version = self._version_fn()
+            except Exception:  # noqa: BLE001 - not a git checkout, git missing: the notebook still works
+                from . import __version__
+                self._version = __version__
         return self._version
 
     # ---- writing ----

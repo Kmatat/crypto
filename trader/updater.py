@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import __version__
 from .config import ROOT, Settings
 from .notify import Telegram
 
@@ -63,19 +64,34 @@ def git(root: Path, *args: str) -> str:
                           timeout=120).stdout.strip()
 
 
+def parse_version(source: str) -> str | None:
+    """The release number declared in trader/__init__.py (any revision of it)."""
+    m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.M)
+    return m.group(1) if m else None
+
+
+def version_string(root: Path = ROOT) -> str:
+    """'1.3.0 (02923ca)': the release number plus the exact code revision, for messages and the notebook."""
+    try:
+        return f"{__version__} ({git(root, 'rev-parse', '--short', 'HEAD')})"
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return __version__
+
+
 def version_text(root: Path = ROOT, status_path: Path = STATUS) -> str:
     try:
         sha, subject, date = git(root, "log", "-1", "--format=%h%n%s%n%ci").split("\n", 2)
-        lines = [f"🏷️ Running version {sha}: {subject} ({date[:16]})"]
+        lines = [f"🏷️ Running version {__version__} (revision {sha}, {date[:10]}): {subject}"]
     except (subprocess.SubprocessError, OSError, ValueError):
-        lines = ["🏷️ Running version: unknown (not a git checkout)"]
+        lines = [f"🏷️ Running version {__version__} (not a git checkout, so the exact revision is unknown)"]
     st = read_status(status_path)
     if not st:
         lines.append("Automatic updates are not set up on this machine.")
         return "\n".join(lines)
     checked = st.get("checked_at", "")[:16].replace("T", " ")
     if st.get("behind"):
-        lines.append(f"🆕 Update available ({st['behind']} new change{'s' if st['behind'] != 1 else ''}): "
+        label = f"version {st['incoming_version']}" if st.get("incoming_version") else "a new version"
+        lines.append(f"🆕 Update available: {label} ({st['behind']} new change{'s' if st['behind'] != 1 else ''}): "
                      f"{st.get('incoming', '')}".strip())
         lines.append("Send /update to install it now." if not st.get("auto_update") else
                      "It installs automatically within about 30 minutes.")
@@ -139,6 +155,13 @@ class Updater:
         self.say(text)
         self.tg.send(text)
 
+    def _remote_version(self, branch: str) -> str | None:
+        """Release number of the code waiting on GitHub (read without installing it)."""
+        try:
+            return parse_version(git(self.root, "show", f"origin/{branch}:trader/__init__.py"))
+        except (subprocess.SubprocessError, OSError):
+            return None
+
     def _rollback(self, old: str, why: str) -> str:
         git(self.root, "reset", "--hard", old)
         self._run(self.install_cmd, 600)
@@ -178,28 +201,31 @@ class Updater:
         remote = git(root, "rev-parse", f"origin/{branch}")
         behind = int(git(root, "rev-list", "--count", f"HEAD..origin/{branch}") or 0)
         incoming = git(root, "log", "--format=%s", f"HEAD..origin/{branch}").replace("\n", " · ")
+        new_version = self._remote_version(branch) if behind else None
+        new_label = f"version {new_version} ({remote[:7]})" if new_version else f"revision {remote[:7]}"
 
         if behind == 0:
-            st = self._status(head=old[:7], remote=remote[:7], behind=0, incoming="", result="up_to_date",
-                              last_check_error=None)
+            st = self._status(head=old[:7], remote=remote[:7], behind=0, incoming="", incoming_version=None,
+                              result="up_to_date", last_check_error=None, version=__version__)
             if wanted:
-                self._notify(f"✅ Already running the latest version ({old[:7]}).")
+                self._notify(f"✅ Already running the latest version ({version_string(root)}).")
             else:
-                self.say(f"Up to date ({old[:7]}).")
+                self.say(f"Up to date ({version_string(root)}).")
             return st
 
         if check_only or not (self.s.auto_update or wanted):
             st = read_status(self.status_path) or {}
             st = self._status(head=old[:7], remote=remote[:7], behind=behind, incoming=incoming,
-                              result="available", notified=st.get("notified"), last_check_error=None)
+                              incoming_version=new_version, result="available", notified=st.get("notified"),
+                              last_check_error=None, version=__version__)
             if st.get("notified") != remote:  # tell the owner once per new version
-                self._notify(f"🆕 New version available ({behind} change{'s' if behind != 1 else ''}): {incoming}\n"
+                self._notify(f"🆕 New {new_label} is available, {behind} change{'s' if behind != 1 else ''}: {incoming}\n"
                              "Send /update to install it. (Automatic updates are off.)")
                 self._status(notified=remote)
             return st
 
         # ---- apply ----
-        self.say(f"Updating {old[:7]} -> {remote[:7]}: {incoming}")
+        self.say(f"Updating {version_string(root)} -> {new_label}: {incoming}")
         try:
             git(root, "pull", "--ff-only", "--quiet", "origin", branch)
         except subprocess.CalledProcessError as e:
@@ -237,10 +263,10 @@ class Updater:
                          "and restarted. Details are in `desk logs` on the server.")
             return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
 
-        self._notify(f"🔄 Updated to version {remote[:7]} and restarted.\nWhat changed: {incoming}")
-        return self._status(head=remote[:7], remote=remote[:7], behind=0, incoming="", result="updated",
-                            last_check_error=None,
-                            last_result=f"{now()[:16]} updated {old[:7]} -> {remote[:7]}")
+        self._notify(f"🔄 Updated to {new_label} and restarted.\nWhat changed: {incoming}")
+        return self._status(head=remote[:7], remote=remote[:7], behind=0, incoming="", incoming_version=None,
+                            result="updated", last_check_error=None, version=new_version or __version__,
+                            last_result=f"{now()[:16]} updated {__version__} ({old[:7]}) -> {new_label}")
 
 
 def main(argv: list[str]) -> int:

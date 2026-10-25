@@ -116,6 +116,8 @@ send `/update` on Telegram):
    is **restored automatically**.
 5. Tells you the outcome on Telegram, with a one-line summary of what changed.
 
+Every release has a number (`CHANGELOG.md`, declared in `trader/__init__.py`); update messages and `/version`
+name it next to the exact code revision, for example *"Updated to version 1.3.0 (02923ca)"*.
 A server installed before this job existed needs one terminal session to join in: see "One-time upgrade" in
 `deploy/FREE_SERVER_GUIDE.md`. `/version` shows what is running and whether a newer version exists. Set `AUTO_UPDATE=false` in `.env`
 to be notified about new versions instead of installing them automatically. Anyone who can push code to
@@ -369,4 +371,5 @@ deploy/
   setup.sh          one-command server installer
   desk              everyday server commands (desk status, desk report, ...)
 tests/         automated tests (python -m pytest)
+CHANGELOG.md   what each release number changed
 ```

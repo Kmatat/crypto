@@ -176,3 +176,21 @@ def test_restart_is_requested_through_a_flag_file_not_sudo(tmp_path):
     with pytest.raises(OSError, match="restart helper"):
         u._restart_service()  # nobody consumes it: fails loudly instead of hanging
     assert not flag.exists()
+
+
+def test_update_messages_name_the_release_number(repos):
+    from trader import __version__
+    dev, server = repos
+    (dev / "trader").mkdir()
+    (dev / "trader" / "__init__.py").write_text('"""pkg"""\n\n__version__ = "9.9.9"\n')
+    git(dev, "add", "."), git(dev, "commit", "-qm", "Release 9.9.9"), git(dev, "push", "-q", "origin", "main")
+    tg = FakeTG()
+    u, calls = make(server, tg, auto=False)
+    st = u.run()
+    assert st["incoming_version"] == "9.9.9" and "version 9.9.9" in tg.sent[-1]
+    assert "Update available: version 9.9.9" in version_text(server, u.status_path)
+    assert version_text(server, u.status_path).startswith(f"🏷️ Running version {__version__} (revision ")
+    request_update(u.request_path)
+    st = u.run()
+    assert st["result"] == "updated" and "Updated to version 9.9.9" in tg.sent[-1] and st["version"] == "9.9.9"
+    assert f"updated {__version__}" in st["last_result"] and "9.9.9" in st["last_result"]

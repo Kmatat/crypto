@@ -29,6 +29,7 @@ from .agents.research import ResearchAgent, review_text
 from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
+from .updater import version_string
 
 log = logging.getLogger("trader")
 
@@ -318,13 +319,13 @@ def cmd_run(s: Settings, args) -> None:
     pace = f"every {s.cycle_minutes} min" + (
         f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if s.use_claude else "")
     coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
-    print(f"Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
+    print(f"Version {version_string()}  Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
     bot.journal.event("start", f"Desk started: {mode}; AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
 
     if tg.enabled:
         if bot.journal.get("last_daily_report") is None:  # first start: first daily report tomorrow
             bot.journal.set("last_daily_report", dt.datetime.now(dt.timezone.utc).date().isoformat())
-        tg.send(f"🚀 Trading desk started\nMode: {mode}\nAI: {ai}\nCoins: {coins}\n"
+        tg.send(f"🚀 Trading desk started (version {version_string()})\nMode: {mode}\nAI: {ai}\nCoins: {coins}\n"
                 f"Budget: ${s.starting_balance:,.0f} · checks {pace}\n\n{HELP_TEXT}")
 
         def watched(j: Journal) -> list[str]:

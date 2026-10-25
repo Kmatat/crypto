@@ -184,8 +184,8 @@ That is all. From now on `/version`, `/update` and the automatic 30-minute check
 ## Updates happen by themselves
 
 When I publish improvements, your server notices within about 30 minutes, tests the new code, installs
-it, restarts the desk and sends you a Telegram message such as *"🔄 Updated to version a1b2c3d and
-restarted. What changed: ..."*. If a new version fails its tests or doesn't start, the server keeps the
+it, restarts the desk and sends you a Telegram message such as *"🔄 Updated to version 1.3.0 (a1b2c3d) and
+restarted. What changed: ..."*. The release numbers are explained in `CHANGELOG.md`. If a new version fails its tests or doesn't start, the server keeps the
 old version and tells you. You never need to open the terminal for an update; `/update` on Telegram
 installs one immediately if you don't want to wait.
 
