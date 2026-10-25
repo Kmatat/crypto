@@ -179,6 +179,19 @@ and the risk limits all agree; in a falling market (Bitcoin under its 200-day av
 cash. `/health` shows why each buy signal was refused. If one rule refused all of them, that is the
 case to look at.
 
+## If the desk says your starting balance is small
+
+The setup proposes 90% of the USDT in your Binance demo wallet as the desk's budget. A demo wallet with little USDT
+gives a budget of a hundred dollars or so: positions of about $10 (the minimum order), a desk that stops buying after
+a small loss, and a Claude budget of a cent a day. The money is fake, so give the demo a realistic budget:
+
+1. On the server, run `desk setup`. At the first question choose **2) Paper trading** (real prices, simulated
+   orders, no wallet limit) and type **10000** as the budget. Keep your other answers with Enter.
+   (Or stay with **1) Demo account** if your demo wallet holds at least 10,000 USDT.)
+2. Then run `desk reset --force` so the desk starts a fresh record with the new budget (the old one is kept as a
+   backup file).
+3. Send `/health`: the settings problem is gone and Claude's cap reads about $0.83 a day.
+
 ## One-time upgrade of a server installed before automatic updates
 
 If your server was set up with the first version (before the update job existed), it does not yet know how to

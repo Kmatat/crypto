@@ -124,11 +124,22 @@ class Settings:
             out.append(f"TAKE_PROFIT_ATR {self.take_profit_atr:g} / STOP_LOSS_ATR {self.stop_loss_atr:g} = "
                        f"{self.take_profit_atr / self.stop_loss_atr:.2f}:1 is below MIN_REWARD_RISK {self.min_reward_risk:g}: "
                        "the checklist's reward rule will refuse every buy")
+        position = self.starting_balance * self.max_position_pct
         if self.max_open_positions < 1 or self.max_position_pct <= 0:
             out.append("MAX_OPEN_POSITIONS and MAX_POSITION_PCT must allow at least one position")
-        elif self.starting_balance * self.max_position_pct < 10:
-            out.append(f"STARTING_BALANCE_USDT x MAX_POSITION_PCT = ${self.starting_balance * self.max_position_pct:.2f}, "
-                       "below the $10 minimum position: no order can be placed")
+        elif position < 10:
+            out.append(f"STARTING_BALANCE_USDT ${self.starting_balance:,.0f} x MAX_POSITION_PCT {self.max_position_pct:g} = "
+                       f"${position:.2f} per position, below the $10 minimum: no order can be placed")
+        elif position < 20:
+            out.append(f"STARTING_BALANCE_USDT is only ${self.starting_balance:,.0f}: positions of ${position:.2f} sit next to "
+                       f"the $10 minimum, so " + ("any loss" if position < 10.5 else f"a loss of {(1 - 10 / position):.0%}")
+                       + " stops all buying. The demo uses fake money: "
+                       "10,000 makes its results comparable with the tests")
+        ai = self.ai_budget_pct_month and self.starting_balance * self.ai_budget_pct_month / 100 / 30
+        if self.use_claude and ai and min(ai, self.ai_daily_budget_usd or ai) < 0.10:
+            out.append(f"Claude's budget is ${min(ai, self.ai_daily_budget_usd or ai):.2f} a day (AI_BUDGET_PCT_MONTH "
+                       f"{self.ai_budget_pct_month:g}% a month of a ${self.starting_balance:,.0f} balance): about one call a "
+                       "day, so Claude is effectively off and the free rules decide")
         return out
 
     @classmethod

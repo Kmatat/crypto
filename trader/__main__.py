@@ -647,8 +647,12 @@ def cmd_run(s: Settings, args) -> None:
             weekly_backup(bot, tg)
             maybe_weekly_lab(bot, tg, s, trade_lock, should_stop=stop.is_set)
             if bot.llm and bot.llm.budget_hit:
-                tg.send_once("ai-budget", f"💸 Claude's daily budget (${bot.llm.effective_daily_budget():.2f}) is used up. "
-                                          "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)
+                cap = bot.llm.effective_daily_budget()
+                why = (f" That cap is {s.ai_budget_pct_month:g}% a month of your ${s.starting_balance:,.0f} starting balance; "
+                       "a bigger demo balance (STARTING_BALANCE_USDT) or a cheaper model raises what it buys. Send /health."
+                       if bot.llm.pct_daily_budget and cap == bot.llm.pct_daily_budget else "")
+                tg.send_once("ai-budget", f"💸 Claude's daily budget (${cap:.2f}) is used up. "
+                                          f"The agents use the free built-in rules until 00:00 UTC.{why}", every_hours=12)
             maybe_daily_report(bot, tg, s)
             if limit and n >= limit:
                 break

@@ -5,6 +5,16 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.5 - 2026-10-25
+
+- A small starting balance is now reported at start, in `/health` and in `/diagnose`, with its consequences:
+  positions next to the $10 minimum order (a small loss stops all buying; at $100 the desk stops after its first
+  loss), and a Claude budget of a cent a day (it is 0.25% of the balance a month), which switches Claude off.
+- The "Claude's daily budget is used up" alert says where the cap comes from and what raises it.
+- `/diagnose` shows the starting balance, equity, cash, position size, the Claude cap and, in demo mode, what the
+  Binance demo wallet really holds.
+- The setup wizard warns when the demo wallet holds under 1,000 USDT (it proposes 90% of it as the budget).
+
 ## 1.4.4 - 2026-10-25
 
 - `/diagnose [days]`: "check the logs" from the phone. The settings in force, every coin's buy signals and what

@@ -211,6 +211,10 @@ class Wizard:
             default_budget = "10000"
         if usdt and float(default_budget) > usdt * 0.95:
             default_budget = str(int(usdt * 0.9))
+        if float(default_budget) < 1000:
+            self.say(f"   ⚠️  Only {usdt:,.0f} USDT in the demo wallet. A budget this small makes positions of a few dollars "
+                     "(the minimum order is $10), keeps Claude's budget near zero (it is 0.25% of the budget a month) and "
+                     "makes results hard to judge. Better: choose paper trading with 10000, or use a demo wallet with more USDT.")
         while True:
             budget = self.ask_amount("   Budget the agents may use, in USDT", default_budget)
             if not usdt or float(budget) <= usdt * 0.95:

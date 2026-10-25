@@ -426,10 +426,43 @@ def check_gaps(j: Journal, since: str, pace_minutes: float) -> dict:
             if longest else None}
 
 
+def wallet_line(bot) -> str | None:
+    """Testnet only: what the demo wallet on Binance really holds, next to the desk's own budget."""
+    testnet = getattr(bot, "testnet", None)
+    if testnet is None:
+        return None
+    try:
+        held = testnet.balances_total()
+    except Exception as e:  # noqa: BLE001 - a report line, never a failure
+        return f"Demo wallet on Binance: could not be read ({clean(e, 100)})"
+    usdt = held.get("USDT", 0.0)
+    others = []
+    for asset, qty in sorted(held.items(), key=lambda x: -x[1]):
+        if asset == "USDT" or len(others) >= 4:
+            continue
+        try:
+            others.append(f"{asset} ${qty * bot.market.client.price(asset + 'USDT'):,.0f}")
+        except Exception:  # noqa: BLE001 - coins without a USDT price
+            continue
+    return f"Demo wallet on Binance: {usdt:,.2f} USDT" + (f" plus {', '.join(others)}" if others else "")
+
+
 def settings_lines(bot) -> list[str]:
     s, base = bot.s, bot.base
     card = getattr(bot, "card", None)
-    lines = [f"Strategy in force: stop {s.stop_loss_atr:g} ATR, target {s.take_profit_atr:g} ATR "
+    try:
+        equity, cash = bot.equity(), bot.journal.cash
+    except Exception:  # noqa: BLE001
+        equity, cash = None, None
+    budget = [f"Budget: starting balance ${base.starting_balance:,.0f}"
+              + (f", equity now ${equity:,.2f} (cash ${cash:,.2f})" if equity is not None else "")
+              + f"; positions about ${(equity or base.starting_balance) * s.max_position_pct:,.2f} each (minimum order $10)"]
+    if bot.llm:
+        budget.append(f"Claude cap ${bot.llm.effective_daily_budget():.2f}/day = the lower of ${base.ai_daily_budget_usd:g}/day "
+                      f"and {base.ai_budget_pct_month:g}% a month of the starting balance; spent today ${bot.llm.spent_today:.2f}")
+    if (w := wallet_line(bot)):
+        budget.append(w)
+    lines = [*budget, f"Strategy in force: stop {s.stop_loss_atr:g} ATR, target {s.take_profit_atr:g} ATR "
              f"({s.take_profit_atr / s.stop_loss_atr:.1f}:1, rule minimum {s.min_reward_risk:g}:1), trailing {s.trail_atr:g} ATR, "
              f"checks {', '.join(s.mentor_checks) or 'none'}, cooldown {s.cooldown_hours:g} h",
              f"Size: {s.max_open_positions} positions, at most {s.max_position_pct:.0%} each, risk {s.risk_per_trade_pct:.1%} "

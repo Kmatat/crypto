@@ -49,3 +49,33 @@ def test_portfolio_tilt_blocks_and_downtime_are_counted():
     assert coin_funnel(j, since_iso(24))["ETHUSDT"]["tilted"] == 1
     g = check_gaps(j, since_iso(24), 15)
     assert g["gaps"] == 1 and g["down_hours"] == 4.7 and g["checks"] == 5
+
+
+def test_a_small_starting_balance_is_reported_with_its_consequences():
+    from types import SimpleNamespace
+    from trader.health import settings_lines
+    tiny = Settings(starting_balance=100, anthropic_key="k")
+    p = tiny.problems()
+    assert any("any loss stops all buying" in x for x in p) and any("Claude is effectively off" in x for x in p)
+    assert any("a loss of 17%" in x for x in Settings(starting_balance=120).problems())
+    assert Settings(starting_balance=10_000, anthropic_key="k").problems() == []
+    s = Settings(offline=True, symbols=["BTCUSDT"], starting_balance=120)
+    bot = Orchestrator(s, Journal(":memory:", s.starting_balance))
+    bot.run_cycle()
+    bot.testnet = SimpleNamespace(balances_total=lambda: {"USDT": 135.5, "BTC": 0.5})
+    bot.market.client = SimpleNamespace(price=lambda sym: 80_000.0)
+    lines = "\n".join(settings_lines(bot))
+    assert "starting balance $120" in lines and "positions about $12" in lines
+    assert "Demo wallet on Binance: 135.50 USDT plus BTC $40,000" in lines
+
+
+def test_the_wizard_warns_about_a_tiny_demo_wallet(monkeypatch, tmp_path):
+    from trader import setup_wizard as w
+    said = []
+    monkeypatch.setattr(w, "check_binance", lambda k, s: {"USDT": 150.0})
+    answers = iter(["1", "", ""])   # demo account; then Enter on the budget question (and any extra prompt)
+    wiz = w.Wizard(env_path=tmp_path / ".env", ask=lambda q: next(answers, ""), ask_secret=lambda q: "x", say=said.append)
+    wiz.step_mode()
+    text = "\n".join(map(str, said))
+    assert "Only 150 USDT in the demo wallet" in text and "paper trading with 10000" in text
+    assert wiz.v["STARTING_BALANCE_USDT"] == "135"
