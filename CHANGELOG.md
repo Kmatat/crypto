@@ -5,6 +5,16 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.3.2 - 2026-10-25
+
+- The automated tests that guard every update finish about four times faster, so they fit the small free
+  server's time limit: indicators are computed with the same arithmetic but much less overhead, the backtester
+  and the laboratory compute each coin's indicators once and share them across every window and strategy card
+  (the weekly lab benefits too), and the tests exam shorter windows of the same shape.
+- The updater allows 25 minutes for the tests and the Telegram rejection message now says which test failed,
+  so a failed update can be diagnosed from the phone.
+- New installs run the update job at low priority so the trading desk keeps its pace while tests run.
+
 ## 1.3.1 - 2026-10-25
 
 - Fix: the live desk now decides on finished candles only, as the backtester and the laboratory do; the

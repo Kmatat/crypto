@@ -12,7 +12,8 @@ from trader.notes import Notes, card_periods, champion_at, default_dir, lineage_
 from trader.notify import MAX_LEN, Telegram
 from trader.orchestrator import Orchestrator
 from trader.strategy import StrategyCard
-from tests.test_lab import fake_fetch
+from trader import lab as lab_module
+from tests.test_lab import TEST_WINDOWS, fake_fetch
 
 
 def desk(tmp_path, cycles=120):
@@ -50,7 +51,8 @@ def test_notebook_is_rebuilt_from_the_journal_after_trades(tmp_path):
     assert "Fixed guardrails" in readme and "How to use this with Claude" in readme
 
 
-def test_diary_and_lineage_follow_the_laboratory(tmp_path):
+def test_diary_and_lineage_follow_the_laboratory(tmp_path, monkeypatch):
+    monkeypatch.setattr(lab_module, "WINDOWS", TEST_WINDOWS)
     s = Settings(offline=True, symbols=["BTCUSDT", "ETHUSDT"], lab_alt_symbols=("BNBUSDT", "XRPUSDT"),
                  notes_dir=str(tmp_path / "n"))
     j = Journal(":memory:", 10_000)

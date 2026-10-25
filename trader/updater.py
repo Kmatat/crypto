@@ -31,6 +31,7 @@ STATUS = DATA / "update-status.json"
 REQUEST = DATA / "update-requested"
 RESTART = DATA / "restart-requested"   # consumed by the root-owned crypto-desk-restart service
 LOCKFILE = "requirements.lock"
+TEST_TIMEOUT = 1500   # seconds; the systemd unit allows 2700 for the whole job (pull, install, tests, restart)
 
 
 def now() -> str:
@@ -40,6 +41,16 @@ def now() -> str:
 def redact(text) -> str:
     """git error text can quote the remote URL; never let a token through to Telegram or logs."""
     return re.sub(r"(github_pat_|ghp_)\S+|://[^/\s]+@", lambda m: "<token>" if m.group(1) else "://<token>@", str(text))
+
+
+def test_summary(out: str) -> str:
+    """What a failed test run said, short enough for a phone: the FAILED lines and the final count."""
+    if out.startswith("timed out"):
+        return "the tests did not finish in time on this server (" + out + ")"
+    lines = [ln.strip() for ln in out.splitlines()
+             if ln.startswith(("FAILED ", "ERROR ")) or (" failed" in ln and " in " in ln and ln.strip().startswith("="))]
+    text = "; ".join(lines[:5]).replace("=", "").strip()
+    return redact(text[:600] if text else out.strip()[-400:])
 
 
 def read_status(path: Path = STATUS) -> dict | None:
@@ -141,7 +152,7 @@ class Updater:
             p = subprocess.run(cmd, cwd=self.root, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return False, f"timed out after {timeout}s"
-        return p.returncode == 0, (p.stdout + p.stderr)[-1500:]
+        return p.returncode == 0, (p.stdout + p.stderr)[-4000:]
 
     # ---- status / messaging ----
     def _status(self, **fields) -> dict:
@@ -239,11 +250,14 @@ class Updater:
             self._notify(f"❌ Update failed and was undone. Still running {old[:7]}.\n{why}")
             return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
 
-        ok, out = self._run(self.test_cmd, 900)
+        # the free server is slow (a fraction of one processor core) and keeps trading while the tests run
+        ok, out = self._run(self.test_cmd, TEST_TIMEOUT)
         if not ok:
-            why = self._rollback(old, f"the new version failed its tests: {out[-400:]}")
+            summary = test_summary(out)
+            why = self._rollback(old, f"the new version failed its tests: {summary}")
             self._notify(f"❌ Update rejected: the new version failed its automated tests, so the old version "
-                         f"({old[:7]}) stays. Details are in `desk logs` on the server.")
+                         f"({version_string(root)}) stays.\nWhat failed: {summary}\n"
+                         "(Full output: `desk logs-update` on the server.)")
             return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
 
         try:

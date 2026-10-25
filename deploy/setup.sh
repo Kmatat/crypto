@@ -135,7 +135,8 @@ User=$RUN_USER
 WorkingDirectory=$APP_DIR
 ExecStart=$APP_DIR/.venv/bin/python -m trader update
 Environment=PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-TimeoutStartSec=1800
+TimeoutStartSec=2700
+Nice=10
 # Sandbox: may change only the app folder (code, libraries, data); cannot gain root or touch the system.
 NoNewPrivileges=yes
 PrivateTmp=yes

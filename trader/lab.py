@@ -52,6 +52,7 @@ class Lab:
         self.client = client or (None if s.offline else BinanceClient(PUBLIC_BASE_URL))
         self._fetch = fetch or fetch_history
         self._history: dict[tuple[str, str], list[dict]] = dict(history or {})  # (symbol, interval) -> candles
+        self._analysis: dict[str, dict] = {}  # interval -> indicator cache shared by every window and card (see Backtest)
 
     # ---- state ----
     def champion(self) -> StrategyCard:
@@ -124,9 +125,10 @@ class Lab:
                 btc = hist["BTCUSDT"]
                 data = {c: hist[c] for c in coins}
                 last_ms = min(h[-1]["time"] for h in data.values())
+                cache = self._analysis.setdefault(card.interval, {})
                 for days, offset in WINDOWS:
                     end = last_ms - offset * 86_400_000 if offset else None
-                    r = Backtest(settings, data, days=days, btc_history=btc, end_ms=end).run()
+                    r = Backtest(settings, data, days=days, btc_history=btc, end_ms=end, analysis_cache=cache).run()
                     tests.append({"coins": ",".join(c.removesuffix("USDT") for c in coins), "days": days,
                                   "ending_days_ago": offset, "return_pct": r["return_pct"], "trades": r["trades"],
                                   "profit_factor": r["profit_factor"], "max_drawdown_pct": r["max_drawdown_pct"],
@@ -174,7 +176,8 @@ class Lab:
                 c.apply_decision_rules()
                 hist = self.history(list(self.s.symbols), c.interval)
                 data = {x: hist[x] for x in self.s.symbols}
-                results[name] = Backtest(c.settings(self.s), data, days=int(days) + 1, btc_history=hist["BTCUSDT"]).run()
+                results[name] = Backtest(c.settings(self.s), data, days=int(days) + 1, btc_history=hist["BTCUSDT"],
+                                         analysis_cache=self._analysis.setdefault(c.interval, {})).run()
             finally:
                 dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = saved[0], saved[1]
                 dmod.WEIGHTS.clear()

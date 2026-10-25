@@ -67,9 +67,13 @@ class DailySeries:
 
 class Backtest:
     def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None,
-                 days: int | None = None, btc_history: list[dict] | None = None, end_ms: int | None = None):
+                 days: int | None = None, btc_history: list[dict] | None = None, end_ms: int | None = None,
+                 analysis_cache: dict | None = None):
         self.s = s
         self.history = history
+        # (symbol, candle time) -> (technical report, prediction report); a caller testing several windows or
+        # strategy cards on the same history passes one dict so the indicators are computed once
+        self._cache = analysis_cache if analysis_cache is not None else {}
         self.days = days
         self.end_ms = end_ms  # evaluate a window that ended in the past (out-of-sample checks)
         self.decision = decision or DecisionAgent()
@@ -113,10 +117,20 @@ class Backtest:
                     last_stop[sym] = t
                 elif c["high"] >= p["take"]:
                     cash += self._close(positions, trades, sym, p["take"], "take-profit", t)
+            # indicators depend only on the candles, not on the strategy: computed once per (coin, hour) and shared
+            # across the laboratory's windows and cards through `analysis_cache`
+            analysis = {}
+            for sym, c in candles.items():
+                key = (sym, t)
+                a = self._cache.get(key)
+                if a is None:
+                    a = (self.technical.run(c), self.prediction.run(c))
+                    self._cache[key] = a
+                analysis[sym] = a
             # trailing stops follow new highs (Seykota / Turtles)
             for sym, p in positions.items():
                 p["high"] = max(p["high"], price[sym])
-                atr = self.technical.run(candles[sym])["atr"]
+                atr = analysis[sym][0]["atr"]
                 new_stop = self.risk.trailing_stop({"stop_loss": p["stop"]}, p["high"], atr)
                 if new_stop:
                     p["stop"] = new_stop
@@ -132,9 +146,8 @@ class Backtest:
 
             buys = []
             for sym, c in candles.items():
-                tech = self.technical.run(c)
-                reports = {"technical": tech, "prediction": self.prediction.run(c),
-                           "news": {"score": 0.0}, "forex": {"score": 0.0}}
+                tech, pred = analysis[sym]
+                reports = {"technical": tech, "prediction": pred, "news": {"score": 0.0}, "forex": {"score": 0.0}}
                 d = self.decision.run(sym, reports, holding=sym in positions)
                 decisions[d["action"]] += 1
                 if d["action"] == "SELL":

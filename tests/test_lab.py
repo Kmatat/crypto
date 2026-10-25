@@ -7,6 +7,7 @@ from trader.agents import decision as dmod
 from trader.agents.research import ResearchAgent
 from trader.config import Settings
 from trader.journal import Journal
+from trader import lab as lab_module
 from trader.lab import FORWARD_MIN_DAYS, Lab, status_text, week_report
 from trader.orchestrator import Orchestrator
 from trader.strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line
@@ -54,11 +55,21 @@ def fake_fetch(client, symbol, days, interval="1h"):
     return synthetic(symbol, min(hours, 2600), seed, drift=0.0003)
 
 
+# Same shape as the real exam (five windows, two of them ending in the past) over far fewer days, so the suite
+# also finishes quickly on the small free server whose updater runs it before every install.
+TEST_WINDOWS = [(20, 0), (30, 0), (45, 0), (20, 10), (20, 20)]
+
+
 @pytest.fixture
-def lab():
+def lab(monkeypatch):
+    monkeypatch.setattr(lab_module, "WINDOWS", TEST_WINDOWS)
     s = Settings(offline=True, symbols=["BTCUSDT", "ETHUSDT"], lab_alt_symbols=("BNBUSDT", "XRPUSDT"))
     j = Journal(":memory:", 10_000)
     return Lab(s, j, client=None, fetch=fake_fetch)
+
+
+def test_production_exam_windows_reach_a_year_back_and_include_past_periods():
+    assert lab_module.WINDOWS == [(90, 0), (180, 0), (365, 0), (180, 90), (180, 180)]
 
 
 def test_first_champion_comes_from_owner_settings(lab):
@@ -84,7 +95,7 @@ def test_exam_covers_windows_and_coin_sets_and_verdict_is_strict(lab):
     champ = lab.champion()
     ev = lab.evaluate(champ)
     assert len(ev["tests"]) == 10 and {t["coins"] for t in ev["tests"]} == {"BTC,ETH", "BNB,XRP"}
-    assert {(t["days"], t["ending_days_ago"]) for t in ev["tests"]} == {(90, 0), (180, 0), (365, 0), (180, 90), (180, 180)}
+    assert {(t["days"], t["ending_days_ago"]) for t in ev["tests"]} == set(TEST_WINDOWS)
     same = lab.compare(ev, ev)
     assert not same["passed"] and "only 0 of 10" in same["reasons"][0]        # equal is not better
     better = {**ev, "tests": [{**t, "return_pct": t["return_pct"] + 1} for t in ev["tests"]],
