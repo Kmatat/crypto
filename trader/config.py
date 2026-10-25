@@ -22,6 +22,7 @@ PUBLIC_BASE_URL = "https://data-api.binance.vision"
 ENV_KEYS = (
     "AI_BUDGET_PCT_MONTH",
     "AI_DAILY_BUDGET_USD",
+    "AI_ORDER",
     "ANTHROPIC_API_KEY",
     "AUTO_COINS",
     "AUTO_PROMOTE",
@@ -34,6 +35,11 @@ ENV_KEYS = (
     "COOLDOWN_HOURS",
     "CYCLE_MINUTES",
     "DAILY_REPORT_HOUR_UTC",
+    "FREE_AI_API_KEY",
+    "FREE_AI_BASE_URL",
+    "FREE_AI_DAILY_REQUESTS",
+    "FREE_AI_MODELS",
+    "FREE_AI_PROVIDER",
     "HEAD_TRADER",
     "JOURNAL_DB",
     "LAB_ALT_SYMBOLS",
@@ -130,6 +136,13 @@ class Settings:
     news_refresh_minutes: int = 30
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
     ai_budget_pct_month: float | None = None  # % of the account a month; unset = off on demo money, 0.25 with real money
+    # ---- a free AI (trader/free_ai.py): answers the agents' everyday questions at no cost, within its daily limits ----
+    free_ai_provider: str = ""       # gemini, groq, mistral, cloudflare, openrouter or custom; empty = none
+    free_ai_key: str = field(default="", repr=False)
+    free_ai_models: tuple = ()       # empty = the provider's recommended models, tried in order
+    free_ai_base_url: str = ""       # custom services, and Cloudflare (the address holds the account id)
+    free_ai_daily_requests: int = 0  # requests a day per model the desk allows itself; 0 = the provider's default
+    ai_order: str = "free-first"     # free-first: the free AI answers, Claude only when it cannot; or claude-first
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     # ---- strategy laboratory (trader/lab.py): the desk proposes, tests and promotes strategy cards ----
     lab_enabled: bool = True
@@ -167,6 +180,17 @@ class Settings:
     def use_claude(self) -> bool:
         return bool(self.anthropic_key) and not self.offline
 
+    @property
+    def use_free_ai(self) -> bool:
+        from .free_ai import PRESETS
+        if self.offline or self.free_ai_provider not in PRESETS:
+            return False
+        if self.free_ai_provider == "custom":
+            return bool(self.free_ai_base_url and self.free_ai_models)
+        if "{account_id}" in (self.free_ai_base_url or PRESETS[self.free_ai_provider].base_url):
+            return False
+        return bool(self.free_ai_key)
+
     def ai_pct_month(self) -> float:
         """The percentage-of-account cap on Claude's spend. The demo account is fake money while Claude is paid in real
         dollars, so tying the AI budget to a fake balance only starves the AI: on demo money there is no percentage
@@ -196,6 +220,16 @@ class Settings:
                        f"the $10 minimum, so " + ("any loss" if position < 10.5 else f"a loss of {(1 - 10 / position):.0%}")
                        + " stops all buying. The demo uses fake money: "
                        "10,000 makes its results comparable with the tests")
+        from .free_ai import PRESETS
+        if self.free_ai_provider and self.free_ai_provider not in PRESETS:
+            out.append(f"FREE_AI_PROVIDER={self.free_ai_provider!r} is not one of {', '.join(PRESETS)}: no free AI is used")
+        elif self.free_ai_provider and not self.offline and not self.use_free_ai:
+            need = ("FREE_AI_BASE_URL and FREE_AI_MODELS" if self.free_ai_provider == "custom" else
+                    "FREE_AI_BASE_URL with your Cloudflare account id" if self.free_ai_provider == "cloudflare"
+                    and not self.free_ai_base_url else "FREE_AI_API_KEY")
+            out.append(f"FREE_AI_PROVIDER={self.free_ai_provider} needs {need} (desk setup): no free AI is used")
+        if self.ai_order not in ("free-first", "claude-first"):
+            out.append(f"AI_ORDER={self.ai_order!r} must be free-first or claude-first: using free-first")
         pct = self.ai_pct_month()
         ai = pct and self.starting_balance * pct / 100 / 30
         if self.use_claude and ai and min(ai, self.ai_daily_budget_usd or ai) < 0.10:
@@ -240,6 +274,12 @@ class Settings:
             news_refresh_minutes=int(os.getenv("NEWS_REFRESH_MINUTES", 30)),
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
             ai_budget_pct_month=_f("AI_BUDGET_PCT_MONTH", 0) if os.getenv("AI_BUDGET_PCT_MONTH", "").strip() else None,
+            free_ai_provider=os.getenv("FREE_AI_PROVIDER", "").strip().lower(),
+            free_ai_key=os.getenv("FREE_AI_API_KEY", "").strip(),
+            free_ai_models=tuple(m.strip() for m in os.getenv("FREE_AI_MODELS", "").split(",") if m.strip()),
+            free_ai_base_url=os.getenv("FREE_AI_BASE_URL", "").strip(),
+            free_ai_daily_requests=int(float(os.getenv("FREE_AI_DAILY_REQUESTS") or 0)),
+            ai_order=os.getenv("AI_ORDER", "free-first").strip().lower() or "free-first",
             auto_update=_b("AUTO_UPDATE", True),
             lab_enabled=_b("LAB_ENABLED", True),
             head_trader=_b("HEAD_TRADER", True),

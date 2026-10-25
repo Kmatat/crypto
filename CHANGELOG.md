@@ -5,6 +5,26 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.0 - 2026-10-25
+
+- A free AI next to Claude, for small budgets. `desk setup` has a new step (STEP 3) to add one: Google Gemini
+  (recommended: no card, about 500 questions a day per model), Groq, Mistral, Cloudflare Workers AI, OpenRouter or
+  any OpenAI-compatible service. The free AI reads the news, double-checks each buy or sell the rules want and picks
+  the scout's coins. Web research and `/review` of the private notebook stay with Claude.
+- Order: the free AI first and Claude only when it cannot answer (default), or Claude first while its budget lasts.
+  `/ai` on Telegram shows both AIs and the free AI's questions used today; `/ai free-first` or `/ai claude-first`
+  changes the order at once and keeps it across restarts.
+- The free AI is rationed by requests instead of dollars: every request is counted (failed ones too), 10% of each
+  daily allowance is kept in reserve, per-minute limits are respected by a short wait or the next model, and nothing
+  is retried in a loop. The head trader plans the buy/sell questions from the requests left before the provider's
+  daily reset. Answers are checked against the question's form before any agent uses them.
+- The scorecard judges each AI separately against the rules, and the news hit rate is shown per reader. Health,
+  `/status`, `/aibudget`, `/diagnose`, the notebook and the daily report show the free AI. A rejected key, a
+  retired model or a used-up daily allowance is reported once on Telegram. `desk check` tests the free AI.
+- A free model may slow the check pace down but not speed it up (faster checks would spend its allowance).
+- Fix: the desk assumed a Claude buy/sell question costs about four times what it does (6,000 input tokens instead
+  of the measured 1,300), so at the start of each day it rationed Claude more tightly than its budget required.
+
 ## 1.5.0 - 2026-10-25
 
 - Claude's budget no longer shrinks with a small demo balance. Until now it was the lower of $5 a day and 0.25% of

@@ -194,11 +194,12 @@ class NewsAgent:
         data = self.llm.ask(SYSTEM, prompt, SENTIMENT_SCHEMA, effort="low", caller="news")
         if not data:
             return None
+        source = data.pop("_ai", "claude")   # who read the news: "claude" or "ai:<free provider>"
         result: dict = {"_mood": data["market_mood"],
-                        "_pace": {"minutes": int(data["check_every_minutes"]), "reason": data["pace_reason"]}}
+                        "_pace": {"minutes": int(data["check_every_minutes"]), "reason": data["pace_reason"], "by": source}}
         by_coin = {c["coin"].upper(): c for c in data["coins"]}
         for coin in coins:
             c = by_coin.get(coin, {"score": 0, "summary": "no coverage"})
             result[coin] = {"score": max(-1.0, min(1.0, float(c["score"]))), "summary": c["summary"],
-                            "headlines": [h for h in headlines if self.mentions(h, coin)][:5], "source": "claude"}
+                            "headlines": [h for h in headlines if self.mentions(h, coin)][:5], "source": source}
         return result

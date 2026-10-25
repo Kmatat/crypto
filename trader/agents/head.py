@@ -67,12 +67,14 @@ class HeadTraderAgent:
         budget, minus what the news agent will need for the rest of the day, is spread over the day's remaining
         checks at the pace the desk actually runs."""
         if not self.llm:
-            self.last_plan = {"allowed": [], "skipped": [], "why": "Claude is not configured"}
+            self.last_plan = {"allowed": [], "skipped": [], "why": "no AI is configured"}
             return set()
         worth = [c for c in candidates if c.get("eligible") and not c.get("fresh")
                  and ((c["holding"] and c["score"] <= -c["threshold"]) or (not c["holding"] and c["score"] >= c["threshold"]))]
         worth.sort(key=lambda c: (0 if c["holding"] else 1, -(abs(c["score"]) - c["threshold"])))
         now = now or dt.datetime.now(dt.timezone.utc)
+        if hasattr(self.llm, "allowance"):   # a free AI and/or Claude behind the router
+            return self._plan_router(worth, now, pace_minutes)
         budget = self.llm.effective_daily_budget()
         if not budget:
             allowed, why = worth, "no daily cap set"
@@ -101,6 +103,28 @@ class HeadTraderAgent:
                 if due and worth:
                     self._next_call_at = now + dt.timedelta(minutes=minutes_left / max(1.0, affordable))
             allowed = worth[:n]
+        self.last_plan = {"allowed": [c["symbol"] for c in allowed], "skipped": [c["symbol"] for c in worth[len(allowed):]],
+                          "why": why}
+        return {c["symbol"] for c in allowed}
+
+    def _plan_router(self, worth: list[dict], now: dt.datetime, pace_minutes: float | None) -> set[str]:
+        """Same plan as plan_ai, with the AIs' combined allowance: a free AI's requests left before its daily reset
+        and Claude's dollars, as questions per check, never more than the free tier's per-minute limits allow."""
+        pace = pace_minutes or self.s.cycle_minutes
+        rate, cap, detail = self.llm.allowance(now, pace, self.s.news_refresh_minutes, self.s.scout_hours)
+        if rate >= 1:
+            n = min(cap, int(rate)) if math.isfinite(rate) else len(worth)
+            why = f"up to {n} question(s) this check ({detail})"
+        elif rate > 0:
+            due = self._next_call_at is None or now >= self._next_call_at
+            n = 1 if due else 0
+            why = (f"about one question every {1 / rate:.0f} checks ({detail}): "
+                   + ("one now" if due else "none this check"))
+            if due and worth:
+                self._next_call_at = now + dt.timedelta(minutes=pace / rate)
+        else:
+            n, why = 0, f"no AI questions left today ({detail})"
+        allowed = worth[:n]
         self.last_plan = {"allowed": [c["symbol"] for c in allowed], "skipped": [c["symbol"] for c in worth[len(allowed):]],
                           "why": why}
         return {c["symbol"] for c in allowed}
@@ -164,9 +188,14 @@ class HeadTraderAgent:
             lines.append("Lessons from live trading: " + "; ".join(lessons["notes"]))
         sc = j.get("scorecard_text")
         if sc:
-            verdict = next((ln for ln in sc.splitlines() if ln.startswith("Verdict")), "")
-            if verdict:
-                lines.append("Claude versus the rules so far: " + verdict.removeprefix("Verdict: "))
+            who, verdicts = "Claude", []
+            for ln in sc.splitlines():
+                if ln.startswith("🆓 "):
+                    who = ln[2:].split(" vs the free rules")[0]
+                elif ln.startswith("Verdict"):
+                    verdicts.append(f"{who}: {ln.removeprefix('Verdict: ')}")
+            if verdicts:
+                lines.append("The AI versus the rules so far: " + "; ".join(verdicts))
         review = (j.get("last_review") or {}).get("review") or {}
         if review.get("summary"):
             lines.append("Last review: " + str(review["summary"])[:300])

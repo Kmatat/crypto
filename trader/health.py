@@ -93,7 +93,7 @@ def funnel(j: Journal, since: str) -> dict:
                         "WHERE ts >= ?", (since,)).fetchall()
     checks = j.db.execute("SELECT COUNT(*) FROM equity WHERE ts >= ?", (since,)).fetchone()[0]
     out = {"checks": checks, "decisions": len(rows), "buy_signals": 0, "approved": 0, "refused": {}, "claude_vetoes": 0,
-           "news_vetoes": 0, "sell_signals": 0, "sells": 0}
+           "free_ai_vetoes": 0, "news_vetoes": 0, "sell_signals": 0, "sells": 0}
     for r in rows:
         if r["rules_action"] == "SELL":
             out["sell_signals"] += 1
@@ -111,6 +111,8 @@ def funnel(j: Journal, since: str) -> dict:
             out["news_vetoes"] += 1
         elif str(r["source"] or "").startswith("claude"):
             out["claude_vetoes"] += 1
+        elif str(r["source"] or "").startswith("ai:"):
+            out["free_ai_vetoes"] += 1
     orders = j.db.execute("SELECT side, ok, COUNT(*) n FROM orders WHERE ts >= ? GROUP BY side, ok", (since,)).fetchall()
     out["orders"] = {f"{o['side']}:{'filled' if o['ok'] else 'failed'}": o["n"] for o in orders}
     out["closed_trades"] = j.db.execute("SELECT COUNT(*), COALESCE(SUM(pnl), 0) FROM closed_trades WHERE closed_at >= ?",
@@ -124,6 +126,8 @@ def funnel_text(f: dict) -> str:
         parts = [f"{f['approved']} approved"]
         if f["claude_vetoes"]:
             parts.append(f"{f['claude_vetoes']} vetoed by Claude")
+        if f.get("free_ai_vetoes"):
+            parts.append(f"{f['free_ai_vetoes']} vetoed by the free AI")
         if f["news_vetoes"]:
             parts.append(f"{f['news_vetoes']} blocked by bad news")
         refused = sorted(f["refused"].items(), key=lambda x: -x[1])
@@ -239,12 +243,18 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
     wl = j.get("watchlist") or {}
     rows.append(row("Market scout", "finds liquid coins worth watching", "working" if bot.scout else "off",
                     (f"{len(wl.get('symbols', []))} coins, refreshed {ago(wl.get('ts'))} by "
-                     + ("AI research" if wl.get("source") == "claude" else "market scan")) if bot.scout and wl.get("ts")
+                     + ("AI research" if wl.get("source") == "claude" else
+                        "the free AI (market data only)" if str(wl.get("source", "")).startswith("ai:") else "market scan"))
+                    if bot.scout and wl.get("ts")
                     else ("waiting for its first run" if bot.scout else "AUTO_COINS=false"), err("scout")))
     cache = getattr(bot.news, "_cache", None)
     news_ts = dt.datetime.fromtimestamp(cache[0], dt.timezone.utc).isoformat(timespec="seconds") if cache else None
     mood = (cache[1].get("_mood") if cache else None) or "no headlines read yet"
-    rows.append(row("News", "headlines scored per coin" + (" by Claude" if bot.llm else " by keywords"),
+    readers = (["the free AI"] if getattr(bot, "free_ai", None) else []) + (["Claude"] if bot.llm else [])
+    if getattr(bot, "free_ai", None) and bot.llm and getattr(bot.ai, "order", "") == "claude-first":
+        readers.reverse()
+    rows.append(row("News", "headlines scored per coin by " + (", then ".join(readers) + ", then keywords" if readers
+                                                                 else "keywords"),
                     "working" if cache else "idle", f"read {ago(news_ts)}: {clean(mood, 100)}", err("news")))
     fx = getattr(bot.forex, "_cache", None)
     rows.append(row("Forex", "US dollar strength (ECB rates)", "working" if fx else "idle",
@@ -263,11 +273,15 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
     plan = getattr(head, "last_plan", {}) if head else {}
     rows.append(row("Head trader", "spends the AI budget where it changes a decision, tilts thresholds, runs the study",
                     "working" if head else "off",
-                    (f"last check: Claude for {', '.join(plan.get('allowed') or []) or 'nobody'}; {plan.get('why', 'no plan yet')}"
+                    (f"last check: AI for {', '.join(plan.get('allowed') or []) or 'nobody'}; {plan.get('why', 'no plan yet')}"
                      if head else "HEAD_TRADER=false")))
     claude_calls = j.db.execute("SELECT COUNT(*) FROM decisions WHERE ts >= ? AND source = 'claude'", (since,)).fetchone()[0]
+    free_calls = j.db.execute("SELECT COUNT(*) FROM decisions WHERE ts >= ? AND source LIKE 'ai:%' "
+                              "AND source NOT LIKE '%-reused'", (since,)).fetchone()[0]
     rows.append(row("Decision (portfolio manager)", "BUY / SELL / HOLD from all reports", "working" if f["decisions"] else "idle",
-                    f"{f['decisions']} decisions, {claude_calls} with a fresh Claude opinion", err("decision")))
+                    f"{f['decisions']} decisions, {claude_calls} with a fresh Claude opinion"
+                    + (f", {free_calls} with a fresh free-AI opinion" if free_calls or getattr(bot, "free_ai", None) else ""),
+                    err("decision")))
     rows.append(row("Risk manager", "position size, limits, loss brakes", "working" if f["decisions"] else "idle",
                     f"approved {f['approved']} buys; " + (", ".join(f"{k} {n}" for k, n in f["refused"].items()
                                                                    if not k.startswith("checklist")) or "no limit refusals")))
@@ -286,8 +300,8 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
                     f"last run {ago(last_lab)}; {sum(1 for c in (j.get('strategy_challengers') or []) if c['status'] in ('lab_passed', 'ready'))} "
                     "challenger(s) still in test" if s.lab_enabled else "LAB_ENABLED=false", err("threshold study") or err("weekly lab")))
     cases = len(j.get("scorecard_cases") or {})
-    rows.append(row("Scorecard", "measures Claude and the news against real later prices", "working" if cases else "idle",
-                    f"{cases} Claude decisions judged so far"))
+    rows.append(row("Scorecard", "measures each AI and the news against real later prices", "working" if cases else "idle",
+                    f"{cases} AI decisions judged so far"))
     return rows
 
 
@@ -349,7 +363,9 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
     if bot.llm:
         budget = bot.llm.effective_daily_budget()
         lines.append(f"Claude: ${bot.llm.spent_today:.2f} spent today" + (f" of ${budget:.2f}" if budget else "")
-                     + (" (budget used up: free rules until 00:00 UTC)" if bot.llm.budget_hit else ""))
+                     + (" (budget used up until 00:00 UTC)" if bot.llm.budget_hit else ""))
+    if getattr(bot, "free_ai", None):
+        lines.append(free_ai_line(bot.free_ai))
     st = update_status or {}
     if st:
         lines.append(f"Updates: last check {ago(st.get('checked_at'))}, " + (st.get("last_result") or st.get("result") or "no result yet")
@@ -410,8 +426,8 @@ def coin_funnel(j: Journal, since: str) -> dict[str, dict]:
                     c["refused"][label] = c["refused"].get(label, 0) + 1
         elif (r["reasoning"] or "").startswith("Clearly negative news"):
             c["news"] += 1
-        elif str(r["source"] or "").startswith("claude"):
-            c["claude"] += 1
+        elif str(r["source"] or "").startswith(("claude", "ai:")):
+            c["claude"] += 1   # vetoed by an AI (Claude or the free AI)
     return out
 
 
@@ -474,8 +490,24 @@ def settings_lines(bot) -> list[str]:
              + (f" + up to {base.max_coins - len(base.symbols)} scout picks" if base.auto_coins else ""),
              f"Decisions: buy threshold {thresholds_line(card) if card else 'common'}, minimum confidence "
              f"{base.min_confidence:g}; Claude {'on (' + base.claude_model + ')' if bot.llm else 'off'}"
-             + (f", ${bot.llm.effective_daily_budget():.2f}/day cap" if bot.llm else "")]
+             + (f", ${bot.llm.effective_daily_budget():.2f}/day cap" if bot.llm else "")
+             + (f"; free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)}), {getattr(bot.ai, 'order', 'free-first')}"
+                if getattr(bot, "free_ai", None) else "; free AI off")]
     return lines
+
+
+def free_ai_line(free) -> str:
+    """The free AI's day in one line: requests used per model, what is left, when it restarts."""
+    st = free.status()
+    used = st["usage"].get("models", {})
+    per = ", ".join(f"{m} {used.get(m, {}).get('requests', 0)}" + ("" if st["shared"] else f"/{st['daily']}")
+                    + (" (used up)" if m in st["usage"].get("exhausted", []) else "")
+                    + (f" (off: {st['disabled'][m]})" if m in st["disabled"] else "") for m in st["models"])
+    answers = sum(v.get("answers", 0) for v in used.values())
+    bad = sum(v.get("bad", 0) for v in used.values())
+    off = f" ⚠️ off: {st['disabled']['*']}" if "*" in st["disabled"] else ""
+    return (f"Free AI ({st['label']}): requests today {per}" + (f" of {st['daily']} shared" if st["shared"] else "")
+            + f"; {answers} answers, {bad} in the wrong form; daily allowance restarts in {st['reset_hours']:g} h{off}")
 
 
 def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
@@ -505,7 +537,7 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
         stops = sorted(c["refused"].items(), key=lambda x: -x[1])
         extra = [f"{k} {n}" for k, n in stops[:3]]
         if c["claude"]:
-            extra.append(f"Claude veto {c['claude']}")
+            extra.append(f"AI veto {c['claude']}")
         if c["news"]:
             extra.append(f"bad news {c['news']}")
         if c["tilted"]:
@@ -526,11 +558,11 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
         except Exception as e:  # noqa: BLE001 - the replay needs the network; the rest of the report stands alone
             lines.append(f"\n(The rules' replay could not run: {clean(e, 120)})")
     if r is not None:
-        lines.append(f"\nThe rules alone on the same coins and prices (no news, no Claude, no head trader): {r['trades']} "
+        lines.append(f"\nThe rules alone on the same coins and prices (no news, no AI, no head trader): {r['trades']} "
                      f"trades, {r['return_pct']:+.2f}% (holding the coins: {r['basket_hold_pct']:+.1f}%)")
         gap = r["trades"] - opened
         if gap > max(2, r["trades"] * 0.3):
-            causes = sorted([("Claude vetoes", totals["claude"]), ("bad-news blocks", totals["news"]),
+            causes = sorted([("AI vetoes", totals["claude"]), ("bad-news blocks", totals["news"]),
                              ("the head trader's portfolio tilt", totals["tilted"])]
                             + [(k, n) for k, n in totals["refused"].items()], key=lambda x: -x[1])
             top = [f"{k} ({n})" for k, n in causes if n][:3]

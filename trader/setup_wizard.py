@@ -15,6 +15,7 @@ from dotenv import dotenv_values
 
 from .binance_client import BinanceClient, BinanceError
 from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, SETTINGS_VERSION, TESTNET_BASE_URL, check_minutes, legacy_take_profit
+from .free_ai import PRESETS, FreeAI
 from .llm import MODEL_CHOICES, ClaudeJSON
 from .notify import Telegram
 
@@ -24,6 +25,9 @@ LAYOUT = [
         "TRADING_MODE", "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET", "STARTING_BALANCE_USDT"]),
     ("Claude AI (optional - empty key = built-in rules). Daily budget in USD, 0 = no cap", [
         "ANTHROPIC_API_KEY", "CLAUDE_MODEL", "AI_DAILY_BUDGET_USD"]),
+    ("Free AI (optional, no cost): gemini, groq, mistral, cloudflare, openrouter or custom; empty = none. "
+     "AI_ORDER: free-first or claude-first", [
+        "FREE_AI_PROVIDER", "FREE_AI_API_KEY", "FREE_AI_MODELS", "FREE_AI_BASE_URL", "FREE_AI_DAILY_REQUESTS", "AI_ORDER"]),
     ("Telegram alerts (optional)", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DAILY_REPORT_HOUR_UTC"]),
     ("What to trade: SYMBOLS are always watched; the scout may add coins up to MAX_COINS", [
         "SYMBOLS", "AUTO_COINS", "MAX_COINS", "SCOUT_HOURS", "MIN_VOLUME_MUSD", "CANDLE_INTERVAL"]),
@@ -43,7 +47,33 @@ DEFAULTS = {
     "RISK_PER_TRADE_PCT": "0.01", "MAX_POSITION_PCT": "0.10", "MAX_OPEN_POSITIONS": "3", "MAX_DAILY_LOSS_PCT": "0.03",
     "MAX_DRAWDOWN_PCT": "0.10", "MIN_CONFIDENCE": "0.60", "STOP_LOSS_ATR": "2.0", "TAKE_PROFIT_ATR": "4.0",
     "TRAIL_ATR": "2.0", "MENTOR_CHECKS": "trend200,btc,cooldown,reward", "MIN_REWARD_RISK": "2.0",
-    "COOLDOWN_HOURS": "24",
+    "COOLDOWN_HOURS": "24", "AI_ORDER": "free-first",
+}
+
+# The free AI menu: (preset, what the owner reads). Gemini first: no card, the largest daily allowance.
+FREE_AI_CHOICES = [
+    ("gemini", "Google Gemini - recommended: no card, about 500 questions a day per model (the desk needs about 90)"),
+    ("groq", "Groq - no card, does not keep or train on what it reads; about 1,000 questions a day, smaller word limits"),
+    ("mistral", "Mistral - no card; turn off 'Anonymous improvement data' in its settings"),
+    ("cloudflare", "Cloudflare Workers AI - no card, does not train; about 180 questions a day; needs your Account ID"),
+    ("openrouter", "OpenRouter - 50 questions a day free (1,000 a day after a one-time $10 purchase)"),
+    ("custom", "Another OpenAI-compatible service (address, key and model typed by hand)"),
+]
+FREE_AI_HOWTO = {
+    "gemini": ["Open https://aistudio.google.com with your Google account and accept the terms.",
+               "Click 'Get API key', then 'Create API key' (no card needed), and copy the key.",
+               "Never click 'Set up billing' unless you mean to pay: the desk only needs the free tier.",
+               "Note: on the free tier Google may use what it reads to improve its models. The desk sends only public",
+               "headlines and market numbers, never balances, keys or the notebook."],
+    "groq": ["Open https://console.groq.com, sign up (no card), click 'API Keys', then 'Create API Key', and copy it.",
+             "Optional: Settings > Data Controls > turn on Zero Data Retention."],
+    "mistral": ["Open https://console.mistral.ai, create an account (free mode, no card).",
+                "Admin panel > Privacy: turn OFF 'Anonymous improvement data'. Then API Keys > Create new key."],
+    "cloudflare": ["Open https://dash.cloudflare.com (free account), then Workers AI > 'Use REST API'.",
+                   "Click 'Create a Workers AI API Token', copy it, and copy the 'Account ID' shown on the same page."],
+    "openrouter": ["Open https://openrouter.ai, sign in, then Keys > Create key, and copy it.",
+                   "Free models allow 50 questions a day; buying $10 of credit once raises it to 1,000 a day."],
+    "custom": ["Any service with an OpenAI-compatible /chat/completions address (for example a local Ollama server)."],
 }
 
 
@@ -64,6 +94,16 @@ def check_claude(model: str, key: str) -> bool:
     schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
               "additionalProperties": False}
     return ClaudeJSON(model, key).ask("Reply with JSON.", "Say ok.", schema, effort="low") is not None
+
+
+def check_free_ai(provider: str, key: str, models: list[str], base_url: str) -> tuple[bool, str]:
+    """One tiny question to the free AI. (answered?, what went wrong)."""
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
+              "additionalProperties": False}
+    ai = FreeAI(provider, key, models, base_url)
+    if ai.ask("Reply with JSON.", "Say ok.", schema, effort="low") is not None:
+        return True, ""
+    return False, "; ".join(p["text"] for p in ai.take_problems()) or "no valid answer (busy, or the model name is wrong)"
 
 
 def write_env(path: Path, values: dict[str, str]) -> None:
@@ -153,6 +193,7 @@ class Wizard:
         self.say("Press Enter to accept the value shown in [brackets].\n")
         self.step_mode()
         self.step_claude()
+        self.step_free_ai()
         self.step_telegram()
         self.step_coins()
         self.offer_fresh_journal()
@@ -161,7 +202,7 @@ class Wizard:
         return self.v
 
     def step_mode(self) -> None:
-        self.say("STEP 1 of 4 - Trading mode")
+        self.say("STEP 1 of 5 - Trading mode")
         current = 1 if self.v.get("TRADING_MODE", "testnet") == "testnet" else 2
         pick = self.choose("Choose 1 or 2", [
             "Binance demo account: real API orders with fake money (recommended)",
@@ -223,9 +264,9 @@ class Wizard:
         self.v["STARTING_BALANCE_USDT"] = budget
 
     def step_claude(self) -> None:
-        self.say("\nSTEP 2 of 4 - Claude AI (optional)")
+        self.say("\nSTEP 2 of 5 - Claude AI (optional, paid)")
         self.say("   With Claude, AI reads the news and makes the final buy/sell call, with a written reason.")
-        self.say("   Without it, the built-in rules decide (free). You can add it later by re-running setup.")
+        self.say("   Without it, a free AI (next step) or the built-in rules decide. You can add it later by re-running setup.")
         if not self.yes("   Use Claude?", bool(self.v.get("ANTHROPIC_API_KEY"))):
             self.v["ANTHROPIC_API_KEY"] = ""
             return
@@ -253,8 +294,56 @@ class Wizard:
                 self.say("   OK - using the built-in rules instead.")
                 return
 
+    def step_free_ai(self) -> None:
+        self.say("\nSTEP 3 of 5 - A free AI (optional, costs nothing)")
+        self.say("   A free AI reads the news and double-checks each buy or sell, within the provider's daily allowance.")
+        self.say("   With Claude too, the free AI answers first and Claude only when it cannot (you can change the order).")
+        if not self.yes("   Use a free AI?", bool(self.v.get("FREE_AI_PROVIDER"))):
+            self.v["FREE_AI_PROVIDER"] = ""
+            return
+        ids = [p for p, _ in FREE_AI_CHOICES]
+        current = ids.index(self.v["FREE_AI_PROVIDER"]) + 1 if self.v.get("FREE_AI_PROVIDER") in ids else 1
+        while True:
+            pick = self.choose("   Choose", [label for _, label in FREE_AI_CHOICES], current)
+            provider = ids[pick - 1]
+            same = provider == self.v.get("FREE_AI_PROVIDER")
+            for line in FREE_AI_HOWTO[provider]:
+                self.say(f"   {line}")
+            base_url = self.v.get("FREE_AI_BASE_URL", "") if same else ""
+            models = [m.strip() for m in (self.v.get("FREE_AI_MODELS", "") if same else "").split(",") if m.strip()]
+            if provider == "cloudflare":
+                old = base_url.split("/accounts/")[1].split("/")[0] if "/accounts/" in base_url else ""
+                account = self.ask("   Cloudflare Account ID", old)
+                base_url = PRESETS["cloudflare"].base_url.replace("{account_id}", account.strip())
+            elif provider == "custom":
+                base_url = self.ask("   Service address (ends before /chat/completions)", base_url)
+                models = [m.strip() for m in self.ask("   Model name(s), comma separated", ",".join(models)).split(",")
+                          if m.strip()]
+            key = self.ask_secret("   Free AI API key" + (" (Enter if the service needs none)" if provider == "custom" else ""),
+                                  self.v.get("FREE_AI_API_KEY", "") if same else "")
+            self.say(f"   Checking with {PRESETS[provider].label}...")
+            ok, why = check_free_ai(provider, key, models, base_url)
+            if ok:
+                self.say("   ✅ The free AI answered.")
+                self.v.update({"FREE_AI_PROVIDER": provider, "FREE_AI_API_KEY": key, "FREE_AI_BASE_URL": base_url,
+                               "FREE_AI_MODELS": ",".join(models)})
+                if self.v.get("ANTHROPIC_API_KEY"):
+                    first = 2 if self.v.get("AI_ORDER") == "claude-first" else 1
+                    self.say("   Which AI should answer first?")
+                    pick = self.choose("   Choose", ["the free AI, Claude only when it cannot (saves money)",
+                                                    "Claude while its daily budget lasts, then the free AI (best judgement)"],
+                                       first)
+                    self.v["AI_ORDER"] = "free-first" if pick == 1 else "claude-first"
+                return
+            self.say(f"   ❌ The free AI did not answer: {why}")
+            if not self.yes("   Try again?", True):
+                self.v["FREE_AI_PROVIDER"] = ""
+                self.say("   OK - no free AI.")
+                return
+            current = pick
+
     def step_telegram(self) -> None:
-        self.say("\nSTEP 3 of 4 - Phone alerts on Telegram (optional, recommended)")
+        self.say("\nSTEP 4 of 5 - Phone alerts on Telegram (optional, recommended)")
         self.say("   You get a message for every buy, sell or failed order, a daily report,")
         self.say("   and you can send /status or /report to your bot at any time.")
         if not self.yes("   Set up Telegram alerts?", True):
@@ -306,7 +395,7 @@ class Wizard:
             self.say("   Please type a whole hour from 0 to 23.")
 
     def step_coins(self) -> None:
-        self.say("\nSTEP 4 of 4 - Coins and timing")
+        self.say("\nSTEP 5 of 5 - Coins and timing")
         while True:
             coins = self.ask("   Core coins, always watched (comma separated)", self.v.get("SYMBOLS") or DEFAULTS["SYMBOLS"])
             symbols = [c.strip().upper() for c in coins.split(",") if c.strip()]

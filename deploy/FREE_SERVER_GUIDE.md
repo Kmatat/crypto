@@ -77,8 +77,20 @@ often rejected.
 3. Give it a name (for example *My Crypto Desk*) and a username that ends in `bot` (for example `kmdesk_bot`).
 4. BotFather replies with a **token** like `123456789:AAH...`. Copy it.
 
-**D) Claude key (optional).** Without it, built-in rules make the decisions for free.
+**D) Claude key (optional, paid).** Without it, a free AI (E) or the built-in rules make the decisions.
 Get one at **https://console.anthropic.com**, under **API Keys**. The account needs some prepaid credit.
+
+**E) A free AI key (optional, recommended on a small budget): Google Gemini.** It costs nothing and needs no card.
+1. Open **https://aistudio.google.com** and sign in with your Google account (you must be 18 or older).
+2. Accept the terms. Click **Get API key**, then **Create API key**, and copy the key.
+3. Do **not** click *Set up billing*: the desk only uses the free tier.
+4. Optional: **https://aistudio.google.com/rate-limit** shows your exact free limits (about 500 questions a day per
+   model; the desk needs about 90 on a normal day).
+
+Good to know: on the free tier Google may use what it reads to improve its models (not in the EU, the UK or
+Switzerland). The desk sends it only public news headlines and market numbers, never your balances, keys or
+notebook. If you prefer a provider that never keeps what it reads, choose **Groq** in the setup instead
+(**https://console.groq.com** → *API Keys* → *Create API Key*, no card).
 
 ## Part 4: Install the desk on the server (10 minutes)
 
@@ -134,6 +146,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/health` | Is everything working? Version, last market check, errors, settings problems, updates, and what happened to every buy signal in the last 24 hours |
 | `/agents` | How many agents are working and what each did; strategies created, promoted, rejected or rolled back; coins added or removed (`/agents 30` for 30 days) |
 | `/diagnose` | "Check the logs" from your phone: the settings in force, every buy signal per coin and what stopped it, order failures, hours the desk was not checking, and how many trades its own rules would have made on the same prices (`/diagnose 3` for 3 days) |
+| `/ai` | Which AI answers first (the free AI or Claude), the free AI's questions used today and when its allowance restarts. `/ai free-first` saves money, `/ai claude-first` uses Claude's judgement while its budget lasts. Kept across restarts |
 | `/aibudget` | Claude's daily budget, today's spend per agent and the month at today's pace. `/aibudget 3` lets Claude spend up to $3 a day (real money, at most $20), `/aibudget default` goes back to the settings file. Kept across restarts |
 | `/review` | Claude reads the notebook and sends a plain-language review: what works, what fails, what the lab should test next. Uses a little of the AI budget |
 | `/version` | Which code version is running, and whether a newer one is waiting |
@@ -152,7 +165,7 @@ Messages also arrive automatically:
 | `desk status` | Is it running? Latest activity and performance |
 | `desk report` | Full performance report |
 | `desk logs` | Watch the agents work live (Ctrl+C stops watching; the desk keeps running) |
-| `desk setup` | Change keys, coins, Claude or Telegram settings |
+| `desk setup` | Change keys, coins, Claude, the free AI or Telegram settings |
 | `desk stop` / `desk start` | Pause or resume trading |
 | `desk reset` | Start the demo again from zero (old results are kept in a backup file) |
 | `desk update` | Install the latest version now (normally not needed: it happens automatically) |
@@ -193,6 +206,27 @@ flat $5 a day, which `/aibudget` changes.) The money is fake, so give the demo a
 2. Then run `desk reset --force` so the desk starts a fresh record with the new budget (the old one is kept as a
    backup file).
 3. Send `/health`: the settings problem is gone.
+
+## Add a free AI (no cost) to a running desk
+
+Claude is paid in real dollars even though the trading money is fake. A free AI takes over the everyday
+questions (reading the news, double-checking each buy or sell, choosing coins) at no cost:
+
+1. Get a free Gemini key (Part 3, **E**). It takes two minutes.
+2. On the server, run `desk setup` and press **Enter** to keep every answer until **STEP 3 - A free AI**.
+   Answer **y**, choose **1) Google Gemini**, and paste the key. The setup asks the AI one test question.
+3. If Claude is also set up, choose who answers first: **1) the free AI** (saves money; Claude only when the free AI
+   cannot answer) or **2) Claude** (Claude's judgement while its daily budget lasts, then the free AI).
+4. The desk restarts by itself. Send `/ai` on Telegram: it shows the free AI and its questions used today.
+
+What stays with Claude whatever you choose: web research (the coin scout's news search and the weekly lab's) and
+`/review`, because free tiers cannot search the web and the notebook holds your private records. Without Claude,
+the scout and the lab work from market data only.
+
+What to expect: the free model is smaller than Claude. The scorecard (daily report, `/report`) judges it
+separately from Claude, so after a few weeks you can see which one's vetoes saved money. When the free allowance is
+used up for the day, Claude (if it has budget) or the built-in rules answer until it restarts (for Gemini, at
+midnight California time), and Telegram tells you once.
 
 ## One-time upgrade of a server installed before automatic updates
 

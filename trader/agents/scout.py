@@ -126,7 +126,8 @@ class MarketScoutAgent:
         if self.llm and slots and cands:
             ai = self._ai_pick(cands, core, held, slots)
             if ai is not None:
-                picks, avoid, summary, sources, source = ai["picks"], ai["avoid"], ai["summary"], ai["sources"], "claude"
+                picks, avoid, summary, sources, source = (ai["picks"], ai["avoid"], ai["summary"], ai["sources"],
+                                                          ai.get("by", "claude"))
         if picks is None:
             picks = self._rule_pick(cands, core, slots)
         reasons = {c: "core coin (always watched)" for c in core} | picks
@@ -188,4 +189,5 @@ class MarketScoutAgent:
             log.warning("Scout picks were not in the candidate list - using rule-based picks")
             return None
         return {"picks": picks, "avoid": {normalize(a["symbol"]): a["reason"] for a in data["avoid"]},
-                "summary": data["summary"], "sources": research["sources"] if research else []}
+                "summary": data["summary"], "sources": research["sources"] if research else [],
+                "by": data.get("_ai", "claude")}

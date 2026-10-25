@@ -226,8 +226,11 @@ class ResearchAgent:
         """Claude reads the notebook digest and answers in the REVIEW_SCHEMA shape; None without Claude or on failure."""
         if not self.llm or not notebook:
             return None
-        return self.llm.ask(REVIEW_SYSTEM, f"The desk's notebook:\n<data>\n{notebook}\n</data>\n\nWrite the review.",
-                            REVIEW_SCHEMA, effort="medium", caller="review")
+        data = self.llm.ask(REVIEW_SYSTEM, f"The desk's notebook:\n<data>\n{notebook}\n</data>\n\nWrite the review.",
+                            REVIEW_SCHEMA, effort="medium", caller="review")   # Claude only: the notebook is private
+        if data:
+            data.pop("_ai", None)
+        return data
 
 
 def review_text(d: dict) -> str:

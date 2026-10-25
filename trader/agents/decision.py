@@ -100,8 +100,8 @@ class DecisionAgent:
         thr = self.threshold_for(symbol, threshold)
         rules_action = self._rules(score, holding, thr)["action"]
         news_score = float(reports.get("news", {}).get("score", 0) or 0)
-        # a hard block needs Claude's reading of the news; a keyword count (used when Claude is off or out of budget)
-        # is too crude to forbid a buy on its own - it still counts in the score with its small weight
+        # a hard block needs an AI's reading of the news (Claude's or the free AI's); a keyword count (used when no AI
+        # answered) is too crude to forbid a buy on its own - it still counts in the score with its small weight
         if not holding and news_score <= NEWS_VETO and reports.get("news", {}).get("source") != "keywords":
             return {"action": "HOLD", "confidence": 0.9, "source": "rules", "combined_score": score,
                     "rules_action": rules_action, "threshold": thr,
@@ -134,7 +134,8 @@ class DecisionAgent:
 
     def _reuse(self, symbol: str, score: float, holding: bool) -> dict | None:
         if self.has_fresh_view(symbol, score, holding):
-            return {**self._recent[symbol]["decision"], "source": "claude-reused"}
+            d = self._recent[symbol]["decision"]
+            return {**d, "source": f"{d.get('source') or 'claude'}-reused"}
         return None
 
     @staticmethod
@@ -169,5 +170,5 @@ class DecisionAgent:
         if not data:
             return None
         data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
-        data["source"] = "claude"
+        data["source"] = data.pop("_ai", "claude")   # who answered: "claude" or "ai:<free provider>"
         return data

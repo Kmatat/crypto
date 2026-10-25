@@ -1,7 +1,7 @@
-"""Scorecard: is Claude worth its cost? Computed by code, never by Claude.
+"""Scorecard: is each AI worth its place? Computed by code, never by an AI.
 
-For every decision where Claude chose differently from the free rules (today that means
-Claude vetoed a buy or a sell the rules wanted), the trade the rules would have made is
+For every decision where an AI (Claude, or the free AI, each judged on its own) chose differently from the free
+rules (today that means it vetoed a buy or a sell the rules wanted), the trade the rules would have made is
 replayed with the real prices that followed, using the same stop-loss, take-profit and
 trailing-stop rules. Summing those counterfactuals gives "money the vetoes saved" and
 "money the vetoes cost". The news agent gets the same treatment: each coin score is
@@ -42,11 +42,13 @@ def replay_trade(candles: list[dict], entry: float, atr: float, s: Settings) -> 
             "hours": min(len(candles), HORIZON_HOURS)}
 
 
-def claude_scorecard(j: Journal, s: Settings, candles_after, position_usd: float | None = None) -> dict:
-    """candles_after(symbol, since_ms) -> hourly candles after a moment. Returns totals and a per-case list."""
+def claude_scorecard(j: Journal, s: Settings, candles_after, position_usd: float | None = None,
+                     source: str = "claude", name: str = "Claude") -> dict:
+    """candles_after(symbol, since_ms) -> hourly candles after a moment. Returns totals and a per-case list.
+    `source` picks the AI: "claude", or "ai:gemini" (a free AI) - each AI has its own verdict."""
     size = position_usd or s.starting_balance * s.max_position_pct
-    rows = j.db.execute("SELECT id, ts, symbol, action, rules_action, reports FROM decisions WHERE source LIKE 'claude%' "
-                        "AND rules_action IS NOT NULL AND action != rules_action ORDER BY id").fetchall()
+    rows = j.db.execute("SELECT id, ts, symbol, action, rules_action, reports FROM decisions WHERE source LIKE ? "
+                        "AND rules_action IS NOT NULL AND action != rules_action ORDER BY id", (source + "%",)).fetchall()
     cases, saved, cost = [], 0.0, 0.0
     cached = j.get("scorecard_cases") or {}
     for r in rows:
@@ -93,7 +95,7 @@ def claude_scorecard(j: Journal, s: Settings, candles_after, position_usd: float
                 cost += -c["pnl_usd"]
     net = saved - cost
     verdict = "not enough divergent decisions yet (need 50)" if len(cases) < 50 else \
-        ("Claude is adding value" if net > 0 else "Claude is costing money versus the rules")
+        (f"{name} is adding value" if net > 0 else f"{name} is costing money versus the rules")
     return {"cases": len(cases), "saved_usd": round(saved, 2), "cost_usd": round(cost, 2), "net_usd": round(net, 2),
             "verdict": verdict}
 
@@ -102,12 +104,14 @@ def news_scorecard(j: Journal, candles_after, days: int = 30) -> dict:
     """Hit rate of the news scores: did a positive score precede a rise over the next 24 hours?"""
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
     rows = j.db.execute("SELECT ts, symbol, reports FROM decisions WHERE ts >= ? ORDER BY id", (since,)).fetchall()
-    seen, hits, total = set(), 0, 0
+    seen, hits, total, by = set(), 0, 0, {}
     for r in rows:
         try:
-            score = float(json.loads(r["reports"])["news"]["score"])
+            news = json.loads(r["reports"])["news"]
+            score = float(news["score"])
         except (KeyError, TypeError, ValueError):
             continue
+        src = str(news.get("source") or "unlabelled").removesuffix("-reused")
         day = r["ts"][:13]  # one judgement per coin per hour
         if abs(score) < 0.3 or (r["symbol"], day) in seen:
             continue
@@ -120,18 +124,30 @@ def news_scorecard(j: Journal, candles_after, days: int = 30) -> dict:
         if len(candles) < 24:
             continue
         move = candles[23]["close"] / candles[0]["open"] - 1
+        hit = (move > 0) == (score > 0)
         total += 1
-        hits += (move > 0) == (score > 0)
+        hits += hit
+        b = by.setdefault(src, [0, 0])
+        b[0], b[1] = b[0] + 1, b[1] + hit
     return {"judged": total, "hit_rate_pct": round(hits / total * 100, 1) if total else None,
+            "by_source": {k: {"judged": n, "hit_rate_pct": round(h / n * 100, 1)} for k, (n, h) in by.items()},
             "note": "50% is a coin flip; below 55% the news weight is not earning its place" if total >= 30 else
                     "not enough strong news scores judged yet (need 30)"}
 
 
-def scorecard_text(claude: dict, news: dict, ai_cost_usd: float) -> str:
+def scorecard_text(claude: dict, news: dict, ai_cost_usd: float, free: list[tuple[str, dict]] | None = None) -> str:
+    """`free`: [(label, scorecard)] for each free AI that made decisions; it costs nothing, so no bill line."""
     lines = ["🧪 Claude vs the free rules (computed from real later prices)",
              f"Divergent decisions judged: {claude['cases']} · vetoes saved ${claude['saved_usd']:,.2f} · "
              f"vetoes cost ${claude['cost_usd']:,.2f} · net ${claude['net_usd']:+,.2f} · AI bill so far ${ai_cost_usd:,.2f}",
-             f"Verdict: {claude['verdict']}",
-             f"News scores judged: {news['judged']} · hit rate {news['hit_rate_pct'] if news['hit_rate_pct'] is not None else 'n/a'}%"
-             f" - {news['note']}"]
+             f"Verdict: {claude['verdict']}"]
+    for label, card in free or []:
+        lines += [f"🆓 {label} vs the free rules: {card['cases']} judged · vetoes saved ${card['saved_usd']:,.2f} · "
+                  f"cost ${card['cost_usd']:,.2f} · net ${card['net_usd']:+,.2f} · bill $0", f"Verdict: {card['verdict']}"]
+    lines.append(f"News scores judged: {news['judged']} · hit rate "
+                 f"{news['hit_rate_pct'] if news['hit_rate_pct'] is not None else 'n/a'}% - {news['note']}")
+    by = news.get("by_source") or {}
+    if len(by) > 1:
+        lines.append("News hit rate by reader: " + ", ".join(f"{k} {v['hit_rate_pct']}% ({v['judged']})"
+                                                           for k, v in sorted(by.items())))
     return "\n".join(lines)

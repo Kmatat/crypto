@@ -70,7 +70,9 @@ class ClaudeJSON:
         self._roll_day()
         return self._spent
 
-    TYPICAL_TOKENS = {"news": (2000, 400), "decision": (6000, 400), "scout": (25000, 2000), "research": (25000, 3000),
+    # (input, output) tokens of a typical call, used until the day's own averages exist; measured on 2026-10-25 from
+    # real prompts (a buy/sell question is about 1,300 tokens in and 150 out)
+    TYPICAL_TOKENS = {"news": (2000, 400), "decision": (1500, 300), "scout": (25000, 2000), "research": (25000, 3000),
                       "review": (15000, 2000)}
 
     def avg_call_cost(self, caller: str | None = None) -> float:

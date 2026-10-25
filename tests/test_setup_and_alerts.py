@@ -69,6 +69,7 @@ def test_wizard_first_run_writes_private_env(wiz):
                "",                      # budget: default capped to 90% of the 5000 USDT demo balance
                "y", "sk-ant-good", "2",  # Claude yes, key, Sonnet
                "",                      # Claude daily budget: default $5
+               "",                      # free AI: no (the default when none is set)
                "", "123:abc", "", "7",  # Telegram yes, token, press Enter after messaging bot, report hour
                "btc, eth",              # core coins
                "", "",                  # scout may add coins (yes), up to 8
@@ -89,12 +90,12 @@ def test_wizard_first_run_writes_private_env(wiz):
 
 def test_wizard_rerun_keeps_values_on_enter(wiz):
     env, make = wiz
-    make(["", "KEY", "SECRET", "", "y", "sk-ant-good", "", "3", "", "123:abc", "", "", "", "", "12", "20"]).run()
+    make(["", "KEY", "SECRET", "", "y", "sk-ant-good", "", "3", "", "", "123:abc", "", "", "", "", "12", "20"]).run()
     before = dotenv_values(env)
     assert before["AI_DAILY_BUDGET_USD"] == "3" and before["MAX_COINS"] == "12" and before["CYCLE_MINUTES"] == "20"
-    # Enter everywhere: keep mode, keys, budget, Claude, model, AI cap, Telegram (+ same chat), hour,
+    # Enter everywhere: keep mode, keys, budget, Claude, model, AI cap, free AI (none), Telegram (+ same chat), hour,
     # coins, scout, max coins, interval
-    answers = [""] * 16
+    answers = [""] * 17
     w = make(answers)
     w.run()
     assert dotenv_values(env) == before
@@ -108,7 +109,7 @@ def test_wizard_restricted_location_falls_back_to_paper(wiz, monkeypatch):
         raise BinanceError("HTTP 451: Service unavailable from a restricted location")
     monkeypatch.setattr(setup_wizard, "check_binance", blocked)
     make(["", "KEY", "SECRET", "2",   # testnet, keys, then "switch to paper trading"
-          "n", "n", "", "", "", ""]).run()  # no Claude, no Telegram, default coins, scout, max, interval
+          "n", "n", "n", "", "", "", ""]).run()  # no Claude, no free AI, no Telegram, default coins, scout, max, interval
     v = dotenv_values(env)
     assert v["TRADING_MODE"] == "simulation" and v["ANTHROPIC_API_KEY"] == "" and v["TELEGRAM_BOT_TOKEN"] == ""
 
@@ -117,6 +118,7 @@ def test_wizard_rejects_unknown_coin_and_bad_claude_key(wiz):
     env, make = wiz
     make(["2", "abc", "2,500",              # paper trading, invalid budget re-asked, then 2,500
           "y", "sk-bad", "", "n",           # Claude key fails, don't retry -> rules
+          "n",                              # no free AI
           "n",                              # no Telegram
           "BTC, NOTACOIN", "SOL",           # typo is rejected, asked again
           "n",                              # scout may not add coins
@@ -128,10 +130,10 @@ def test_wizard_rejects_unknown_coin_and_bad_claude_key(wiz):
 
 def test_wizard_offers_fresh_journal_when_mode_changes(wiz, tmp_path):
     env, make = wiz
-    make(["2", "", "n", "n", "", "", "", ""]).run()
+    make(["2", "", "n", "n", "n", "", "", "", ""]).run()
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "journal.db").write_text("old")
-    make(["1", "KEY", "SECRET", "", "n", "n", "", "", "", "", "y"]).run()  # switch paper -> testnet
+    make(["1", "KEY", "SECRET", "", "n", "n", "n", "", "", "", "", "y"]).run()  # switch paper -> testnet
     assert not (tmp_path / "data" / "journal.db").exists()
     assert len(list((tmp_path / "data").glob("journal-*.db"))) == 1
 
@@ -299,14 +301,14 @@ def test_daily_budget_stops_claude_calls(claude_server):
 def test_wizard_moves_old_hourly_setting_to_15_minutes(wiz):
     env, make = wiz
     env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nCYCLE_MINUTES=60\nSYMBOLS=BTCUSDT\n")
-    make(["", "", "n", "n", "", "n", ""]).run()  # Enter on the interval question keeps the new default
+    make(["", "", "n", "n", "n", "", "n", ""]).run()  # Enter on the interval question keeps the new default
     v = dotenv_values(env)
     assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "3"
 
 
 def test_wizard_max_coins_never_below_core_count(wiz):
     env, make = wiz
-    make(["2", "", "n", "n", "btc,eth,sol", "", "2", "4", ""]).run()  # 2 < 3 core coins: asked again
+    make(["2", "", "n", "n", "n", "btc,eth,sol", "", "2", "4", ""]).run()  # 2 < 3 core coins: asked again
     assert dotenv_values(env)["MAX_COINS"] == "4"
 
 
@@ -346,10 +348,10 @@ def test_wizard_moves_the_old_take_profit_default_that_blocked_every_buy(wiz):
     env, make = wiz
     env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=2\nSTOP_LOSS_ATR=2.0\n"
                    "TAKE_PROFIT_ATR=3.0\nSYMBOLS=BTCUSDT\n")
-    make(["", "", "n", "n", "", "n", ""]).run()
+    make(["", "", "n", "n", "n", "", "n", ""]).run()
     v = dotenv_values(env)
     assert v["TAKE_PROFIT_ATR"] == "4.0" and v["SETTINGS_VERSION"] == "3"
     env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=2\nTAKE_PROFIT_ATR=3.0\n"
                    "MIN_REWARD_RISK=1.5\nSYMBOLS=BTCUSDT\n")
-    make(["", "", "n", "n", "", "n", ""]).run()
+    make(["", "", "n", "n", "n", "", "n", ""]).run()
     assert dotenv_values(env)["TAKE_PROFIT_ATR"] == "3.0"   # chosen on purpose together with a 1.5:1 minimum

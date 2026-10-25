@@ -33,7 +33,9 @@ from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
-from .health import agents_text, diagnose_text, funnel, health_text, judged_since, pulse_text, stuck_rule, write_json
+from .ai_router import ORDERS, is_ai_source
+from .health import (agents_text, diagnose_text, free_ai_line, funnel, health_text, judged_since, pulse_text, stuck_rule,
+                     write_json)
 
 log = logging.getLogger("trader")
 
@@ -50,6 +52,7 @@ HELP_TEXT = (
     "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
     "/diagnose [days] - the desk's records versus its own rules replayed on the same prices: what stopped each buy signal\n"
     "/aibudget [usd] - Claude's daily budget and where it went today; /aibudget 3 sets $3 a day, /aibudget default resets\n"
+    "/ai [free-first|claude-first] - which AI answers first (the free AI or Claude), and the free AI's calls left today\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
@@ -66,7 +69,7 @@ def print_cycle(n: int, summary: list[dict]) -> None:
         if "error" in r:
             print(f"{r['symbol']:9s} ERROR {r['error']}")
             continue
-        line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if str(r.get('source', '')).startswith('claude') else ' '}"
+        line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if is_ai_source(r.get('source')) else ' '}"
         if "confidence" in r:
             px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
             line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={px}  risk: {r['risk']}"
@@ -129,7 +132,23 @@ def cmd_check(s: Settings) -> int:
             return f"{s.claude_model} answered"
         step("Claude", claude)
     else:
-        print("[INFO] Claude: not configured - agents use built-in rules")
+        print("[INFO] Claude: not configured")
+    if s.use_free_ai:
+        def free():
+            from .free_ai import from_settings
+            ai = from_settings(s)
+            ok = ai.ask("Reply with JSON.", "Say ok.", {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                                                        "required": ["ok"], "additionalProperties": False}, effort="low")
+            if ok is None:
+                why = "; ".join(p["text"] for p in ai.take_problems()) or "no valid answer (busy, or the model is unknown)"
+                raise RuntimeError(why)
+            return f"{ai.label} answered ({', '.join(ai.models)})"
+        step("Free AI", free)
+    elif s.free_ai_provider:
+        print(f"[FAIL] Free AI: FREE_AI_PROVIDER={s.free_ai_provider} is incomplete - run desk setup")
+        failures += 1
+    else:
+        print("[INFO] Free AI: not configured" + ("" if s.use_claude else " - agents use built-in rules"))
     if s.telegram_token and s.telegram_chat_id:
         step("Telegram", lambda: f"@{Telegram(s.telegram_token, s.telegram_chat_id).bot_username()}")
     else:
@@ -186,13 +205,18 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
         return client.klines(symbol, "1h", limit=130, start_ms=since_ms)
     try:
         claude = claude_scorecard(j, bot.s, candles_after)
+        free = []
+        if getattr(bot, "free_ai", None):
+            card = claude_scorecard(j, bot.s, candles_after, source=f"ai:{bot.free_ai.provider}", name=bot.free_ai.label)
+            if card["cases"]:
+                free.append((bot.free_ai.label, card))
         news = news_scorecard(j, candles_after)
     except Exception as e:
         log.warning("Scorecard failed: %s", e)
         return ""
-    if not claude["cases"] and not news["judged"]:
+    if not claude["cases"] and not news["judged"] and not free:
         return ""
-    text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0))
+    text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0), free)
     j.set("scorecard_text", text)  # reused by the notebook between daily reports
     j.set("news_scorecard", news)  # the head trader tilts thresholds on news only once this shows news predicts
     return text
@@ -208,6 +232,8 @@ def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
         budget = bot.llm.effective_daily_budget()
         cap = f" of ${budget:.2f} daily cap" if budget else ""
         lines.append(f"Claude spend today: about ${bot.llm.spent_today:.2f}{cap}")
+    if getattr(bot, "free_ai", None):
+        lines.append(free_ai_line(bot.free_ai))
     return lines
 
 
@@ -270,7 +296,7 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         lab = Lab(bot.base, bot.journal, client=bot.market.client)
         if should_stop:
             lab.should_stop = should_stop
-        research = ResearchAgent(bot.llm)
+        research = ResearchAgent(bot.ai)   # web research needs Claude; the proposals may come from the free AI
         lessons = research.lessons(bot.journal)
         bot.journal.set("lessons", lessons)
         if lessons.get("notes"):
@@ -322,7 +348,7 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
                                          ("Playbook", bot.head.playbook() if bot.head else ""),
                                          ("Claude's review", review or "(Claude not configured, or unavailable this week)"),
                                          ("Performance", "```\n" + perf_text + "\n```"),
-                                         ("Claude versus the rules", "```\n" + scorecard + "\n```" if scorecard else "")])
+                                         ("The AI versus the rules", "```\n" + scorecard + "\n```" if scorecard else "")])
         bot.notes.refresh(bot.last_price, scorecard=scorecard)
         return text
 
@@ -350,7 +376,11 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     """/aibudget: show Claude's daily cap and today's spend per agent; '/aibudget 3' sets $3 a day (kept across restarts,
     applied at once); '/aibudget default' goes back to the settings file. Changes are logged in the diary."""
     llm = bot.llm
+    free = getattr(bot, "free_ai", None)
     if not llm:
+        if free:
+            return ("Claude is not configured, so there is no AI bill: the free AI answers within its daily allowance.\n"
+                    + free_ai_line(free))
         return "Claude is not configured on this desk (no API key), so there is no AI budget. The free rules decide."
     arg = arg.strip().lower().lstrip("$")
     if arg in ("default", "reset"):
@@ -386,9 +416,51 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
             lines.append(f"• {label}: {c['calls']} calls, ${c['usd']:.2f}")
     now = dt.datetime.now(dt.timezone.utc)
     hours = max(1.0, now.hour + now.minute / 60)
+    if free:
+        lines.append(free_ai_line(free))
     lines.append(f"At today's pace about ${llm.spent_today / hours * 24 * 30:,.0f} a month. Change it with /aibudget 3 "
                  f"(dollars a day, at most ${AI_BUDGET_CEILING_USD:g}). A cheaper model (CLAUDE_MODEL=claude-haiku-5-5 in desk "
                  "setup) does the same work for a fraction of the cost.")
+    return "\n".join(lines)
+
+
+def ai_command(bot: Orchestrator, j: Journal, arg: str = "") -> str:
+    """/ai: who answers the agents' questions, in which order, and the free AI's day. '/ai free-first' or
+    '/ai claude-first' changes the order at once and keeps it across restarts."""
+    free, claude, router = getattr(bot, "free_ai", None), bot.llm, getattr(bot, "ai", None)
+    arg = arg.strip().lower()
+    if arg:
+        if arg not in ORDERS:
+            return "Usage: /ai, /ai free-first or /ai claude-first"
+        if not (free and claude):
+            return "Both a free AI and Claude are needed to choose an order (desk setup adds the missing one)."
+        router.order = arg
+        j.set("ai_order_override", arg)
+        j.event("owner", f"AI order set to {arg}")
+        return ("✅ The free AI answers first now; Claude only when it cannot (saves money)." if arg == "free-first" else
+                "✅ Claude answers first now while its daily budget lasts; the free AI after (best judgement).")
+    if not (free or claude):
+        return ("No AI is configured: the built-in rules decide. A free AI costs nothing: run desk setup on the server "
+                "and choose Google Gemini (see the guide, 'Add a free AI').")
+    order = getattr(router, "order", "free-first") if free and claude else ""
+    lines = ["🤖 The desk's AIs"]
+    if free and claude:
+        lines.append(("Order: the free AI first, Claude when it cannot answer, then the free rules (/ai claude-first "
+                      "to change)") if order == "free-first" else
+                     "Order: Claude first while its budget lasts, then the free AI, then the free rules (/ai free-first "
+                     "to change)")
+    if free:
+        lines.append(free_ai_line(free))
+        if free.preset.trains_on_free_data:
+            lines.append("Note: on its free tier this provider may use what it reads to improve its models; the desk sends "
+                         "it only public headlines and market numbers, never balances, keys or the notebook.")
+    if claude:
+        lines.append(f"Claude ({claude.model}): ${claude.spent_today:.2f} spent today of "
+                     f"${claude.effective_daily_budget():.2f} (/aibudget to change)")
+        lines.append("Always Claude: web research (scout, weekly lab) and /review of the private notebook.")
+    else:
+        lines.append("Claude is not configured: no web research (the scout and the lab judge from market data) and "
+                     "no /review.")
     return "\n".join(lines)
 
 
@@ -480,9 +552,13 @@ def cmd_run(s: Settings, args) -> None:
     tg = Telegram(s.telegram_token, s.telegram_chat_id) if not s.offline else Telegram("")
     mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
         "offline test (made-up prices)" if s.offline else "paper trading at real prices"
-    ai = f"Claude ({s.claude_model})" if s.use_claude else "built-in rules"
+    ais = ([f"free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)})"] if bot.free_ai else []) \
+        + ([f"Claude ({s.claude_model})"] if s.use_claude else [])
+    if bot.free_ai and s.use_claude and getattr(bot.ai, "order", "") == "claude-first":
+        ais.reverse()
+    ai = (" first, then ".join(ais) + ", then the built-in rules") if ais else "built-in rules"
     pace = f"every {s.cycle_minutes} min" + (
-        f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if s.use_claude else "")
+        f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if ais else "")
     coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
     print(f"Version {version_string()}  Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
     bot.journal.event("start", f"Desk started: {mode}; AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
@@ -549,11 +625,11 @@ def cmd_run(s: Settings, args) -> None:
         def playbook_now() -> str:
             if not bot.head:
                 return "The head trader is switched off (HEAD_TRADER=false)."
-            text = with_journal(s, lambda j: HeadTraderAgent(bot.base, j, bot.llm).playbook())
+            text = with_journal(s, lambda j: HeadTraderAgent(bot.base, j, bot.ai).playbook())
             plan = bot.head.last_plan
             budget = ""
             if plan:
-                budget = (f"\n\nClaude budget at the last check: asked for {', '.join(plan['allowed']) or 'nobody'}"
+                budget = (f"\n\nAI budget at the last check: asked for {', '.join(plan['allowed']) or 'nobody'}"
                           + (f"; skipped {', '.join(plan['skipped'])}" if plan.get("skipped") else "") + f". {plan['why']}.")
             return "📒 Desk playbook (what every agent is told)\n" + (clean(text, 3000) or "Nothing learned yet: the first "
                                                                       "lab run and the first trades fill this in.") + budget
@@ -589,6 +665,9 @@ def cmd_run(s: Settings, args) -> None:
 
         def aibudget_now(arg: str = "") -> str:
             return with_journal(s, lambda j: ai_budget(bot, j, arg))
+
+        def ai_now(arg: str = "") -> str:
+            return with_journal(s, lambda j: ai_command(bot, j, arg))
 
         def notes_now() -> str:
             if not bot.notes.enabled:
@@ -639,6 +718,7 @@ def cmd_run(s: Settings, args) -> None:
             "/agents": agents_now,
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
+            "/ai": ai_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
@@ -697,6 +777,9 @@ def cmd_run(s: Settings, args) -> None:
                     break
             weekly_backup(bot, tg)
             maybe_weekly_lab(bot, tg, s, trade_lock, should_stop=stop.is_set)
+            if bot.free_ai:
+                for p in bot.free_ai.take_problems():
+                    tg.send_once(f"free-ai-{p['kind']}", f"🆓 Free AI: {p['text']}", every_hours=12)
             if bot.llm and bot.llm.budget_hit:
                 cap = bot.llm.effective_daily_budget()
                 why = (f" That cap is {s.ai_pct_month():g}% a month of your ${s.starting_balance:,.0f} starting balance."

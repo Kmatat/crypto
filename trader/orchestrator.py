@@ -26,6 +26,7 @@ import datetime as dt
 import logging
 import time
 
+from . import free_ai
 from .agents.decision import NEWS_VETO, DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
@@ -37,6 +38,7 @@ from .agents.prediction import PredictionAgent
 from .agents.risk import RiskManagerAgent
 from .agents.scout import MarketScoutAgent
 from .agents.technical import TechnicalAnalysisAgent
+from .ai_router import AIRouter
 from .binance_client import BinanceClient
 from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
@@ -65,18 +67,24 @@ class Orchestrator:
             self.llm.daily_budget = min(float(override["usd_per_day"]), AI_BUDGET_CEILING_USD)
             self.llm.pct_daily_budget = 0.0
 
+        # the free AI answers the everyday questions within its daily allowance; the router sends each question to
+        # the free AI or Claude in the owner's order (AI_ORDER, or /ai on Telegram), the free rules after both
+        self.free_ai = free_ai.from_settings(s, store=self.journal)
+        order = self.journal.get("ai_order_override") or s.ai_order
+        self.ai = AIRouter(self.llm, self.free_ai, order) if self.free_ai else self.llm
+
         public = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
         testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) \
             if s.mode == "testnet" and not s.offline else None
         self.testnet = testnet
         self.market = MarketDataAgent(public, s.interval, offline=s.offline)
-        self.scout = MarketScoutAgent(public, testnet, self.llm, s) if public and s.auto_coins else None
+        self.scout = MarketScoutAgent(public, testnet, self.ai, s) if public and s.auto_coins else None
         self.technical = TechnicalAnalysisAgent()
         self.prediction = PredictionAgent()
-        self.news = NewsAgent(self.llm, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
+        self.news = NewsAgent(self.ai, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
         self.forex = ForexAgent(offline=s.offline)
-        self.decision = DecisionAgent(self.llm)
-        self.head = HeadTraderAgent(s, self.journal, self.llm) if s.head_trader else None
+        self.decision = DecisionAgent(self.ai)
+        self.head = HeadTraderAgent(s, self.journal, self.ai) if s.head_trader else None
         self.risk = RiskManagerAgent(s)
         self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
         self.last_price: dict[str, float] = {}
@@ -389,8 +397,13 @@ class Orchestrator:
     def _next_pace(self, ai: dict | None, ctx: dict) -> dict:
         s = self.s
         if ai and ai.get("minutes"):
-            pace = {"minutes": max(s.min_check_minutes, min(s.max_check_minutes, int(ai["minutes"]))),
-                    "reason": ai.get("reason", ""), "source": "AI"}
+            minutes = max(s.min_check_minutes, min(s.max_check_minutes, int(ai["minutes"])))
+            if str(ai.get("by", "")).startswith("ai:"):
+                # a free model may slow the checks down but not speed them up: faster checks spend its daily
+                # allowance, and its reading of the news is not yet measured
+                minutes = max(minutes, s.cycle_minutes)
+            pace = {"minutes": minutes, "reason": ai.get("reason", ""),
+                    "source": "AI" if not ai.get("by") or ai["by"] == "claude" else f"AI ({ai['by'][3:]})"}
         else:
             pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         near = []

@@ -242,7 +242,8 @@ def _coin(symbol: str) -> str:
 
 def scout_message(u: dict) -> str:
     """Alert when the Market Scout changes the watchlist."""
-    how = "AI scout with web research" if u.get("source") == "claude" else "market scan"
+    how = "AI scout with web research" if u.get("source") == "claude" else \
+        "free AI scout (market data only)" if str(u.get("source", "")).startswith("ai:") else "market scan"
     lines = [f"🔭 Watchlist updated ({how})"]
     if u.get("summary"):
         lines.append(clean(u["summary"]))

@@ -87,9 +87,11 @@ blocks a new buy.
    python -m trader setup
    ```
 2. The setup asks a few questions and checks each key right away: trading mode, Binance demo
-   keys (from <https://testnet.binance.vision> → *Generate HMAC_SHA256 Key*), Claude (optional)
-   and Telegram alerts (optional). It saves everything in `.env`. Run it again any time to change something.
-3. *(Optional, recommended)* add Claude so it reads the news and makes the final decision with a written reason.
+   keys (from <https://testnet.binance.vision> → *Generate HMAC_SHA256 Key*), Claude (optional, paid), a free AI
+   (optional, no cost) and Telegram alerts (optional). It saves everything in `.env`. Run it again any time to change
+   something.
+3. *(Optional, recommended)* add an AI so it reads the news and double-checks each decision with a written reason:
+   a free AI (Google Gemini, no card), Claude (paid, best judgement and web research), or both.
 4. Check that every connection works:
    ```bash
    python -m trader check
@@ -216,6 +218,45 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   goes back to the settings file). An extra cap as a percentage of the account (`AI_BUDGET_PCT_MONTH`) is
   optional and off on demo money, because a small demo balance would starve Claude (0.25% of $100 a month is one
   cent a day).
+
+## A free AI next to Claude (small budgets)
+
+Claude is paid in real dollars even when the trading money is fake. A **free AI** answers the everyday questions at
+no cost, within the provider's daily allowance: it reads the news, double-checks each buy or sell the rules want
+(it can veto, never originate a trade) and picks coins for the scout. One client (`trader/free_ai.py`) talks to any
+service with an OpenAI-compatible chat API; presets cover the free tiers checked on 2026-10-25:
+
+| `FREE_AI_PROVIDER` | Free allowance (planned below the published limit) | Notes |
+|---|---|---|
+| `gemini` (recommended) | `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite`, about 400 questions a day each, 8 a minute | No card. The free tier may use prompts to improve Google's models (not in the EEA, UK or Switzerland); daily quota restarts at midnight US Pacific |
+| `groq` | `openai/gpt-oss-120b` and `-20b`, about 900 a day each, but only 8,000 tokens a minute and 200,000 a day (a token is about three quarters of a word) | No card; does not keep or train on prompts |
+| `mistral` | `mistral-small-latest`, `ministral-8b-latest` | Free mode; turn off "Anonymous improvement data" |
+| `cloudflare` | Gemma 4 on Workers AI, about 180 a day (10,000 "neurons") | Needs the account id in `FREE_AI_BASE_URL`; does not train |
+| `openrouter` | `openrouter/free`, 50 a day (1,000 after a one-time $10 purchase) | |
+| `custom` | any OpenAI-compatible address (`FREE_AI_BASE_URL`, `FREE_AI_MODELS`) | e.g. a local Ollama server |
+
+The desk needs about 90 questions on a normal day (measured: news every 30 minutes, about 35 buy/sell checks, the
+scout every 6 hours) and up to about 320 on a very busy one, so Gemini's two models carry it with room to spare.
+
+How it behaves:
+- **Order** (`AI_ORDER`, or `/ai` on Telegram): `free-first` (default) asks the free AI and pays Claude only when the
+  free AI cannot answer; `claude-first` uses Claude while its daily budget lasts, then the free AI. The free rules
+  come after both.
+- **Always Claude:** web research (the scout's and the weekly lab's) and `/review` of the private notebook.
+- **Rationed by requests, not dollars:** the desk counts every request (failed ones too, as Google does), keeps 10%
+  of each daily allowance in reserve, waits briefly for a per-minute slot or moves to the next model, and never
+  retries in a loop. The head trader spreads the remaining questions over the checks left before the provider's
+  daily reset, after keeping what the news agent and the scout will need.
+- **Checked answers:** every answer must match the question's form (JSON schema) before an agent sees it; a wrong one
+  goes to the next model, then Claude, then the rules.
+- **Measured separately:** decisions carry their source (`claude`, `ai:gemini`, `rules`); the scorecard judges each AI
+  against the rules on real later prices, and the news hit rate is shown per reader. A free model may slow the
+  check pace down but not speed it up.
+- **Problems are reported once on Telegram:** a rejected key, a retired model, the daily allowance used up.
+- **The key** stays in `.env`, travels only in the request header and is never logged.
+
+Free tiers change without notice (in 2026 several were cut or closed), so every model name and the daily
+allowance are settings (`FREE_AI_MODELS`, `FREE_AI_DAILY_REQUESTS`), and the desk keeps working without any AI.
 
 ## Is it working? Health, agents, pulse and watchdog
 

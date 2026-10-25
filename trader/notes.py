@@ -367,6 +367,9 @@ class Notes:
                               + (f" and at most {s.ai_pct_month():g}% of the account a month" if s.ai_pct_month()
                                  else " (no percentage cap on demo money; the owner's /aibudget changes it)")
                               + "; the free rules take over when it is spent"],
+                ["Free AI", (f"{s.free_ai_provider} ({', '.join(s.free_ai_models) or 'its recommended models'}), "
+                             f"{s.ai_order}: it costs nothing and is rationed by the provider's daily allowance; web "
+                             "research and the notebook review stay with Claude") if s.use_free_ai else "not configured"],
                 ["Strategy changes", f"at most {MAX_CHANGES} parameters at a time, inside the bounds, after the exam and "
                                      f"the forward test, " + ("promoted automatically" if s.auto_promote else
                                                              "and only with the owner's /approve")],
@@ -635,12 +638,12 @@ class Notes:
                  "are valued at the latest prices the desk saw._", "",
                  "## Now", "", "```", report_text(perf, title="Performance"), "", goals_text(g, perf), "```", ""]
         if scorecard:
-            lines += ["## Claude versus the free rules (computed from real later prices)", "", "```", scorecard, "```", ""]
+            lines += ["## The AI versus the free rules (computed from real later prices)", "", "```", scorecard, "```", ""]
         lines += ["## Week by week (the learning curve)", "", self.weekly_table(trades, hist), ""]
         ai_total = float(self.j.get("ai_spend_total") or 0)
         lines += ["## Costs", "", f"- Exchange fees paid: {perf['fees_paid']:,.2f} USDT",
                   f"- Claude (AI) spend so far: ${ai_total:,.2f} ({g['ai_cost_pct']:.2f}% of the starting balance)",
-                  f"- Decisions where Claude chose differently from the rules: {perf['claude_overrode_rules']}", ""]
+                  f"- Decisions where an AI chose differently from the rules: {perf['claude_overrode_rules']}", ""]
         return "\n".join(lines)
 
     # ---- for Claude's /review ----

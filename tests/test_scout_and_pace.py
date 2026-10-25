@@ -184,7 +184,7 @@ def test_news_agent_returns_ai_pace_and_refreshes_for_new_coins(monkeypatch):
     monkeypatch.setattr(agent, "fetch_headlines", lambda: ["Bitcoin ETF sees record inflows"])
     snap = {"BTC": {"change_1h_pct": 0.5, "change_24h_pct": 2.0, "volatility_pct": 0.8, "holding": True}}
     out = agent.run(["BTC"], snap)
-    assert out["_pace"] == {"minutes": 5, "reason": "CPI data in 20 minutes"} and out["BTC"]["score"] == 0.4
+    assert out["_pace"] == {"minutes": 5, "reason": "CPI data in 20 minutes", "by": "claude"} and out["BTC"]["score"] == 0.4
     assert "BTC: 1h +0.50%" in calls[0] and "we hold it" in calls[0]
     agent.run(["BTC"], snap)
     assert len(calls) == 1  # cached
