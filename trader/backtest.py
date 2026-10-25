@@ -92,6 +92,7 @@ class Backtest:
         decisions = {"BUY": 0, "SELL": 0, "HOLD": 0}
         vetoes: dict[str, int] = {}
         last_stop: dict[str, int] = {}
+        brake_tripped_at: int | None = None
         for t in times[WARMUP:] if not self.days else times:
             date = dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).date()
             idx = {sym: by_time[sym][t] for sym in self.history}
@@ -120,8 +121,11 @@ class Backtest:
             equity = cash + sum(p["qty"] * price[sym] for sym, p in positions.items())
             if date != day:
                 day, day_start = date, equity
+            if brake_tripped_at is not None and equity >= s.starting_balance * (1 - s.max_drawdown_pct / 2):
+                brake_tripped_at = None  # recovered half the loss: back to normal (same rule as the live desk)
             portfolio = {"cash": cash, "equity": equity, "open_positions": len(positions),
-                         "day_start_equity": day_start, "starting_balance": s.starting_balance}
+                         "day_start_equity": day_start, "starting_balance": s.starting_balance,
+                         "brake_tripped_days": None if brake_tripped_at is None else (t - brake_tripped_at) / 86_400_000}
 
             buys = []
             for sym, c in candles.items():
@@ -140,6 +144,8 @@ class Backtest:
                 portfolio.update(cash=cash, open_positions=len(positions),
                                  equity=cash + sum(p["qty"] * price[x] for x, p in positions.items()))
                 verdict = self.risk.review(d, sym, price[sym], atr, portfolio)
+                if verdict.get("trip"):
+                    brake_tripped_at = t
                 if not verdict["approved"]:
                     continue
                 if self.mentor:
@@ -233,8 +239,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--position", type=float, help="max position size as a fraction of equity (default 0.10)")
     ap.add_argument("--max-positions", type=int)
     ap.add_argument("--sweep", action="store_true", help="try a grid of thresholds and stop/take distances")
-    ap.add_argument("--checks", default="", help="master traders' checklist: 'all', 'none' or a comma list of "
-                                                   + ",".join(ALL_CHECKS))
+    ap.add_argument("--checks", default=None, help="master traders' checklist: 'all', 'none' or a comma list of "
+                                                     + ",".join(ALL_CHECKS) + " (default: the live setting)")
     ap.add_argument("--rr", type=float, help="minimum reward-to-risk for the 'reward' check (default 2)")
     ap.add_argument("--cooldown", type=float, help="hours to wait after a stop-loss before re-buying (default 24)")
     ap.add_argument("--risk", type=float, help="risk per trade as %% of equity, Turtle sizing (e.g. 1); 0 = fixed size")
@@ -249,15 +255,29 @@ def main(argv: list[str]) -> int:
           f"{', '.join(symbols)} ...", file=sys.stderr)
     history = {sym: fetch_history(client, sym, args.days, args.interval) for sym in symbols}
     btc = history.get("BTCUSDT") or fetch_history(client, "BTCUSDT", args.days, args.interval)
-    checks = tuple(ALL_CHECKS) if args.checks == "all" else () if args.checks in ("", "none") else \
-        tuple(c.strip() for c in args.checks.split(","))
+    live = Settings()  # the live desk's defaults: a flag-less backtest measures exactly what trades
+    if args.checks is None:
+        checks = live.mentor_checks
+    elif args.checks == "all":
+        checks = tuple(ALL_CHECKS)
+    elif args.checks in ("", "none"):
+        checks = ()
+    else:
+        checks = tuple(c.strip() for c in args.checks.split(","))
+
+    def pick(flag, default):
+        return default if flag is None else flag
 
     def settings(stop=None, take=None):
         return Settings(offline=True, symbols=symbols, starting_balance=args.balance, interval=args.interval,
-                        stop_loss_atr=stop or args.stop or 2.0, take_profit_atr=take or args.take or 3.0,
-                        max_position_pct=args.position or 0.10, max_open_positions=args.max_positions or 3,
-                        mentor_checks=checks, min_reward_risk=args.rr or 2.0, cooldown_hours=args.cooldown or 24,
-                        risk_per_trade_pct=(args.risk or 0) / 100, trail_atr=args.trail or 0.0)
+                        stop_loss_atr=pick(stop, pick(args.stop, live.stop_loss_atr)),
+                        take_profit_atr=pick(take, pick(args.take, live.take_profit_atr)),
+                        max_position_pct=pick(args.position, live.max_position_pct),
+                        max_open_positions=pick(args.max_positions, live.max_open_positions),
+                        mentor_checks=checks, min_reward_risk=pick(args.rr, live.min_reward_risk),
+                        cooldown_hours=pick(args.cooldown, live.cooldown_hours),
+                        risk_per_trade_pct=pick(args.risk, live.risk_per_trade_pct * 100) / 100,
+                        trail_atr=pick(args.trail, live.trail_atr))
 
     def run(s):
         return Backtest(s, history, days=args.days, btc_history=btc).run()
@@ -271,6 +291,8 @@ def main(argv: list[str]) -> int:
             print(f"Checklist vetoes      {r['mentor_vetoes']}")
         return 0
 
+    print(f"Sweep with checklist={','.join(checks) or 'none'} risk={pick(args.risk, live.risk_per_trade_pct * 100):g}% "
+          f"trail={pick(args.trail, live.trail_atr):g} ATR (pass --checks none --risk 0 --trail 0 for the plain rules)")
     print(f"{'buy':>5} {'sell':>6} {'stop':>5} {'take':>5} | {'return':>8} {'trades':>6} {'win%':>5} {'PF':>5} {'maxDD':>6}")
     for buy, (stop, take) in itertools.product([0.15, 0.25, 0.35, 0.45], [(1.5, 3.0), (2.0, 3.0), (2.0, 4.0), (3.0, 6.0)]):
         dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = buy, -buy

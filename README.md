@@ -157,6 +157,43 @@ backstop for flash crashes). The 10% overall brake is the control that matters: 
 would have tripped and saved 6-16 points. When it trips, the desk now pauses new buys for 14 days
 (`BRAKE_PAUSE_DAYS`), then resumes at half size until the account has recovered half the loss.
 
+## Goals, and what success looks like
+
+The desk has **no revenue target, on purpose**. An AI told to "make 5% a month" has one easy way to comply:
+report more confidence, which unlocks more buys and more risk. So goals live in the code and in the reports
+the owner reads, never in the AI's instructions (the prompt says the opposite: there is no return target,
+never raise confidence to recover losses).
+
+**Phase 1, the demo (now):** the daily report and `/report` show progress against these gates:
+
+| Gate | Target | Why |
+|---|---|---|
+| Evidence period | at least 12 weeks | one month of results is noise (monthly swings of ~1.6% are normal) |
+| Closed trades | at least 150 | with fewer, a 43% win rate could really be anything from 37% to 49% |
+| Profit factor after fees | ≥ 1.3 | money won ÷ money lost, after Binance fees |
+| Worst drop from a peak | ≤ 10% | the pain you would have to stomach with real money |
+| Orders filled | 100% | technical reliability of the Binance connection |
+| Return net of AI cost | > 0 | the AI bill is a real cost: $150/month is 1.5% of a $10,000 account every month |
+
+The report also shows what simply holding would have done over the same period: Bitcoin, your watched
+coins, and a "fair blend" that matches the desk's actual exposure (it is in cash most of the time, so 100%
+buy-and-hold is a misleading yardstick in both directions). The likely range of the true win rate is shown
+next to the observed one. If the 10% brake trips during the demo, the 12-week clock restarts.
+
+**Phase 2, going live (not before Phase 1 passes):** start with a small amount, a written review of the
+trade log, and the project-level goal below as the yardstick; any brake trip ends the phase.
+
+**Project-level goal (owner's yardstick, reviewed monthly):** over 12 months, beat holding the same coins
+or beat cash plus a stated margin, *after fees and AI costs*. Independent reviews of the backtests put a
+realistic expectation for the free rule core at about 0 to +3% per half-year in rising markets and about 0
+in falling ones, before AI costs, with 2-5% worst drops. Anything that promises more than ~3% a month should
+be treated as a warning sign, not a target. Whether Claude adds value on top is measured, not assumed: the
+report counts how often Claude chose differently from the rules, and their outcomes can be compared.
+
+**The AI budget must fit the account.** At $10,000, Claude must add about 1.5 points per month over the
+free rules just to pay for Opus-class usage; Haiku (about $5-15/month) is the only tier where that hurdle is
+small. Choose the model in `python -m trader setup` with this arithmetic in mind, or run the free rules.
+
 ## Reading the report
 
 | Metric | What it tells you |
