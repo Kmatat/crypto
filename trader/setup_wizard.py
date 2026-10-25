@@ -79,8 +79,14 @@ def write_env(path: Path, values: dict[str, str]) -> None:
     if extra:
         lines.append("# Other settings")
         lines += [f"{k}={fmt(v)}" for k, v in extra.items()]
-    path.write_text("\n".join(lines) + "\n")
-    os.chmod(path, 0o600)
+    # Create the file private from the first byte and swap it in atomically: no instant where it is
+    # world-readable, and no half-written file if the machine dies mid-write.
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 class Wizard:
@@ -197,7 +203,12 @@ class Wizard:
             default_budget = "10000"
         if usdt and float(default_budget) > usdt * 0.95:
             default_budget = str(int(usdt * 0.9))
-        self.v["STARTING_BALANCE_USDT"] = self.ask_amount("   Budget the agents may use, in USDT", default_budget)
+        while True:
+            budget = self.ask_amount("   Budget the agents may use, in USDT", default_budget)
+            if not usdt or float(budget) <= usdt * 0.95:
+                break
+            self.say(f"   The demo account only holds {usdt:,.0f} USDT; the budget must be at most {usdt * 0.95:,.0f}.")
+        self.v["STARTING_BALANCE_USDT"] = budget
 
     def step_claude(self) -> None:
         self.say("\nSTEP 2 of 4 - Claude AI (optional)")
@@ -256,7 +267,7 @@ class Wizard:
             pass
         else:
             chat_id = ""
-            code = f"{secrets.randbelow(9000) + 1000}"  # one-time pairing code: only its sender becomes the owner
+            code = f"{secrets.randbelow(900000) + 100000}"  # one-time pairing code: only its sender becomes the owner
             self.say(f"   Now open https://t.me/{username} in Telegram, press START, and send this code: {code}")
             while not chat_id:
                 self._ask("   then come back here and press Enter... ")

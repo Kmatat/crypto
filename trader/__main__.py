@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import logging
 import signal
 import sys
 import threading
+from pathlib import Path
 
 from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
@@ -161,7 +163,40 @@ def default_watchlist(s: Settings) -> dict:
     return {"symbols": list(s.symbols), "reasons": {c: "core coin (always watched)" for c in s.symbols}}
 
 
+def single_instance(db_path: str):
+    """Two desks on one journal would double-trade; hold a lock for the life of the process."""
+    lock_path = Path(db_path).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit("The desk is already running on this journal (on the server: `desk logs` to watch it, "
+                         "`desk stop` first if you really want to run it by hand).")
+    return fh
+
+
+def weekly_backup(bot: Orchestrator, tg: Telegram) -> None:
+    """Once a week, send a copy of the journal to the owner's phone: the demo's evidence should not live
+    only on one free server that may be reclaimed."""
+    import sqlite3
+    week = dt.datetime.now(dt.timezone.utc).strftime("%G-W%V")
+    if not tg.enabled or bot.s.db_path == ":memory:" or bot.journal.get("last_backup_week") == week:
+        return
+    target = Path(bot.s.db_path).with_name(f"journal-backup-{week}.db")
+    try:
+        with sqlite3.connect(target) as dest:
+            bot.journal.db.backup(dest)
+        if tg.send_document(target, f"📦 Weekly backup of the trading journal ({week}). Keep it somewhere safe."):
+            bot.journal.set("last_backup_week", week)
+    except (sqlite3.Error, OSError) as e:
+        log.warning("Journal backup failed: %s", e)
+    finally:
+        target.unlink(missing_ok=True)
+
+
 def cmd_run(s: Settings, args) -> None:
+    lock = single_instance(s.db_path)  # noqa: F841 - held until exit
     bot = Orchestrator(s)
     tg = Telegram(s.telegram_token, s.telegram_chat_id) if not s.offline else Telegram("")
     mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
@@ -224,6 +259,13 @@ def cmd_run(s: Settings, args) -> None:
             if bot.pace["minutes"] != last_minutes:
                 tg.send_once("pace", pace_message(bot.pace), every_hours=1)
                 last_minutes = bot.pace["minutes"]
+            for r in summary:  # risk limits pausing new buys deserve one clear message
+                if r.get("risk", "").startswith(("daily loss limit", "overall loss limit")):
+                    tg.send_once("risk-limit", f"🛑 {r['risk'][0].upper() + r['risk'][1:]}.\nOpen positions keep "
+                                               "their stop-loss and take-profit; no new positions are opened.",
+                                 every_hours=12)
+                    break
+            weekly_backup(bot, tg)
             if bot.llm and bot.llm.budget_hit:
                 tg.send_once("ai-budget", f"💸 Claude's daily budget (${s.ai_daily_budget_usd:.2f}) is used up. "
                                           "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)
@@ -255,7 +297,8 @@ def main() -> None:
     rep.add_argument("--offline", action="store_true", help="report on the offline simulation journal")
     sub.add_parser("check")
     sub.add_parser("setup")
-    sub.add_parser("reset")
+    rst = sub.add_parser("reset")
+    rst.add_argument("--force", action="store_true", help="reset even with open positions")
     sub.add_parser("version")
     upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
     upd.add_argument("--check-only", action="store_true")
@@ -281,13 +324,15 @@ def main() -> None:
         print_report(with_journal(s, lambda j: performance(j, live_prices(s, j))))
         return
     if args.cmd == "reset":
-        from pathlib import Path
-
         from .setup_wizard import archive_journal
-        if Path(s.db_path).exists():
-            print(f"Old journal saved as {archive_journal(Path(s.db_path)).name}. The next run starts fresh.")
-        else:
+        if not Path(s.db_path).exists():
             print("No journal yet - nothing to reset.")
+            return
+        open_positions = with_journal(s, lambda j: list(j.positions()))
+        if open_positions and not args.force:
+            raise SystemExit(f"Still holding {', '.join(open_positions)}, possibly with live stop orders on the "
+                             "exchange. Sell first (or wait for the desk to), or run:  desk reset --force")
+        print(f"Old journal saved as {archive_journal(Path(s.db_path)).name}. The next run starts fresh.")
         return
     cmd_run(s, args)
 

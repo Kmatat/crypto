@@ -37,9 +37,9 @@ def check_minutes(value: str | None, settings_version: str | None) -> int:
 class Settings:
     mode: str = "simulation"
     offline: bool = False
-    api_key: str = ""
-    api_secret: str = ""
-    anthropic_key: str = ""
+    api_key: str = field(default="", repr=False)      # repr=False: never printed if Settings is ever logged
+    api_secret: str = field(default="", repr=False)
+    anthropic_key: str = field(default="", repr=False)
     claude_model: str = "claude-opus-5-5"
     symbols: list[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     interval: str = "1h"
@@ -57,11 +57,12 @@ class Settings:
     max_position_pct: float = 0.10
     max_open_positions: int = 3
     max_daily_loss_pct: float = 0.03
+    max_drawdown_pct: float = 0.10   # overall brake: no new buys once equity is this far below the start
     min_confidence: float = 0.60
     stop_loss_atr: float = 2.0
     take_profit_atr: float = 3.0
     db_path: str = str(ROOT / "data" / "journal.db")
-    telegram_token: str = ""
+    telegram_token: str = field(default="", repr=False)
     telegram_chat_id: str = ""
     daily_report_hour_utc: int = 6
 
@@ -106,6 +107,7 @@ class Settings:
             max_position_pct=_f("MAX_POSITION_PCT", 0.10),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),
             max_daily_loss_pct=_f("MAX_DAILY_LOSS_PCT", 0.03),
+            max_drawdown_pct=_f("MAX_DRAWDOWN_PCT", 0.10),
             min_confidence=_f("MIN_CONFIDENCE", 0.60),
             stop_loss_atr=_f("STOP_LOSS_ATR", 2.0),
             take_profit_atr=_f("TAKE_PROFIT_ATR", 3.0),

@@ -7,6 +7,7 @@ reasoning text can never break the formatting.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Callable
@@ -70,9 +71,26 @@ class Telegram:
         updates = self.call("getUpdates", timeout=15)
         for upd in reversed(updates):
             msg = upd.get("message") or {}
-            if msg.get("chat") and code in (msg.get("text") or ""):
-                return str(msg["chat"]["id"])
+            chat = msg.get("chat") or {}
+            if chat.get("type") == "private" and (msg.get("text") or "").strip() == code:
+                return str(chat["id"])
         return None
+
+    def send_document(self, path, caption: str = "") -> bool:
+        """Upload a file (used for the weekly journal backup)."""
+        if not self.enabled:
+            return False
+        try:
+            with open(path, "rb") as fh:
+                r = requests.post(API.format(token=self.token, method="sendDocument"),
+                                  data={"chat_id": self.chat_id, "caption": caption[:1000]},
+                                  files={"document": fh}, timeout=120)
+            if not r.json().get("ok"):
+                raise RuntimeError(r.json().get("description", f"HTTP {r.status_code}"))
+            return True
+        except (requests.RequestException, ValueError, RuntimeError, OSError) as e:
+            log.warning("Telegram upload failed: %s", self.redact(e))
+            return False
 
     # ---- commands ----
     def listen(self, handlers: dict[str, Callable[[], str]]) -> threading.Thread:
@@ -130,6 +148,17 @@ def money(v: float) -> str:
     return f"${v:,.2f}"
 
 
+_URL = re.compile(r"https?://\S+|www\.\S+", re.I)
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def clean(text, limit: int = 400) -> str:
+    """AI-written text (reasons, summaries) is built from headlines and web pages we do not control.
+    Before it reaches the owner's phone: no links (phishing), no control characters, bounded length."""
+    t = _CTRL.sub("", _URL.sub("[link removed]", str(text or "")))
+    return t if len(t) <= limit else t[:limit - 1] + "…"
+
+
 def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
     """Turn one cycle's results into (dedupe_key, message) alerts. Empty key = always send."""
     out = []
@@ -159,7 +188,7 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
                 r.get("protected"), "")
             out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}{shield}\n"
-                            f"Confidence {r['confidence']:.0%}. Why: {r['reasoning']}"))
+                            f"Confidence {r['confidence']:.0%}. Why: {clean(r['reasoning'])}"))
         else:
             t = r.get("trade") or {}
             result = f"{'✅ Profit' if t.get('pnl', 0) > 0 else '🔻 Loss'} {t.get('pnl', 0):+,.2f} USDT " \
@@ -185,15 +214,15 @@ def scout_message(u: dict) -> str:
     how = "AI scout with web research" if u.get("source") == "claude" else "market scan"
     lines = [f"🔭 Watchlist updated ({how})"]
     if u.get("summary"):
-        lines.append(u["summary"])
-    lines += [f"➕ {_coin(s)}: {u['reasons'].get(s, '')}" for s in u["added"]]
+        lines.append(clean(u["summary"]))
+    lines += [f"➕ {_coin(s)}: {clean(u['reasons'].get(s, ''), 200)}" for s in u["added"]]
     lines += [f"➖ {_coin(s)} (no longer watched)" for s in u["removed"]]
     if u.get("avoid"):
-        lines.append("Avoiding: " + "; ".join(f"{_coin(k)} ({v})" for k, v in list(u["avoid"].items())[:3]))
+        lines.append("Avoiding: " + "; ".join(f"{_coin(k)} ({clean(v, 120)})" for k, v in list(u["avoid"].items())[:3]))
     lines.append("Now watching: " + ", ".join(_coin(s) for s in u["symbols"]))
     return "\n".join(lines)
 
 
 def pace_message(pace: dict) -> str:
     who = {"AI": "the AI", "risk": "the risk rules", "settings": "the normal setting"}.get(pace["source"], pace["source"])
-    return f"⏱️ Now checking every {pace['minutes']} min (set by {who}): {pace['reason']}"
+    return f"⏱️ Now checking every {pace['minutes']} min (set by {who}): {clean(pace['reason'], 200)}"

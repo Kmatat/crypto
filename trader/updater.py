@@ -28,6 +28,8 @@ SERVICE = "crypto-desk"
 DATA = ROOT / "data"
 STATUS = DATA / "update-status.json"
 REQUEST = DATA / "update-requested"
+RESTART = DATA / "restart-requested"   # consumed by the root-owned crypto-desk-restart service
+LOCKFILE = "requirements.lock"
 
 
 def now() -> str:
@@ -93,17 +95,26 @@ class Updater:
         self.s = s
         self.tg = tg if tg is not None else Telegram(s.telegram_token, s.telegram_chat_id)
         self.root, self.status_path, self.request_path = Path(root), Path(status_path), Path(request_path)
-        self.install_cmd = install_cmd or [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"]
+        self.install_cmd = install_cmd or [sys.executable, "-m", "pip", "install", "-q", "-r", LOCKFILE]
         self.test_cmd = test_cmd or [sys.executable, "-m", "pytest", "-q", "-x", "tests"]
         self.restart = restart or self._restart_service
         self.is_active = is_active or self._service_active
         self.settle_seconds = settle_seconds
+        self.poll_seconds = 5
         self.say = say
 
     # ---- system helpers (replaced in tests) ----
-    @staticmethod
-    def _restart_service() -> None:
-        subprocess.run(["sudo", "-n", "systemctl", "restart", SERVICE], check=True, timeout=700)
+    def _restart_service(self) -> None:
+        """Ask root to restart the desk by dropping a flag file; a tiny root-owned systemd path unit
+        installed by deploy/setup.sh picks it up. No sudo rights are needed anywhere in this job."""
+        flag = self.root / "data" / "restart-requested"
+        flag.write_text(now())
+        for _ in range(130):  # the desk may take up to 10 min to finish its current market check
+            time.sleep(self.poll_seconds)
+            if not flag.exists():
+                return
+        flag.unlink(missing_ok=True)
+        raise OSError("the restart helper did not pick up the request (is crypto-desk-restart.path enabled?)")
 
     @staticmethod
     def _service_active() -> bool:

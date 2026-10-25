@@ -107,6 +107,12 @@ class BinanceClient:
         acct = self._request("GET", "/api/v3/account", signed=True)
         return {b["asset"]: float(b["free"]) for b in acct["balances"] if float(b["free"]) > 0}
 
+    def balances_total(self) -> dict[str, float]:
+        """free + locked (coins reserved by our open protective orders still belong to us)."""
+        acct = self._request("GET", "/api/v3/account", signed=True)
+        return {b["asset"]: float(b["free"]) + float(b["locked"]) for b in acct["balances"]
+                if float(b["free"]) + float(b["locked"]) > 0}
+
     def market_order(self, symbol: str, side: str, quantity: float, client_id: str) -> dict:
         return self._request("POST", "/api/v3/order", {
             "symbol": symbol, "side": side, "type": "MARKET",

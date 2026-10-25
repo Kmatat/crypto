@@ -171,6 +171,9 @@ There are two different kinds of success:
 
   Typical monthly cost: Opus 5.5 $100–200, Sonnet 5.5 $50–100, Haiku 5.5 $5–15. The cap bounds the
   maximum. `/status` on Telegram shows today's spend. Without a key everything still works, for free.
+- **Risk limits.** Besides the per-trade and daily limits, an overall brake stops new buys once the account
+  is 10% below its starting balance (`MAX_DRAWDOWN_PCT`), until you review the report and reset or change it.
+  Limits that trip are announced on Telegram.
 - **Exchange orders have limits too.** A stop-loss *market* order fills at the best price available
   once the stop is touched: in a very fast crash that can be noticeably below the stop (the simulation
   assumes 0.2% slippage). Binance also rejects a protective pair if the market has already moved past

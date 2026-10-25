@@ -27,9 +27,11 @@ case "${1:-help}" in
            "$PY" -m trader setup
            $SUDO systemctl start "$SERVICE" && echo "The desk is running with your settings." ;;
   check)   "$PY" -m trader check ;;
-  reset)   $SUDO systemctl stop "$SERVICE"; "$PY" -m trader reset; $SUDO systemctl start "$SERVICE"
-           echo "The demo starts fresh from now on." ;;
+  reset)   $SUDO systemctl stop "$SERVICE"
+           if "$PY" -m trader reset ${2:-}; then echo "The demo starts fresh from now on."; fi
+           $SUDO systemctl start "$SERVICE" ;;
   update)  "$PY" -m trader update --force ;;
+  logs-update) $SUDO journalctl -u "$SERVICE-update" -n 60 --no-pager -o cat ;;
   version) "$PY" -m trader version ;;
   *) cat <<'EOF'
 desk status    is it running? latest activity and performance
@@ -40,7 +42,7 @@ desk stop      stop trading
 desk restart   restart
 desk setup     change keys or settings (restarts afterwards)
 desk check     test connections to Binance, news, forex, Claude, Telegram
-desk reset     start the demo from scratch (old results kept in a backup file)
+desk reset     start the demo from scratch (old results kept in a backup file; add --force if positions are open)
 desk update    install the latest code now (tested first, restarts itself; also happens automatically)
 desk version   which version is running, and whether a newer one exists
 EOF

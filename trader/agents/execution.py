@@ -181,10 +181,13 @@ class TestnetBroker:
                 fill = self._fill_from_order(symbol, "SELL", o, self._fills(symbol, o))
                 return {"state": "exited", "reason": "stop-loss" if leg == "sl" else "take-profit",
                         "fill": fill, "protection": protection}
-        if any(o["status"] == "PARTIALLY_FILLED" for o in legs.values()):
-            return {"state": "executing", "protection": protection}
+        live = ("NEW", "PENDING_NEW", "PARTIALLY_FILLED")
         if all(o["status"] in ("NEW", "PENDING_NEW") for o in legs.values()):
             return {"state": "protected", "protection": protection}
+        if any(o["status"] in live for o in legs.values()):
+            # one leg still works on the exchange (e.g. a triggered STOP_LOSS_LIMIT waiting to fill, or a
+            # part-filled take-profit) and the other is gone: the coins stay locked, the desk watches the rest
+            return {"state": "executing", "protection": protection}
         detail = ", ".join(f"{leg} {o['status']}" for leg, o in legs.items())
         return {"state": "gone", "protection": protection, "detail": detail}
 
@@ -197,6 +200,13 @@ class TestnetBroker:
             log.warning("Could not read fees for order %s: %s - assuming %.1f%%", order["orderId"], e, PAPER_FEE * 100)
             return [{"price": "0", "qty": order["executedQty"], "commissionAsset": "USDT",
                      "commission": str(float(order["cummulativeQuoteQty"]) * PAPER_FEE)}]
+
+    def cancel_quietly(self, symbol: str, protection: dict) -> None:
+        """Best-effort cancel before placing fresh orders, so nothing stays locked on the exchange."""
+        try:
+            self.client.cancel_order_list(symbol, protection["list_client_id"])
+        except (BinanceError, requests.RequestException):
+            pass
 
     def unprotect(self, symbol: str, protection: dict) -> dict:
         """Cancel the pair so the coins are free to sell. If a leg already filled, report that exit instead."""

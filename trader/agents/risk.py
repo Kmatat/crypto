@@ -30,7 +30,13 @@ class RiskManagerAgent:
             return {"approved": False, "reason": f"already {portfolio['open_positions']} open positions (max {self.s.max_open_positions})"}
         day_pnl = portfolio["equity"] / portfolio["day_start_equity"] - 1
         if day_pnl <= -self.s.max_daily_loss_pct:
-            return {"approved": False, "reason": f"daily loss limit hit ({day_pnl:.2%}) - trading paused until tomorrow"}
+            return {"approved": False, "limit": "daily",
+                    "reason": f"daily loss limit hit ({day_pnl:.2%}) - no new buys until tomorrow (UTC)"}
+        start = portfolio.get("starting_balance") or portfolio["equity"]
+        drawdown = portfolio["equity"] / start - 1
+        if self.s.max_drawdown_pct and drawdown <= -self.s.max_drawdown_pct:
+            return {"approved": False, "limit": "overall",
+                    "reason": f"overall loss limit hit ({drawdown:.2%} vs start) - no new buys; review the report"}
 
         budget = min(portfolio["equity"] * self.s.max_position_pct, portfolio["cash"] * 0.98)
         if budget < 10:

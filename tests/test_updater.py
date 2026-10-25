@@ -155,3 +155,24 @@ def test_unreachable_github_is_reported_once_and_never_crashes(repos):
     u.run()
     assert len(tg.sent) == 2  # asked explicitly: answer
     assert "last check for updates failed" in version_text(server, u.status_path)
+
+
+def test_restart_is_requested_through_a_flag_file_not_sudo(tmp_path):
+    import threading
+    (tmp_path / "data").mkdir()
+    u = Updater(Settings(), tg=FakeTG(), root=tmp_path, say=lambda *a: None)
+    u.poll_seconds = 0.05
+    flag = tmp_path / "data" / "restart-requested"
+
+    def root_helper():  # what the root-owned crypto-desk-restart.service does
+        while not flag.exists():
+            pass
+        flag.unlink()
+    threading.Thread(target=root_helper, daemon=True).start()
+    u._restart_service()  # returns once the helper consumed the request
+    assert not flag.exists()
+
+    u.poll_seconds = 0.01
+    with pytest.raises(OSError, match="restart helper"):
+        u._restart_service()  # nobody consumes it: fails loudly instead of hanging
+    assert not flag.exists()

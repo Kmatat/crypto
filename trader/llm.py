@@ -34,19 +34,28 @@ API_ERRORS = (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIC
 
 
 class ClaudeJSON:
-    def __init__(self, model: str, api_key: str, daily_budget_usd: float = 0):
+    def __init__(self, model: str, api_key: str, daily_budget_usd: float = 0, store=None):
+        """`store` (the journal) keeps today's spend across restarts, so a restart never resets the cap."""
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3, timeout=120)
         self.daily_budget = daily_budget_usd
         self.budget_hit = False
+        self.store = store
         self._day: dt.date | None = None
         self._spent = 0.0
+        saved = store.get("ai_spend") if store else None
+        if saved and saved.get("date") == dt.datetime.now(dt.timezone.utc).date().isoformat():
+            self._day, self._spent = dt.date.fromisoformat(saved["date"]), float(saved["usd"])
 
     # ---- spending ----
     def _roll_day(self) -> None:
         today = dt.datetime.now(dt.timezone.utc).date()
         if self._day != today:
             self._day, self._spent, self.budget_hit = today, 0.0, False
+
+    def _save(self) -> None:
+        if self.store:
+            self.store.set("ai_spend", {"date": self._day.isoformat(), "usd": round(self._spent, 6)})
 
     @property
     def spent_today(self) -> float:
@@ -73,6 +82,7 @@ class ClaudeJSON:
                     else getattr(stu, "web_search_requests", 0)) or 0
         self._roll_day()
         self._spent += tokens_in / 1e6 * price_in + (u.output_tokens or 0) / 1e6 * price_out + searches * WEB_SEARCH_USD
+        self._save()
 
     def _create(self, timeout: float | None = None, **params):
         client = self.client.with_options(timeout=timeout) if timeout else self.client
@@ -125,6 +135,8 @@ class ClaudeJSON:
         texts, sources = [], []
         resp = None
         for _ in range(4):  # first request + up to 3 continuations of a long search turn
+            if not self._allowed():
+                break
             try:
                 resp = self._create(timeout=300, model=self.model, max_tokens=16000, system=system,
                                     messages=messages, tools=tools, output_config={"effort": effort})

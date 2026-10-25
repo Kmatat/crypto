@@ -47,11 +47,13 @@ class Orchestrator:
     def __init__(self, s: Settings, journal: Journal | None = None):
         self.s = s
         self.journal = journal or Journal(s.db_path, s.starting_balance)
-        self.llm = ClaudeJSON(s.claude_model, s.anthropic_key, s.ai_daily_budget_usd) if s.use_claude else None
+        self.llm = ClaudeJSON(s.claude_model, s.anthropic_key, s.ai_daily_budget_usd, store=self.journal) \
+            if s.use_claude else None
 
         public = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
         testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) \
             if s.mode == "testnet" and not s.offline else None
+        self.testnet = testnet
         self.market = MarketDataAgent(public, s.interval, offline=s.offline)
         self.scout = MarketScoutAgent(public, testnet, self.llm, s) if public and s.auto_coins else None
         self.technical = TechnicalAnalysisAgent()
@@ -77,7 +79,8 @@ class Orchestrator:
     def portfolio(self) -> dict:
         eq = self.equity()
         return {"cash": self.journal.cash, "equity": eq, "open_positions": len(self.journal.positions()),
-                "day_start_equity": self.journal.day_start_equity(eq)}
+                "day_start_equity": self.journal.day_start_equity(eq),
+                "starting_balance": float(self.journal.get("starting_balance") or eq)}
 
     # ---- watchlist ----
     def watchlist(self) -> dict:
@@ -119,6 +122,7 @@ class Orchestrator:
             summary.append({"symbol": "SCOUT", "error": f"could not refresh the coin list: {e}"})
         wl = self.watchlist()
         symbols = list(dict.fromkeys(wl["symbols"] + list(self.journal.positions())))
+        summary += self.reconcile()
 
         # 1-2. prices, analysis, exchange-side exits, desk-side backup exits
         ctx: dict[str, dict] = {}
@@ -244,14 +248,30 @@ class Orchestrator:
             c = ctx.get(sym)
             if self._is_protected(p):
                 continue  # the exchange watches this one every second; no need to hurry
-            if c and c["technical"]["atr"] > 0:
-                gap = min(c["price"] - p["stop_loss"], p["take_profit"] - c["price"]) / c["technical"]["atr"]
-                if gap < 0.5:  # within half a typical move of its stop-loss or target
-                    near.append(sym)
+            near.append(sym)  # no exchange orders: the desk is the only safety net, so check often
         if near and pace["minutes"] > s.min_check_minutes:
             pace = {"minutes": s.min_check_minutes, "source": "risk",
-                    "reason": f"{', '.join(near)} close to its stop-loss or target without exchange protection"}
+                    "reason": f"{', '.join(near)} held without exchange protection"}
         return pace
+
+    def reconcile(self) -> list[dict]:
+        """Testnet only: do we still hold the coins the journal says we hold? Binance resets the demo
+        exchange now and then, and a position whose coins vanished would otherwise fail to sell forever."""
+        if not self.testnet or not self.journal.positions():
+            return []
+        try:
+            held = self.testnet.balances_total()
+        except Exception as e:
+            log.warning("Could not read exchange balances: %s", e)
+            return []
+        out = []
+        for sym, p in self.journal.positions().items():
+            have = held.get(sym.removesuffix("USDT"), 0.0)
+            if have < p["qty"] * 0.99:
+                out.append({"symbol": sym, "error": f"the journal says we hold {p['qty']:.6g} but the exchange only "
+                                                    f"has {have:.6g}. Binance probably reset the demo account. "
+                                                    f"Run `desk reset --force` to start the demo fresh."})
+        return out
 
     # ---- protection (stop-loss / take-profit orders living on the exchange) ----
     @staticmethod
@@ -290,6 +310,8 @@ class Orchestrator:
             self.journal.set_protection(sym, prot, "partial")
         elif state == "gone":  # cancelled or wiped (Binance resets the testnet now and then): re-protect
             log.warning("Protection for %s disappeared (%s) - placing it again", sym, status.get("detail"))
+            if hasattr(self.execution.broker, "cancel_quietly"):
+                self.execution.broker.cancel_quietly(sym, prot)  # make sure nothing stays locked
             self.journal.set_protection(sym, None, "none")
         # "unknown" (network problem): keep the record, try again next cycle
         return self.journal.positions()[sym], None

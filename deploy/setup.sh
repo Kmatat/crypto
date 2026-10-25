@@ -11,6 +11,7 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="crypto-desk"
 RUN_USER="$(id -un)"
+RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
@@ -44,8 +45,9 @@ step "2/6" "Installing the trading desk in $APP_DIR ..."
 cd "$APP_DIR"
 [ -x .venv/bin/python ] || "$PY" -m venv .venv
 .venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -r requirements.txt
+.venv/bin/pip install -q -r requirements.lock   # exact versions of every library, reviewed with the code
 mkdir -p data
+chmod 700 data                                  # the trade journal is nobody else's business
 
 step "3/6" "Setup questions..."
 if [ -d /run/systemd/system ] && systemctl is-active --quiet "$SERVICE"; then
@@ -65,9 +67,22 @@ if ! .venv/bin/python -m trader check; then
 fi
 
 step "5/6" "Installing the 'desk' command..."
-sed "s|__APP_DIR__|$APP_DIR|g; s|__SERVICE__|$SERVICE|g" deploy/desk > /tmp/desk.$$
-$SUDO install -m 755 /tmp/desk.$$ /usr/local/bin/desk
-rm -f /tmp/desk.$$
+DESK_TMP="$(mktemp)"
+sed "s|__APP_DIR__|$APP_DIR|g; s|__SERVICE__|$SERVICE|g" deploy/desk > "$DESK_TMP"
+$SUDO install -m 755 "$DESK_TMP" /usr/local/bin/desk
+rm -f "$DESK_TMP"
+
+# Keep the operating system patched by itself (security updates nightly, reboot at 04:30 if a kernel
+# update needs it; the desk starts again on boot and finishes its current check before stopping).
+if command -v apt-get >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  $SUDO apt-get install -y -qq unattended-upgrades >/dev/null 2>&1 || warn "Could not install unattended-upgrades."
+  $SUDO tee /etc/apt/apt.conf.d/51crypto-desk >/dev/null <<'APT'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+APT
+fi
 
 step "6/6" "Starting the desk as a 24/7 service..."
 if [ -d /run/systemd/system ]; then
@@ -86,13 +101,16 @@ Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=60
 TimeoutStopSec=600
+UMask=0077
 # Sandbox: the desk only needs the network and its own data folder. If the process were ever
-# taken over (a bad dependency, a bug), it could not gain root, touch the system, or edit its own code.
+# taken over (a bad dependency, a bug), it could not gain root, touch the system, edit its own code,
+# or read the GitHub token and SSH keys.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=$APP_DIR/data
+InaccessiblePaths=-$RUN_HOME/.git-credentials -$RUN_HOME/.ssh
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
@@ -116,8 +134,40 @@ Type=oneshot
 User=$RUN_USER
 WorkingDirectory=$APP_DIR
 ExecStart=$APP_DIR/.venv/bin/python -m trader update
-Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 TimeoutStartSec=1800
+# Sandbox: may change only the app folder (code, libraries, data); cannot gain root or touch the system.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$APP_DIR
+InaccessiblePaths=-$RUN_HOME/.ssh
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+UNIT
+  # The updater cannot restart the desk itself (no privileges by design). It drops a flag file and this
+  # root-owned helper, triggered by the file, performs the restart - the only privileged step, 3 lines long.
+  $SUDO tee /etc/systemd/system/$SERVICE-restart.service >/dev/null <<UNIT
+[Unit]
+Description=Restart the crypto desk when the updater asks for it
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'rm -f $APP_DIR/data/restart-requested; systemctl restart $SERVICE.service'
+UNIT
+  $SUDO tee /etc/systemd/system/$SERVICE-restart.path >/dev/null <<UNIT
+[Unit]
+Description=Watch for a restart request from the crypto desk updater
+
+[Path]
+PathExists=$APP_DIR/data/restart-requested
+Unit=$SERVICE-restart.service
+
+[Install]
+WantedBy=multi-user.target
 UNIT
   $SUDO tee /etc/systemd/system/$SERVICE-update.timer >/dev/null <<UNIT
 [Unit]
@@ -142,19 +192,10 @@ Unit=$SERVICE-update.service
 [Install]
 WantedBy=multi-user.target
 UNIT
-  if [ "$(id -u)" -ne 0 ]; then  # the updater may restart the desk, and only that, without a password
-    SYSTEMCTL="$(command -v systemctl)"
-    echo "$RUN_USER ALL=(root) NOPASSWD: $SYSTEMCTL restart $SERVICE, $SYSTEMCTL start $SERVICE, $SYSTEMCTL stop $SERVICE" > /tmp/sudoers.$$
-    if $SUDO visudo -cf /tmp/sudoers.$$ >/dev/null; then
-      $SUDO install -m 440 /tmp/sudoers.$$ /etc/sudoers.d/$SERVICE
-    else
-      warn "Could not install the sudo rule for automatic restarts; updates will need 'desk update'."
-    fi
-    rm -f /tmp/sudoers.$$
-  fi
+  $SUDO rm -f /etc/sudoers.d/$SERVICE   # earlier versions used a sudo rule; the restart helper replaces it
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable "$SERVICE" "$SERVICE-update.timer" "$SERVICE-update.path" >/dev/null 2>&1
-  $SUDO systemctl restart "$SERVICE-update.timer" "$SERVICE-update.path"
+  $SUDO systemctl enable "$SERVICE" "$SERVICE-update.timer" "$SERVICE-update.path" "$SERVICE-restart.path" >/dev/null 2>&1
+  $SUDO systemctl restart "$SERVICE-update.timer" "$SERVICE-update.path" "$SERVICE-restart.path"
   .venv/bin/python -m trader update --check-only >/dev/null 2>&1 || true   # records the current version
   $SUDO systemctl restart "$SERVICE"
   sleep 3

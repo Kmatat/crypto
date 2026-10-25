@@ -26,7 +26,7 @@ class FakeTelegram:
         return "desk_bot"
 
     def latest_chat_id(self, code=None):
-        assert code and code.isdigit() and len(code) == 4  # the wizard pairs with a one-time code
+        assert code and code.isdigit() and len(code) == 6  # the wizard pairs with a one-time code
         return "999"
 
     def send(self, text):
@@ -334,8 +334,9 @@ def test_secrets_never_reach_logs(caplog, monkeypatch):
 def test_pairing_code_picks_the_right_chat(monkeypatch):
     tg = Telegram("t")
     monkeypatch.setattr(tg, "call", lambda method, **p: [
-        {"update_id": 1, "message": {"chat": {"id": 7}, "text": "hi"}},            # stranger pressed START
-        {"update_id": 2, "message": {"chat": {"id": 42}, "text": "4821"}},         # owner sent the code
-        {"update_id": 3, "message": {"chat": {"id": 8}, "text": "hello there"}},   # another stranger, later
+        {"update_id": 1, "message": {"chat": {"id": 7, "type": "private"}, "text": "hi"}},        # stranger: START
+        {"update_id": 2, "message": {"chat": {"id": 9, "type": "group"}, "text": "482100"}},     # code in a group
+        {"update_id": 3, "message": {"chat": {"id": 42, "type": "private"}, "text": "482100"}},  # the owner
+        {"update_id": 4, "message": {"chat": {"id": 8, "type": "private"}, "text": "my 482100 guess"}},  # not exact
     ])
-    assert tg.latest_chat_id("4821") == "42" and tg.latest_chat_id("0000") is None
+    assert tg.latest_chat_id("482100") == "42" and tg.latest_chat_id("000000") is None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .journal import Journal
+from .notify import clean
 
 
 def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
@@ -101,12 +102,11 @@ def watchlist_text(wl: dict) -> str:
     else:
         lines = ["🔭 Watchlist (core coins from your settings)"]
     if wl.get("summary"):
-        lines.append(wl["summary"])
-    lines += [f"• {s.removesuffix('USDT')}: {wl.get('reasons', {}).get(s, '')}" for s in wl["symbols"]]
+        lines.append(clean(wl["summary"]))
+    lines += [f"• {s.removesuffix('USDT')}: {clean(wl.get('reasons', {}).get(s, ''), 200)}" for s in wl["symbols"]]
     if wl.get("avoid"):
-        lines.append("Avoiding: " + "; ".join(f"{k.removesuffix('USDT')} ({v})" for k, v in wl["avoid"].items()))
-    if wl.get("sources"):
-        lines.append("Sources: " + " , ".join(wl["sources"][:3]))
+        lines.append("Avoiding: " + "; ".join(f"{k.removesuffix('USDT')} ({clean(v, 120)})" for k, v in wl["avoid"].items()))
+    # research sources are deliberately not echoed: links in chat are a phishing channel
     return "\n".join(lines)
 
 
@@ -132,8 +132,8 @@ def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra:
                          "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
         if r:
             found = True
-            lines.append(f"• {sym} {r['action']} ({r['confidence']:.0%}) at {r['ts'][11:16]} UTC: {r['reasoning']}"
-                         f" [risk: {r['risk_reason']}]")
+            lines.append(f"• {sym} {r['action']} ({r['confidence']:.0%}) at {r['ts'][11:16]} UTC: "
+                         f"{clean(r['reasoning'], 300)} [risk: {r['risk_reason']}]")
     if not found:
         lines.append("None yet - the first check is still running. Try again in a minute.")
     return "\n".join(lines)

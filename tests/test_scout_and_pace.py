@@ -44,7 +44,7 @@ def scout(llm=None, testnet=None, **kw):
 def test_candidates_drop_stablecoins_gold_thin_and_non_usdt_pairs():
     syms = [c["symbol"] for c in scout().candidates()]
     assert syms[:2] == ["BTCUSDT", "ETHUSDT"]  # sorted by volume
-    assert set(syms) == {"BTCUSDT", "ETHUSDT", "AVAXUSDT", "DOGEUSDT", "WLDUSDT", "SNDKBUSDT", "PUMPXUSDT"}
+    assert set(syms) == {"BTCUSDT", "ETHUSDT", "AVAXUSDT", "DOGEUSDT", "WLDUSDT", "PUMPXUSDT"}  # SNDKB = stock token
 
 
 def test_testnet_mode_keeps_only_coins_listed_at_a_sane_demo_price():
@@ -56,7 +56,7 @@ def test_testnet_mode_keeps_only_coins_listed_at_a_sane_demo_price():
 def test_rule_picks_are_liquid_major_coins_only():
     out = scout(max_coins=5).run(core=["BTCUSDT", "ETHUSDT"], held=["SOLUSDT"])
     assert out["source"] == "rules"
-    # 3 free slots: AVAX and DOGE qualify; WLD moved too much; SNDKB and PUMPX are not major coins
+    # 3 free slots: AVAX and DOGE qualify; WLD moved too much; PUMPX is not a major coin; SNDKB is excluded
     assert out["symbols"] == ["BTCUSDT", "ETHUSDT", "AVAXUSDT", "DOGEUSDT", "SOLUSDT"]
     assert "we hold it" in out["reasons"]["SOLUSDT"] and "core" in out["reasons"]["BTCUSDT"]
 

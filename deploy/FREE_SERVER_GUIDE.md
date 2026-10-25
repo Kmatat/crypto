@@ -175,8 +175,11 @@ installs one immediately if you don't want to wait.
   *Pay As You Go* under Billing. Always Free servers stay free after upgrading, but set a $1 budget
   alert to be safe.
 - **Binance resets the demo exchange** from time to time, roughly monthly. Balances return to
-  default and sometimes the keys stop working. You'll get a Telegram alert. Create new keys at
-  testnet.binance.vision, then run `desk setup`, and `desk reset` for a clean restart.
+  default and sometimes the keys stop working. You'll get a Telegram alert (the desk also notices when
+  coins it thought it held have vanished). Create new keys at testnet.binance.vision, then run
+  `desk setup`, and `desk reset --force` for a clean restart.
+- **Your trading journal is backed up to your phone** once a week: the bot sends you the journal file
+  on Telegram. Keep those files; the free server could be reclaimed by Oracle one day.
 - **The GitHub token expires** after 90 days. It's needed only for downloading updates, and the
   desk keeps trading without it; `/version` will mention when checks start failing. Create a new
   token the same way, then on the server run `git -C ~/crypto-desk fetch` once and paste it.
@@ -189,16 +192,17 @@ The server holds only demo keys and fake money, but it is connected to real acco
 
 | Account | What to do | Why |
 |---|---|---|
-| **Oracle Cloud** | Turn on multi-factor authentication (Oracle asks for it at signup; keep it on). Under *Billing → Budgets*, create a budget of $1 with an email alert | This account has your credit card. An alert tells you if anything ever starts costing money |
-| **Binance** | Use 2FA on your main Binance account. Only ever paste **testnet** keys into this desk; never real-money keys | The desk is wired to the demo exchange only, so real keys would not even work, but they should never sit on a server |
-| **GitHub** | Use 2FA. The token you created is read-only for one repository and expires in 90 days; make a new one the same way when it does | Whoever controls the repository controls the code the server runs |
-| **Telegram** | Pair the bot with the one-time code the setup shows you (it does this automatically). Don't share the bot token | Only the chat that sent the code receives alerts and can give commands; everyone else is ignored |
-| **Claude (Anthropic)** | In the Anthropic console, set a monthly spending limit (e.g. $150) on top of the desk's own daily cap | Two independent caps on the only part of this setup that costs money |
-| **Server** | Keep the SSH key file somewhere safe and never email it. Nothing else to install: Oracle allows only SSH in, the desk only makes outgoing connections, and it runs in a sandbox that can't change the system | A lost key file is the only way someone else gets onto the server |
+| **Oracle Cloud** | Keep multi-factor authentication on (Oracle asks for it at signup). Under *Billing → Budgets*, create a budget of $1 with an email alert. A budget only **emails** you, it does not stop charges, so if you ever upgrade to Pay As You Go, glance at the Billing page after the first month | This account has your credit card. The free tier itself cannot be charged |
+| **GitHub** | Use 2FA. This account matters most: the server installs whatever code is on the repository, and your Binance demo login is "Log in with GitHub". Check that only you are listed under *Settings → Collaborators* of the repository, and that no deploy keys exist. The token you created is read-only for one repository and expires in 90 days | Whoever controls the repository controls the code the server runs |
+| **Binance** | Your demo keys belong to the testnet, not to a real Binance account; only ever paste **testnet** keys into this desk. If you have a real Binance account, it is not connected to this desk at all | The desk is wired to the demo exchange only, so real keys would not even work, but they should never sit on a server |
+| **Telegram** | Turn on *Settings → Privacy and Security → Two-Step Verification* in your Telegram app, and a passcode lock on the phone. The bot pairs with the one-time code the setup shows you (automatic). The desk will **never** ask you to type a key, a password or to open a link in Telegram: if a message does, assume the bot token leaked, send `/revoke` to @BotFather and run `desk setup` with the new token | Your Telegram chat holds the full trading history and is the remote control |
+| **Claude (Anthropic)** | Use a strong unique password (and two-factor login if your account offers it). In the console, set a monthly spending limit (e.g. $150) on top of the desk's own daily cap, and delete the key when you stop the demo | Two independent caps on the only part of this setup that costs money |
+| **Server** | Keep the SSH key file somewhere safe (not in a shared or synced folder) and never email it. When you finish in Cloud Shell, you can delete the copy you uploaded there (`rm ~/ssh-key-*.key`), or keep it knowingly behind Oracle's MFA. Nothing else to install: Oracle allows only SSH in, the desk only makes outgoing connections, it runs in a sandbox that can't change the system, and the OS installs its own security updates nightly | A lost key file is the only way someone else gets onto the server |
 
 What is already handled for you: your keys are stored on the server in a file only your user can read; they
-never appear in the logs or in Telegram messages; the code refuses to run in any real-money mode; and the
-Risk Manager's limits (10% per trade, 3 positions, 3% daily loss stop) bound what a bad decision can cost.
+never appear in the logs or in Telegram messages; the code refuses to run in any real-money mode; links in
+AI-written text are stripped before anything reaches your phone; and the Risk Manager's limits (10% per
+trade, 3 positions, 3% daily loss stop, 10% overall loss stop) bound what a bad decision can cost.
 
 ## Troubleshooting
 

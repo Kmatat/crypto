@@ -129,7 +129,7 @@ class Journal:
         self.db.commit()
 
     def day_start_equity(self, equity: float) -> float:
-        today = dt.date.today().isoformat()
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()  # same clock as the daily report
         rec = self.get("day_start")
         if not rec or rec["date"] != today:
             rec = {"date": today, "equity": equity}
