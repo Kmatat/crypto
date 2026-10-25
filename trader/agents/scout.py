@@ -34,6 +34,13 @@ MAJOR_COINS = {
     "PEPE", "SHIB", "WLD", "ENA", "TAO", "RENDER", "FET", "ONDO", "JUP", "HYPE", "POL", "ALGO", "VET", "XMR", "ZEC",
 }
 MAX_CANDIDATES = 30
+
+
+def is_stock_token(base: str) -> bool:
+    """Binance names its tokenized stocks and ETFs <TICKER>B (TSLAB, SPYB, NVDAB, ...): about a hundred of them,
+    too many to list by hand. Anything of that shape that is not a known coin is treated as one; the EXCLUDED
+    list and the AI's asset-type label remain as further defences."""
+    return len(base) >= 4 and base.endswith("B") and base not in MAJOR_COINS
 MAX_PICK_MOVE_PCT = 30  # a coin up or down more than this in 24h is too risky to start watching
 
 PICK_SCHEMA = {
@@ -99,7 +106,7 @@ class MarketScoutAgent:
         for t in self.public.tickers_24h():
             sym = t["symbol"]
             base = sym[:-4]
-            if not sym.endswith("USDT") or base in EXCLUDED or t["price"] <= 0 or t["open"] <= 0:
+            if not sym.endswith("USDT") or base in EXCLUDED or is_stock_token(base) or t["price"] <= 0 or t["open"] <= 0:
                 continue
             if t["quote_volume"] < self.s.min_volume_musd * 1e6 or looks_stable(t):
                 continue

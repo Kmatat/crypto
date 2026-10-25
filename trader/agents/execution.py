@@ -144,6 +144,10 @@ class TestnetBroker:
                 break
         return o
 
+    def step_size(self, symbol: str) -> float:
+        """The smallest quantity step the exchange accepts; anything below it is unsellable dust."""
+        return float(self.client.symbol_filters(symbol)["step_size"])
+
     # ---- protection: OCO pair on the exchange ----
     def protect(self, symbol: str, qty: float, stop: float, take: float) -> dict:
         f = self.client.symbol_filters(symbol)
@@ -239,6 +243,17 @@ class ExecutionAgent:
     @property
     def can_protect(self) -> bool:
         return hasattr(self.broker, "protect")
+
+    def step_size(self, symbol: str) -> float | None:
+        """The exchange's quantity step for a coin; None for the paper broker, which does no rounding."""
+        fn = getattr(self.broker, "step_size", None)
+        if fn is None:
+            return None
+        try:
+            return fn(symbol)
+        except (BinanceError, requests.RequestException) as e:
+            log.warning("Could not read the step size of %s: %s", symbol, e)
+            return None
 
     def protect(self, symbol: str, qty: float, stop: float, take: float) -> dict:
         """Returns {"ok": True, "protection": {...}} or {"ok": False, "error": "..."}."""

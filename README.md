@@ -155,7 +155,12 @@ which is where most of the loss came from, cuts the number of trades by two thir
 makes average winners about twice the size of average losers. The edge is modest, it lags buy-and-hold in
 strong rallies (the desk is mostly in cash), and it was negative on one of three alternative coin sets
 tested (BNB, XRP, DOGE). About 100 trades per year is too few to be statistically sure of anything: treat
-these numbers as "plausibly positive", not proven. Independent reviews also found that 4-hour candles
+these numbers as "plausibly positive", not proven. A later statistical check of a 365-day run made the point
+sharper: 102 trades with an average gain of $1.56 and a spread of $22 per trade (a t-statistic of 0.7) is
+indistinguishable from luck; the five best trades, all in SOL, exceeded the whole year's profit, and the desk sat
+in cash for eight of the twelve months. Expect roughly zero until the laboratory finds something better.
+Since 1.3.1 the live desk decides on finished candles only, as the backtester does, so these measurements
+describe the running desk; the still-forming candle supplies only the live price for stops and sizing. Independent reviews also found that 4-hour candles
 (`CANDLE_INTERVAL=4h`, `--interval 4h`) and holding at most one or two positions reduce fees further; with
 the checklist in place they changed results by less than a point either way, so the defaults stay at
 1-hour candles and 3 positions. Any change to the strategy should show an improvement here on at least two

@@ -110,10 +110,15 @@ class Journal:
                         (state, json.dumps(protection) if protection else None, symbol))
         self.db.commit()
 
-    def close_position(self, symbol: str, fill: dict, reason: str) -> dict:
-        """Record a sale. A partial sale (thin testnet order book) keeps the rest of the position open."""
+    def close_position(self, symbol: str, fill: dict, reason: str, step: float | None = None) -> dict:
+        """Record a sale. A partial sale (thin testnet order book) keeps the rest of the position open, unless
+        what is left is smaller than the exchange's step size (`step`): the exchange charges the buy fee in
+        the coin, so a position is a little smaller than the rounded order that protects or sells it, and such
+        dust can be neither sold nor protected. It counts as closed and its cost goes into this trade."""
         p = self.positions()[symbol]
         sold = min(1.0, fill["qty"] / p["qty"]) if p["qty"] else 1.0
+        if step and p["qty"] - fill["qty"] < step:
+            sold = 1.0
         cost = p["cost"] * sold
         pnl = fill["quote"] - cost
         trade = {"symbol": symbol, "opened_at": p["opened_at"], "closed_at": now(), "entry_price": p["entry_price"],
@@ -146,6 +151,15 @@ class Journal:
              result.get("avg_price"), result.get("quote"), result.get("fee_quote"), reason, result.get("error"),
              result.get("market_price")))
         self.db.commit()
+
+    def write_off(self, symbol: str) -> dict:
+        """Forget a dust position (below the exchange's step size) left by an earlier version: it cannot be sold
+        or protected, and while it exists it blocks the coin, a position slot and the normal check pace. Its
+        cost was paid at purchase and stays out of the cash figure; nothing else changes."""
+        p = self.positions()[symbol]
+        self.db.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        self.db.commit()
+        return p
 
     # ---- diary events: the notable moments, in order, for the notebook (data/notes/DIARY.md) ----
     def event(self, kind: str, text: str, data: dict | None = None) -> None:

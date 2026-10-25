@@ -5,6 +5,19 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.3.1 - 2026-10-25
+
+- Fix: the live desk now decides on finished candles only, as the backtester and the laboratory do; the
+  still-forming candle supplies only the live price for stops, trailing and sizing. Until now the running
+  desk was a more trade-happy variant of the measured strategy (about twice the buy signals at 15-minute checks).
+- Fix: a coin remainder smaller than the exchange's step size (left when the buy fee is charged in the coin and
+  the protective order sells the rounded amount) no longer stays behind as an unsellable, unprotectable position
+  that blocked the coin, a position slot and the normal check pace; such dust counts as closed, and old dust is
+  written off at the next check.
+- Fix: the "AI budget used up" alert quotes the cap actually in force, and the server guide says 10% per coin.
+- The Market Scout excludes every Binance tokenized stock or ETF (`<TICKER>B` names), not only a fixed list.
+- README: the measured edge is statistically indistinguishable from zero; expectations set accordingly.
+
 ## 1.3.0 - 2026-10-25
 
 - The notebook: `data/notes/` holds every strategy, trade, lesson, event and result as Markdown pages, rebuilt

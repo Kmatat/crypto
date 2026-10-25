@@ -57,12 +57,14 @@ def print_cycle(n: int, summary: list[dict]) -> None:
         if "error" in r:
             print(f"{r['symbol']:9s} ERROR {r['error']}")
             continue
-        line = f"{r['symbol']:9s} {r['action']:4s}{'*' if str(r.get('source', '')).startswith('claude') else ' '}"
+        line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if str(r.get('source', '')).startswith('claude') else ' '}"
         if "confidence" in r:
             px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
             line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={px}  risk: {r['risk']}"
         if "reason" in r:
             line += f" ({r['reason']})"
+        if "protect_error" in r:
+            line += f"  protection not placed: {r['protect_error']}"
         if o := r.get("order"):
             line += f"  -> {'FILLED' if o['ok'] else 'FAILED'} " + (
                 f"{o['qty']:.6g} @ {o['avg_price']:,.6g}" if o["ok"] else o["error"])
@@ -459,7 +461,7 @@ def cmd_run(s: Settings, args) -> None:
             weekly_backup(bot, tg)
             maybe_weekly_lab(bot, tg, s, trade_lock)
             if bot.llm and bot.llm.budget_hit:
-                tg.send_once("ai-budget", f"💸 Claude's daily budget (${s.ai_daily_budget_usd:.2f}) is used up. "
+                tg.send_once("ai-budget", f"💸 Claude's daily budget (${bot.llm.effective_daily_budget():.2f}) is used up. "
                                           "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)
             maybe_daily_report(bot, tg, s)
             if limit and n >= limit:

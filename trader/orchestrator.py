@@ -182,10 +182,12 @@ class Orchestrator:
         for sym in symbols:
             try:
                 candles = self.market.candles(sym)
-                price = candles[-1]["close"]
+                price = candles[-1]["close"]          # the live price: stops, trailing, sizing, the journal
                 self.last_price[sym] = price
                 position = self.journal.positions().get(sym)
-                technical = self.technical.run(candles)
+                closed = self.market.closed(candles)  # the decision looks only at finished candles (as the backtester)
+                technical = self.technical.run(closed)
+                technical["price"] = price
                 if position:
                     position, exit_result = self._sync_protection(sym, position)
                     if exit_result:
@@ -203,8 +205,8 @@ class Orchestrator:
                             continue
                         if err := self._protect(sym, position):
                             summary.append({"symbol": sym, "protect_error": err})
-                ctx[sym] = {"price": price, "technical": technical, "prediction": self.prediction.run(candles),
-                            "closes": [c["close"] for c in candles], "candles": candles}
+                ctx[sym] = {"price": price, "technical": technical, "prediction": self.prediction.run(closed),
+                            "closes": [c["close"] for c in closed], "candles": closed}
             except Exception as e:  # one bad coin must not stop the others
                 log.exception("Market data failed for %s", sym)
                 summary.append({"symbol": sym, "error": str(e)})
@@ -358,6 +360,14 @@ class Orchestrator:
             return []
         out = []
         for sym, p in self.journal.positions().items():
+            step = self.execution.step_size(sym)
+            if step and p["qty"] < step:  # dust left by an earlier version: unsellable, unprotectable, blocks a slot
+                self.journal.write_off(sym)
+                self.journal.event("trade", f"Wrote off {p['qty']:.8g} {sym.removesuffix('USDT')} of dust (below the "
+                                            f"exchange's step size {step:g}, bought for {p['cost']:,.2f} USDT): it could "
+                                            "neither be sold nor protected and was blocking the coin and a position slot.")
+                out.append({"symbol": sym, "action": "DUST", "reason": f"wrote off {p['qty']:.8g} below step {step:g}"})
+                continue
             have = held.get(sym.removesuffix("USDT"), 0.0)
             if have < p["qty"] * 0.99:
                 out.append({"symbol": sym, "error": f"the journal says we hold {p['qty']:.6g} but the exchange only "
@@ -451,7 +461,7 @@ class Orchestrator:
         kind = "exchange" if status["protection"]["kind"] == "exchange" else "emulated"
         reason = f"{status['reason']} ({kind})"
         self.journal.log_order(sym, "SELL", fill, reason)
-        trade = self.journal.close_position(sym, fill, reason)
+        trade = self.journal.close_position(sym, fill, reason, step=self.execution.step_size(sym))
         self._exit_event(sym, fill, trade)
         if sym in self.journal.positions():  # part of the position is left: protect it again
             self.journal.set_protection(sym, None, "none")
@@ -481,7 +491,7 @@ class Orchestrator:
         self.journal.log_order(sym, "SELL", fill, reason)
         out = {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
         if fill["ok"]:
-            out["trade"] = self.journal.close_position(sym, fill, reason)
+            out["trade"] = self.journal.close_position(sym, fill, reason, step=self.execution.step_size(sym))
             self._exit_event(sym, fill, out["trade"])
             if sym in self.journal.positions():
                 self._protect(sym, self.journal.positions()[sym])  # partial sale: protect the remainder

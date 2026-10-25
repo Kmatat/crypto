@@ -27,6 +27,14 @@ class MarketDataAgent:
             return self._synthetic_candles(symbol, limit)
         return self.client.klines(symbol, self.interval, limit)
 
+    def closed(self, candles: list[dict]) -> list[dict]:
+        """Binance returns the still-forming candle as the last row. Indicators and decisions use finished
+        candles only, exactly as the backtester and the laboratory do (otherwise the live desk would be an
+        unmeasured, more trade-happy variant of the strategy). Offline synthetic candles are all finished."""
+        if self.offline or self.client is None or len(candles) < 2:
+            return candles
+        return candles[:-1]
+
     def daily_closes(self, symbol: str, limit: int = 260) -> list[float]:
         """Daily closing prices (for the 50- and 200-day averages). Cached for an hour; offline: none."""
         if self.offline or self.client is None:
