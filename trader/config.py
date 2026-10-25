@@ -78,6 +78,7 @@ class Settings:
     risk_per_trade_pct: float = 0.01  # Turtles: size so a stop-loss costs 1% of equity; 0 = fixed MAX_POSITION_PCT
     trail_atr: float = 2.0           # Seykota: trailing stop 2 ATR below the highest price since entry; 0 = off
     db_path: str = str(ROOT / "data" / "journal.db")
+    notes_dir: str = ""              # the Markdown notebook; empty = next to the journal (data/notes)
     telegram_token: str = field(default="", repr=False)
     telegram_chat_id: str = ""
     daily_report_hour_utc: int = 6
@@ -142,6 +143,7 @@ class Settings:
             risk_per_trade_pct=_f("RISK_PER_TRADE_PCT", 0.01),
             trail_atr=_f("TRAIL_ATR", 2.0),
             db_path=str(db_path),
+            notes_dir=os.getenv("NOTES_DIR", ""),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             daily_report_hour_utc=int(os.getenv("DAILY_REPORT_HOUR_UTC", 6)),

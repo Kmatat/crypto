@@ -69,6 +69,12 @@ class Lab:
         hist = self.journal.get("strategy_history") or []
         hist.append({"ts": now_iso(), "event": "promote", "id": card.id, "name": card.name, "by": by, "note": note})
         self.journal.set("strategy_history", hist[-100:])
+        if prev:
+            old = StrategyCard.from_dict(prev["card"])
+            self.journal.event("strategy", f"Champion is now {card.name} [{card.id}] ({by}{', ' + note if note else ''}). "
+                                           f"Changes versus {old.name} [{old.id}]: {card.describe_diff(old)}")
+        else:
+            self.journal.event("strategy", f"First champion recorded: {summary_line(card)} ({by})")
 
     def challengers(self) -> list[dict]:
         return self.journal.get("strategy_challengers") or []
@@ -89,6 +95,9 @@ class Lab:
                  "notes": problems, "lab": None, "forward": None}
         items.append(entry)
         self._save_challengers(items)
+        self.journal.event("challenger", f"Proposed {card.name} [{card.id}] ({card.source or 'proposal'}): "
+                                         f"{card.describe_diff(champ)}" + (f" - rejected before testing: {problems[0]}"
+                                                                           if problems else ""))
         return entry
 
     # ---- data ----
@@ -197,18 +206,32 @@ class Lab:
                 entry["lab"] = {**ev, "verdict": verdict}
                 entry["status"] = "lab_passed" if verdict["passed"] else "lab_failed"
                 entry["notes"] = verdict["reasons"]
+                self.journal.event("lab", f"Exam of {card.name} [{card.id}]: {'passed' if verdict['passed'] else 'failed'} - "
+                                          f"mean {ev['mean_return']:+.2f}% vs champion {champ_eval['mean_return']:+.2f}%, beat "
+                                          f"it on {verdict['wins']}/{verdict['tests']} tests"
+                                   + ("; " + "; ".join(verdict["reasons"]) if verdict["reasons"] else ""))
             if entry["status"] == "lab_passed":
                 fwd = self.forward_test(entry, champ)
                 entry["forward"] = fwd
                 if fwd["ready"]:
                     entry["status"] = "ready" if fwd["passed"] else "forward_failed"
                     entry["notes"] = fwd.get("reasons", [])
+                    self.journal.event("lab", f"Forward test of {card.name} [{card.id}]: {'passed' if fwd['passed'] else 'failed'}"
+                                              f" - {fwd['challenger_return']:+.2f}% vs champion {fwd['champion_return']:+.2f}% "
+                                              f"over {fwd['days']:.0f} days" + ("; " + "; ".join(fwd["reasons"]) if fwd.get("reasons") else "")
+                                       + ("" if not fwd["passed"] else ("; promoted automatically" if self.s.auto_promote
+                                                                        else "; waiting for the owner's /approve")))
             if entry["status"] == "ready" and self.s.auto_promote and promoted is None:
                 promoted = card
                 self.promote(card.id, by="auto-promote")
                 entry["status"] = "promoted"
         self._save_challengers(items)
         self.journal.set("lab_last_run", now_iso())
+        examined = sum(1 for e in items if (e.get("lab") or {}).get("evaluated_at", "") >= champ_eval["evaluated_at"][:10])
+        ready = sum(1 for e in items if e["status"] == "ready")
+        self.journal.event("lab", f"Weekly lab done: champion {champ.name} [{champ.id}] exam mean {champ_eval['mean_return']:+.2f}% "
+                                  f"over {len(champ_eval['tests'])} tests; {examined} challenger(s) examined, {ready} ready for approval"
+                           + (f"; promoted {promoted.name} [{promoted.id}]" if promoted else ""))
         return {"champion": champ, "champion_eval": champ_eval, "challengers": items, "promoted": promoted}
 
     # ---- promotion, rollback, live watch ----
@@ -232,6 +255,7 @@ class Lab:
                 e["status"] = "rejected"
                 e["notes"] = ["rejected by the owner"]
                 self._save_challengers(items)
+                self.journal.event("owner", f"Owner rejected {e['card']['name']} [{card_id}]")
                 return True
         return False
 
@@ -243,6 +267,7 @@ class Lab:
         hist = self.journal.get("strategy_history") or []
         hist.append({"ts": now_iso(), "event": "rollback", "id": card.id, "name": card.name, "by": "lab", "note": reason})
         self.journal.set("strategy_history", hist[-100:])
+        self.journal.event("rollback", f"Rolled back to {card.name} [{card.id}]: {reason}")
         return card
 
     def watch_live(self) -> str | None:

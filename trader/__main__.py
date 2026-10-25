@@ -25,7 +25,9 @@ from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
 from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
 from .lab import Lab, status_text as lab_status_text, week_report
-from .agents.research import ResearchAgent
+from .agents.research import ResearchAgent, review_text
+from .notes import Notes, default_dir, lineage_text
+from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 
 log = logging.getLogger("trader")
@@ -38,6 +40,8 @@ HELP_TEXT = (
     "/strategies - the strategy in use, challengers under test, and what you can approve\n"
     "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
     "/lab - run the weekly strategy lab now (takes a few minutes)\n"
+    "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
+    "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
     "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
     "/help - this list\n\n"
@@ -155,6 +159,7 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
     if card := scorecard_block(bot, bot.journal):
         text += "\n\n" + card
+    bot.notes.refresh(bot.last_price, scorecard=card)  # the notebook's PERFORMANCE.md carries today's scorecard
     if tg.send(text):
         bot.journal.set("last_daily_report", today)
 
@@ -175,7 +180,9 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
         return ""
     if not claude["cases"] and not news["judged"]:
         return ""
-    return scorecard_text(claude, news, float(j.get("ai_spend_total") or 0))
+    text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0))
+    j.set("scorecard_text", text)  # reused by the notebook between daily reports
+    return text
 
 
 def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
@@ -221,10 +228,24 @@ def weekly_backup(bot: Orchestrator, tg: Telegram) -> None:
             bot.journal.db.backup(dest)
         if tg.send_document(target, f"📦 Weekly backup of the trading journal ({week}). Keep it somewhere safe."):
             bot.journal.set("last_backup_week", week)
+            send_notebook(bot, tg, f"📒 Weekly notebook ({week}): the same facts as Markdown, for you or for Claude. "
+                                   "Start with README.md inside.")
     except (sqlite3.Error, OSError) as e:
         log.warning("Journal backup failed: %s", e)
     finally:
         target.unlink(missing_ok=True)
+
+
+def send_notebook(bot: Orchestrator, tg: Telegram, caption: str, notes: Notes | None = None) -> bool:
+    """Zip the notebook and upload it to the owner's phone."""
+    notes = notes or bot.notes
+    path = notes.bundle()
+    if not path:
+        return False
+    try:
+        return tg.send_document(path, caption)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason: str) -> str:
@@ -234,8 +255,11 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         research = ResearchAgent(bot.llm)
         lessons = research.lessons(bot.journal)
         bot.journal.set("lessons", lessons)
+        if lessons.get("notes"):
+            bot.journal.event("lesson", "; ".join(lessons["notes"]))
         tried = {c["card"]["id"] for c in lab.challengers()}
-        proposals = research.propose(lab.champion(), lessons, bot.base.research_candidates, tried)
+        proposals = research.propose(lab.champion(), lessons, bot.base.research_candidates, tried,
+                                     lineage=lineage_text(bot.journal))
         result = lab.run_week(proposals)
         text = week_report(result) + f"\n({reason})"
         if lessons.get("notes"):
@@ -244,6 +268,27 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         if ideas:
             text += "\nIdeas that would need new code (for the developer): " + "; ".join(ideas[:3])
         tg.send(text)
+
+        # the week's page in the notebook: what was known and decided, written once and kept
+        scorecard = bot.journal.get("scorecard_text") or ""
+        perf = performance(bot.journal, bot.last_price)
+        perf_text = report_text(perf, title="Performance") + "\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
+        review = None
+        if bot.llm:
+            data = research.review(bot.notes.digest(bot.last_price, scorecard=scorecard))
+            if data:
+                review = review_text(data)
+                bot.journal.event("review", "Claude reviewed the notebook: " + str(data.get("summary", ""))[:300])
+                bot.journal.set("last_review", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                                                "review": data})
+                tg.send_long(clean(review, 12_000))
+        week = dt.datetime.now(dt.timezone.utc).strftime("%G-W%V")
+        bot.notes.weekly_snapshot(week, [("Laboratory", text), ("Lessons (post-mortem of the last 30 days)",
+                                          "\n".join(f"- {n}" for n in lessons.get("notes", [])) or "- nothing notable"),
+                                         ("Claude's review", review or "(Claude not configured, or unavailable this week)"),
+                                         ("Performance", "```\n" + perf_text + "\n```"),
+                                         ("Claude versus the rules", "```\n" + scorecard + "\n```" if scorecard else "")])
+        bot.notes.refresh(bot.last_price, scorecard=scorecard)
         return text
 
 
@@ -274,6 +319,7 @@ def cmd_run(s: Settings, args) -> None:
         f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if s.use_claude else "")
     coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
     print(f"Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
+    bot.journal.event("start", f"Desk started: {mode}; AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
 
     if tg.enabled:
         if bot.journal.get("last_daily_report") is None:  # first start: first daily report tomorrow
@@ -315,6 +361,42 @@ def cmd_run(s: Settings, args) -> None:
             threading.Thread(target=lambda: run_lab(bot, tg, trade_lock, "requested on Telegram"), daemon=True).start()
             return "🔬 Lab started: downloading history and testing challengers. Results arrive here in a few minutes."
 
+        def notes_now() -> str:
+            if not bot.notes.enabled:
+                return "The notebook is switched off for this journal."
+
+            def build(j: Journal) -> bool:
+                notes = Notes(j, bot.notes.dir, bot.base)
+                notes.refresh(bot.last_price, scorecard=j.get("scorecard_text") or "")
+                return send_notebook(bot, tg, "📒 The desk's notebook: strategies, trades, diary and results as Markdown. "
+                                              "Upload it to Claude and ask what to improve (see README.md inside).", notes)
+            if with_journal(s, build):
+                return ("Inside the zip: README.md (start here), STRATEGY.md, TRADES.md, DIARY.md, PERFORMANCE.md, "
+                        "strategies/ (one file per strategy) and weekly/ (one page per week).")
+            return "Could not upload the notebook. On the server it is in data/notes (or run: desk notes)."
+
+        def review_now() -> str:
+            if not bot.llm:
+                return "Claude is not configured, so there is no AI review. The notebook itself is available with /notes."
+
+            def work() -> None:
+                def run(j: Journal) -> str:
+                    notes = Notes(j, bot.notes.dir, bot.base)
+                    data = ResearchAgent(bot.llm).review(notes.digest(bot.last_price, scorecard=j.get("scorecard_text") or ""))
+                    if not data:
+                        return ("Claude could not review the notebook right now (daily AI budget used up, or the service "
+                                "is unavailable). Try again later.")
+                    j.event("review", "Claude reviewed the notebook: " + str(data.get("summary", ""))[:300])
+                    j.set("last_review", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "review": data})
+                    return review_text(data)
+                try:
+                    tg.send_long(clean(with_journal(s, run), 12_000))
+                except Exception as e:  # a review must never take the desk down
+                    log.exception("Review failed")
+                    tg.send(f"⚠️ The review failed: {e}")
+            threading.Thread(target=work, daemon=True).start()
+            return "🧠 Claude is reading the notebook. The review arrives here in a minute or two."
+
         tg.listen({
             "/update": update_now,
             "/version": version_text,
@@ -322,6 +404,8 @@ def cmd_run(s: Settings, args) -> None:
             "/approve": approve,
             "/reject": reject,
             "/lab": lab_now,
+            "/notes": notes_now,
+            "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
                                                          performance(j, bot.last_price))
@@ -349,6 +433,10 @@ def cmd_run(s: Settings, args) -> None:
             except Exception as e:  # keep the desk alive; the service would restart it anyway
                 log.exception("Cycle %s failed", n)
                 tg.send_once("cycle", f"⚠️ A trading cycle failed: {e}\nThe desk keeps running and retries.")
+                try:
+                    bot.journal.event("error", f"A trading cycle failed: {e}")
+                except Exception:  # noqa: BLE001 - the journal itself may be the problem
+                    pass
                 summary = []
             if not args.quiet:
                 print_cycle(n, summary)
@@ -359,6 +447,7 @@ def cmd_run(s: Settings, args) -> None:
                 tg.send(scout_message(bot.scout_update))
             if bot.pace["minutes"] != last_minutes:
                 tg.send_once("pace", pace_message(bot.pace), every_hours=1)
+                bot.journal.event("pace", pace_message(bot.pace).removeprefix("⏱️ "))
                 last_minutes = bot.pace["minutes"]
             for r in summary:  # risk limits pausing new buys deserve one clear message
                 if r.get("risk", "").startswith(("daily loss limit", "overall loss limit")):
@@ -402,6 +491,9 @@ def main() -> None:
     rst = sub.add_parser("reset")
     rst.add_argument("--force", action="store_true", help="reset even with open positions")
     sub.add_parser("version")
+    nts = sub.add_parser("notes", help="rebuild the Markdown notebook from the journal (data/notes)")
+    nts.add_argument("--zip", action="store_true", help="also write a zip of it next to the folder")
+    nts.add_argument("--offline", action="store_true", help="the offline simulation's journal")
     sub.add_parser("backtest", add_help=False)  # arguments handled by trader/backtest.py
     upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
     upd.add_argument("--check-only", action="store_true")
@@ -433,6 +525,19 @@ def main() -> None:
             print_report(perf)
             print(goals_text(goals(j, perf, px), perf))
         with_journal(s, show)
+        return
+    if args.cmd == "notes":
+        def build(j):
+            notes = Notes(j, default_dir(s, j.path), s)
+            written = notes.refresh(live_prices(s, j), scorecard=j.get("scorecard_text") or "")
+            if written is None:
+                print("The notebook could not be written (see the warning above).")
+                return
+            print(f"Notebook rebuilt in {notes.dir} ({len(written)} files).\nStart with README.md; STRATEGY.md, TRADES.md, "
+                  f"DIARY.md and PERFORMANCE.md hold the record; strategies/ has one file per strategy card.")
+            if args.zip:
+                print(f"Zip: {notes.bundle()}")
+        with_journal(s, build)
         return
     if args.cmd == "reset":
         from .setup_wizard import archive_journal

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS closed_trades (
   qty REAL, cost REAL, proceeds REAL, pnl REAL, pnl_pct REAL, exit_reason TEXT);
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS equity (ts TEXT, equity REAL, cash REAL);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts TEXT, kind TEXT, text TEXT, data TEXT);
 """
 
 
@@ -31,9 +32,12 @@ def now() -> str:
 
 class Journal:
     def __init__(self, path: str, starting_balance: float):
+        self.path = path
         if path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        self.db = sqlite3.connect(path)
+        # One connection may be used from the trading loop and from a /lab or /review thread; the desk serialises
+        # them with its trade lock, and the Telegram thread opens its own connections (with_journal).
+        self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
@@ -142,6 +146,23 @@ class Journal:
              result.get("avg_price"), result.get("quote"), result.get("fee_quote"), reason, result.get("error"),
              result.get("market_price")))
         self.db.commit()
+
+    # ---- diary events: the notable moments, in order, for the notebook (data/notes/DIARY.md) ----
+    def event(self, kind: str, text: str, data: dict | None = None) -> None:
+        self.db.execute("INSERT INTO events (ts, kind, text, data) VALUES (?,?,?,?)",
+                        (now(), kind, text, json.dumps(data, default=str) if data else None))
+        self.db.commit()
+
+    def events(self, since: str | None = None, limit: int = 3000) -> list[dict]:
+        """Oldest first. `since` is an ISO timestamp."""
+        if since:
+            rows = self.db.execute("SELECT * FROM events WHERE ts >= ? ORDER BY id DESC LIMIT ?", (since, limit))
+        else:
+            rows = self.db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
+        out = [dict(r) for r in rows][::-1]
+        for e in out:
+            e["data"] = json.loads(e["data"]) if e.get("data") else None
+        return out
 
     def log_equity(self, equity: float) -> None:
         self.db.execute("INSERT INTO equity VALUES (?,?,?)", (now(), equity, self.cash))

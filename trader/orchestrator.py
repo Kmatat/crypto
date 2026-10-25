@@ -40,7 +40,8 @@ from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .llm import ClaudeJSON
-from .strategy import StrategyCard
+from .notes import Notes, default_dir
+from .strategy import StrategyCard, summary_line
 
 log = logging.getLogger("orchestrator")
 
@@ -50,6 +51,7 @@ class Orchestrator:
         self.base = s                       # the owner's settings; the champion strategy card is applied on top
         self.s = s
         self.journal = journal or Journal(s.db_path, s.starting_balance)
+        self.notes = Notes(self.journal, default_dir(s, self.journal.path), s)  # the Markdown notebook (data/notes)
         self.card: StrategyCard | None = None
         self.llm = ClaudeJSON(s.claude_model, s.anthropic_key, s.ai_daily_budget_usd, store=self.journal) \
             if s.use_claude else None
@@ -127,6 +129,10 @@ class Orchestrator:
         before = set(old["symbols"]) if old else set(self.s.symbols)
         self.scout_update = {**new, "added": [s for s in new["symbols"] if s not in before],
                              "removed": [s for s in before if s not in new["symbols"]]}
+        if self.scout_update["added"] or self.scout_update["removed"]:
+            self.journal.event("watchlist", "Coin list changed: added " + (", ".join(self.scout_update["added"]) or "none")
+                               + "; removed " + (", ".join(self.scout_update["removed"]) or "none")
+                               + f". Now watching {', '.join(new['symbols'])}.")
 
     # ---- strategy card ----
     def apply_champion(self) -> StrategyCard:
@@ -136,8 +142,14 @@ class Orchestrator:
             card = StrategyCard.from_dict(state["card"])
         else:
             card = StrategyCard.from_settings(self.base)
-            self.journal.set("strategy_champion", {"card": card.to_dict(), "since": dt.datetime.now(dt.timezone.utc)
-                             .isoformat(timespec="seconds"), "by": "owner settings", "previous": None})
+            now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            self.journal.set("strategy_champion", {"card": card.to_dict(), "since": now, "by": "owner settings",
+                                                   "previous": None})
+            hist = self.journal.get("strategy_history") or []   # same record the lab writes, so the lineage is complete
+            hist.append({"ts": now, "event": "promote", "id": card.id, "name": card.name, "by": "owner settings",
+                         "note": "first run"})
+            self.journal.set("strategy_history", hist[-100:])
+            self.journal.event("strategy", f"First champion recorded from the owner's settings: {summary_line(card)}")
         if self.card is None or card.id != self.card.id:
             self.s = card.settings(self.base)
             card.apply_decision_rules()
@@ -147,6 +159,8 @@ class Orchestrator:
             self.market.interval = self.s.interval
             if self.card is not None:
                 log.info("Strategy switched to %s [%s]", card.name, card.id)
+                self.journal.event("strategy", f"The desk now trades {card.name} [{card.id}]: "
+                                               f"{card.describe_diff(self.card)}")
             self.card = card
         return card
 
@@ -260,6 +274,8 @@ class Orchestrator:
                 verdict = self.risk.review(decision, sym, c["price"], c["technical"]["atr"], self.portfolio())
                 if verdict.get("trip"):
                     self.journal.set("brake_tripped_at", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+                    self.journal.event("brake", f"Overall loss brake tripped: {verdict['reason']}. No new buys for "
+                                                f"{self.s.brake_pause_days} days, then half size until half the loss is back.")
                 review = c.get("mentor")
                 if verdict["approved"] and review and not review["pass"]:
                     names = ", ".join(review["failed"])
@@ -272,8 +288,14 @@ class Orchestrator:
                     fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
                     fill["market_price"] = c["price"]
                     self.journal.log_order(sym, "BUY", fill, "signal")
+                    if not fill["ok"]:
+                        self.journal.event("order", f"BUY {sym} failed: {fill.get('error')}")
                     if fill["ok"]:
                         self.journal.open_position(sym, fill, verdict["stop_loss"], verdict["take_profit"])
+                        self.journal.event("trade", f"BUY {sym}: {fill['qty']:.6g} at {fill['avg_price']:,.6g} = "
+                                                    f"{fill['quote']:,.2f} USDT · stop {verdict['stop_loss']:,.6g} · target "
+                                                    f"{verdict['take_profit']:,.6g} · confidence {decision['confidence']:.0%} "
+                                                    f"({decision.get('source') or 'rules'}): {str(decision['reasoning'])[:240]}")
                         position = self.journal.positions()[sym]
                         if err := self._protect(sym, position):
                             result["protect_error"] = err
@@ -290,6 +312,7 @@ class Orchestrator:
         # 7. when to check again
         self.pace = self._next_pace(news.get("_pace"), ctx)
         self.journal.log_equity(self.equity())
+        self.notes.refresh(self.last_price, scorecard=self.journal.get("scorecard_text") or "")
         return summary
 
     @staticmethod
@@ -392,6 +415,9 @@ class Orchestrator:
             self.protect_errors.pop(sym, None)
             return None
         self.journal.set_protection(sym, None, "none")
+        if self.protect_errors.get(sym) != res["error"]:
+            self.journal.event("protection", f"Could not place the stop-loss / take-profit for {sym} on the exchange: "
+                                             f"{res['error']}. The desk watches it itself every few minutes meanwhile.")
         self.protect_errors[sym] = res["error"]
         return res["error"]
 
@@ -426,9 +452,16 @@ class Orchestrator:
         reason = f"{status['reason']} ({kind})"
         self.journal.log_order(sym, "SELL", fill, reason)
         trade = self.journal.close_position(sym, fill, reason)
+        self._exit_event(sym, fill, trade)
         if sym in self.journal.positions():  # part of the position is left: protect it again
             self.journal.set_protection(sym, None, "none")
         return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill, "trade": trade}
+
+    def _exit_event(self, sym: str, fill: dict, trade: dict) -> None:
+        hours = (dt.datetime.fromisoformat(trade["closed_at"]) - dt.datetime.fromisoformat(trade["opened_at"])).total_seconds() / 3600
+        self.journal.event("trade", f"SELL {sym}: {fill['qty']:.6g} at {fill['avg_price']:,.6g} = {fill['quote']:,.2f} USDT · "
+                                    f"{trade['exit_reason']} · {'profit' if trade['pnl'] > 0 else 'loss'} "
+                                    f"{trade['pnl']:+,.2f} USDT ({trade['pnl_pct']:+.2f}%) after {hours:.1f} h")
 
     def _sell(self, sym: str, position: dict, reason: str) -> dict:
         if position.get("protection"):  # free the coins first: open orders lock them
@@ -438,6 +471,8 @@ class Orchestrator:
             if status["state"] == "error":
                 fill = {"ok": False, "error": status["detail"], "market_price": self.last_price[sym]}
                 self.journal.log_order(sym, "SELL", fill, reason)
+                self.journal.event("order", f"SELL {sym} failed ({reason}): could not cancel the protective orders: "
+                                            f"{status['detail']}")
                 return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
             self.journal.set_protection(sym, None, "none")
             position = self.journal.positions()[sym]
@@ -447,8 +482,10 @@ class Orchestrator:
         out = {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
         if fill["ok"]:
             out["trade"] = self.journal.close_position(sym, fill, reason)
+            self._exit_event(sym, fill, out["trade"])
             if sym in self.journal.positions():
                 self._protect(sym, self.journal.positions()[sym])  # partial sale: protect the remainder
         elif self.journal.positions().get(sym):
+            self.journal.event("order", f"SELL {sym} failed ({reason}): {fill.get('error')}")
             self._protect(sym, self.journal.positions()[sym])  # sale failed: put the protection back
         return out

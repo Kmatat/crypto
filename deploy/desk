@@ -33,6 +33,8 @@ case "${1:-help}" in
   update)  "$PY" -m trader update --force ;;
   logs-update) $SUDO journalctl -u "$SERVICE-update" -n 60 --no-pager -o cat ;;
   version) "$PY" -m trader version ;;
+  notes)   "$PY" -m trader notes ${2:-}
+           echo "Read them here with:  less $APP_DIR/data/notes/STRATEGY.md   or send /notes to the bot to get the zip on your phone." ;;
   *) cat <<'EOF'
 desk status    is it running? latest activity and performance
 desk report    full performance report
@@ -45,6 +47,7 @@ desk check     test connections to Binance, news, forex, Claude, Telegram
 desk reset     start the demo from scratch (old results kept in a backup file; add --force if positions are open)
 desk update    install the latest code now (tested first, restarts itself; also happens automatically)
 desk version   which version is running, and whether a newer one exists
+desk notes     rebuild the Markdown notebook (data/notes): strategies, trades, diary, results; add --zip for a zip file
 EOF
   ;;
 esac

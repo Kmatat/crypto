@@ -54,6 +54,24 @@ class Telegram:
             log.warning("Telegram send failed: %s", self.redact(e))
             return False
 
+    def send_long(self, text: str) -> bool:
+        """A long text (a review, a report) as several messages, split on line breaks."""
+        ok, chunk, room = True, "", MAX_LEN - 100
+        for line in text.splitlines(keepends=True):
+            while len(line) > room:
+                if chunk:
+                    ok &= self.send(chunk)
+                    chunk = ""
+                ok &= self.send(line[:room])
+                line = line[room:]
+            if len(chunk) + len(line) > room:
+                ok &= self.send(chunk)
+                chunk = ""
+            chunk += line
+        if chunk.strip():
+            ok &= self.send(chunk)
+        return ok
+
     def send_once(self, key: str, text: str, every_hours: float = 6) -> bool:
         """Send, but not more than once per `every_hours` for the same key (avoids alert floods)."""
         if time.time() - self._last_sent.get(key, 0) < every_hours * 3600:

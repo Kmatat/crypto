@@ -129,6 +129,8 @@ You can now close the browser. The desk keeps running on the server.
 | `/strategies` | The strategy in use, the challengers the lab is testing, and anything waiting for your approval |
 | `/approve <id>` / `/reject <id>` | Switch to a challenger that passed every test, or dismiss it |
 | `/lab` | Run the weekly strategy lab now (a few minutes; results arrive as a message) |
+| `/notes` | The desk's notebook as a zip: every strategy, trade, lesson and result as Markdown pages. Upload it to Claude and ask what to improve |
+| `/review` | Claude reads the notebook and sends a plain-language review: what works, what fails, what the lab should test next. Uses a little of the AI budget |
 | `/version` | Which code version is running, and whether a newer one is waiting |
 | `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |
 
@@ -150,6 +152,34 @@ Messages also arrive automatically:
 | `desk reset` | Start the demo again from zero (old results are kept in a backup file) |
 | `desk update` | Install the latest version now (normally not needed: it happens automatically) |
 | `desk version` | Which version is running |
+| `desk notes` | Rebuild the notebook in `~/crypto-desk/data/notes` (add `--zip` for a zip file) |
+
+## One-time upgrade of a server installed before automatic updates
+
+If your server was set up with the first version (before the update job existed), it does not yet know how to
+update itself. One terminal session fixes that for good; afterwards every improvement arrives by itself.
+
+1. Open the server as in Part 4, steps 1 to 3 (Cloud Shell, upload the key if it is no longer there, `ssh -i ...`).
+2. Paste these two lines and press Enter:
+   ```
+   sudo systemctl stop crypto-desk
+   cd ~/crypto-desk && git config --global credential.helper store && git pull --ff-only && bash deploy/setup.sh
+   ```
+   - If it asks for a **Username** and **Password**, give your GitHub username and paste a GitHub token
+     (Part 3A; make a new one if the old one expired). The token is stored, so the update job can use it later.
+   - When it asks *"Settings already exist. Answer the setup questions again? (y/n)"*, press **Enter** to keep
+     your settings. Your keys, your Telegram pairing and your trading journal are kept; the journal is upgraded
+     in place.
+3. Wait for **"✅ The trading desk is running 24/7"**. Your Telegram receives *"🚀 Trading desk started"* with the
+   new command list. Send `/version`: it shows the new version and *"Up to date"*.
+
+That is all. From now on `/version`, `/update` and the automatic 30-minute check work as described below.
+
+| If you see | Do this |
+|---|---|
+| `error: Your local changes to the following files would be overwritten` | A code file on the server was edited by hand. Run `git -C ~/crypto-desk checkout -- .` and paste the two lines again (your `.env` and `data/` folder are never touched by this) |
+| `fatal: Authentication failed` | Paste a GitHub **token** as the password, not your GitHub password; the token needs *Contents: Read-only* on Kmatat/crypto |
+| `fatal: Not possible to fast-forward` | Run `git -C ~/crypto-desk fetch && git -C ~/crypto-desk reset --hard origin/HEAD` and paste the two lines again |
 
 ## Updates happen by themselves
 
@@ -182,7 +212,9 @@ installs one immediately if you don't want to wait.
   coins it thought it held have vanished). Create new keys at testnet.binance.vision, then run
   `desk setup`, and `desk reset --force` for a clean restart.
 - **Your trading journal is backed up to your phone** once a week: the bot sends you the journal file
-  on Telegram. Keep those files; the free server could be reclaimed by Oracle one day.
+  on Telegram, together with the notebook (the same facts as readable Markdown pages). Keep those files;
+  the free server could be reclaimed by Oracle one day, and the notebook is what you give to Claude when
+  you want a second opinion on the strategy.
 - **The GitHub token expires** after 90 days. It's needed only for downloading updates, and the
   desk keeps trading without it; `/version` will mention when checks start failing. Create a new
   token the same way, then on the server run `git -C ~/crypto-desk fetch` once and paste it.

@@ -116,7 +116,8 @@ send `/update` on Telegram):
    is **restored automatically**.
 5. Tells you the outcome on Telegram, with a one-line summary of what changed.
 
-`/version` shows what is running and whether a newer version exists. Set `AUTO_UPDATE=false` in `.env`
+A server installed before this job existed needs one terminal session to join in: see "One-time upgrade" in
+`deploy/FREE_SERVER_GUIDE.md`. `/version` shows what is running and whether a newer version exists. Set `AUTO_UPDATE=false` in `.env`
 to be notified about new versions instead of installing them automatically. Anyone who can push code to
 the GitHub repository can change what the server runs, so protect that account with two-factor
 authentication (see the security checklist in the server guide).
@@ -204,6 +205,38 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   **scorecard** replays every veto against the real prices that followed: money the vetoes saved, money they
   cost, and the hit rate of the news scores. The daily report shows it; after 50 divergent decisions it gives
   a verdict. The AI budget is capped at a percentage of the account (`AI_BUDGET_PCT_MONTH`, 0.25%).
+
+## The notebook: every strategy, trade and lesson as Markdown (for you, and for Claude)
+
+Everything the desk does is in its SQLite journal, which code can read but people cannot. The notebook
+(`data/notes/` on the server) is the same record rendered as Markdown, rebuilt after every market check,
+so it can never disagree with the journal and can be rebuilt from any backup (`desk notes`).
+
+| File | What it holds |
+|---|---|
+| `README.md` | what is in the folder, how to use it with Claude, the fixed guardrails and the laboratory bounds |
+| `STRATEGY.md` | the champion with every parameter and its allowed range, its exam results, every challenger with the reason it passed or failed, the lineage of promotions and rollbacks, the lessons |
+| `strategies/<id>.md` | one page per strategy card ever created: parameters, rationale and source, exam table, forward test, live record, and the exact `backtest` command that replicates it |
+| `TRADES.md` | every trade: when and at what price, which strategy was live, the decision and its confidence, what each agent reported at entry (technical, prediction, news, forex), the checklist, the exit |
+| `DIARY.md` | the notable moments in order: starts, buys and sells, failed orders, brakes, coin-list changes, protection problems, pace changes, lab results, promotions, rejections, rollbacks |
+| `PERFORMANCE.md` | the report, the demo goals, the week-by-week learning curve (equity, trades, profit factor, champion), the Claude scorecard, costs |
+| `weekly/<week>.md` | written once a week after the lab and never rewritten: the lab result, the lessons, Claude's review, the performance at that moment |
+
+**Getting it:** `/notes` on Telegram sends the folder as a zip; the weekly backup message brings it too; on the
+server `desk notes` rebuilds it and `desk notes --zip` makes the zip.
+
+**Using it with Claude (outside the desk):** upload the zip to Claude and ask, for example, *"Read STRATEGY.md and
+TRADES.md: what is failing, and which single change inside the bounds would you test first?"* The suggestions
+come back to the laboratory as proposals; nothing in the notebook can change the desk by itself.
+
+**Using it inside the desk:** `/review` makes Claude read the notebook and write a plain-language review (what works,
+what fails, what the lab should test next, what would need new code, and how much the sample size allows one to
+conclude). The same review is written into the weekly page. The research agent also receives the lineage of every
+strategy already tried, with its result and the reason, so it builds on what passed instead of re-proposing what
+failed. That is the learning curve: every week adds a page, and the next proposals start from it.
+
+**Replication:** each strategy page carries the complete command to re-run its backtest on any computer with the
+project, so a result can be checked by anyone, including a future version of the desk.
 
 ## Goals, and what success looks like
 
@@ -327,6 +360,10 @@ trader/
   setup_wizard.py   the setup questions (python -m trader setup)
   updater.py        over-the-air updates: fetch, test, restart, roll back (python -m trader update)
   backtest.py       replay the rule core on real history (python -m trader backtest)
+  strategy.py       strategy cards: a complete configuration as data, with hard bounds
+  lab.py            the laboratory: exam, forward test, promotion, rollback (python -m trader ... /lab)
+  scorecard.py      Claude versus the rules, computed from real later prices
+  notes.py          the Markdown notebook (data/notes): strategies, trades, diary, results (python -m trader notes)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer
