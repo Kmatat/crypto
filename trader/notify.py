@@ -6,6 +6,7 @@ reasoning text can never break the formatting.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import threading
@@ -124,7 +125,8 @@ class Telegram:
             cmd = words[0].split("@")[0].lower() if words else ""
             handler = handlers.get(cmd) or handlers["/help"]
             try:
-                reply = handler()
+                arg = " ".join(words[1:])
+                reply = handler(arg) if inspect.signature(handler).parameters else handler()
             except Exception as e:
                 log.exception("Telegram command %s failed", cmd)
                 reply = f"Sorry, that command failed: {e}"

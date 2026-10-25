@@ -24,6 +24,9 @@ from .journal import Journal
 from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
 from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
+from .lab import Lab, status_text as lab_status_text, week_report
+from .agents.research import ResearchAgent
+from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 
 log = logging.getLogger("trader")
 
@@ -32,6 +35,9 @@ HELP_TEXT = (
     "/status - open positions and each coin's latest decision with the reason\n"
     "/report - performance so far (profit, win rate, order success)\n"
     "/watchlist - which coins the desk watches and why\n"
+    "/strategies - the strategy in use, challengers under test, and what you can approve\n"
+    "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
+    "/lab - run the weekly strategy lab now (takes a few minutes)\n"
     "/version - which code version is running, and whether a newer one exists\n"
     "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
     "/help - this list\n\n"
@@ -147,8 +153,29 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     text = report_text(perf, title=f"☀️ Daily report {today}")
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
+    if card := scorecard_block(bot, bot.journal):
+        text += "\n\n" + card
     if tg.send(text):
         bot.journal.set("last_daily_report", today)
+
+
+def scorecard_block(bot: Orchestrator, j: Journal) -> str:
+    """Claude-vs-rules scorecard from real later prices (empty when there is nothing to judge or no data)."""
+    client = bot.market.client
+    if client is None:
+        return ""
+
+    def candles_after(symbol: str, since_ms: int) -> list[dict]:
+        return client.klines(symbol, "1h", limit=130, start_ms=since_ms)
+    try:
+        claude = claude_scorecard(j, bot.s, candles_after)
+        news = news_scorecard(j, candles_after)
+    except Exception as e:
+        log.warning("Scorecard failed: %s", e)
+        return ""
+    if not claude["cases"] and not news["judged"]:
+        return ""
+    return scorecard_text(claude, news, float(j.get("ai_spend_total") or 0))
 
 
 def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
@@ -158,7 +185,8 @@ def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
         lines.append("🆕 A new code version is available - send /update" if not st.get("auto_update")
                      else "🆕 A new code version is available - it installs automatically within 30 min")
     if bot.llm:
-        cap = f" of ${s.ai_daily_budget_usd:.2f} daily cap" if s.ai_daily_budget_usd else ""
+        budget = bot.llm.effective_daily_budget()
+        cap = f" of ${budget:.2f} daily cap" if budget else ""
         lines.append(f"Claude spend today: about ${bot.llm.spent_today:.2f}{cap}")
     return lines
 
@@ -199,9 +227,45 @@ def weekly_backup(bot: Orchestrator, tg: Telegram) -> None:
         target.unlink(missing_ok=True)
 
 
+def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason: str) -> str:
+    """Weekly research + exam + forward tests. Holds the trade lock: never overlaps a trading decision."""
+    with trade_lock:
+        lab = Lab(bot.base, bot.journal, client=bot.market.client)
+        research = ResearchAgent(bot.llm)
+        lessons = research.lessons(bot.journal)
+        bot.journal.set("lessons", lessons)
+        tried = {c["card"]["id"] for c in lab.challengers()}
+        proposals = research.propose(lab.champion(), lessons, bot.base.research_candidates, tried)
+        result = lab.run_week(proposals)
+        text = week_report(result) + f"\n({reason})"
+        if lessons.get("notes"):
+            text += "\nLessons from the last 30 days: " + "; ".join(lessons["notes"])
+        ideas = getattr(research, "ideas_needing_code", None)
+        if ideas:
+            text += "\nIdeas that would need new code (for the developer): " + "; ".join(ideas[:3])
+        tg.send(text)
+        return text
+
+
+def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: threading.Lock) -> None:
+    if not s.lab_enabled or s.offline:
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    week = now.strftime("%G-W%V")
+    if now.weekday() != s.lab_weekday or now.hour < s.daily_report_hour_utc or bot.journal.get("lab_week") == week:
+        return
+    bot.journal.set("lab_week", week)
+    try:
+        run_lab(bot, tg, trade_lock, "scheduled weekly run")
+    except Exception as e:
+        log.exception("Weekly lab failed")
+        tg.send_once("lab", f"⚠️ The weekly strategy lab failed: {e}. The champion strategy keeps trading.")
+
+
 def cmd_run(s: Settings, args) -> None:
     lock = single_instance(s.db_path)  # noqa: F841 - held until exit
     bot = Orchestrator(s)
+    trade_lock = threading.Lock()
     tg = Telegram(s.telegram_token, s.telegram_chat_id) if not s.offline else Telegram("")
     mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
         "offline test (made-up prices)" if s.offline else "paper trading at real prices"
@@ -228,12 +292,40 @@ def cmd_run(s: Settings, args) -> None:
             return "⏳ Checking GitHub for new code now. You'll get a message with the result within a few minutes."
 
         from .updater import version_text
+
+        def lab_status() -> str:
+            return with_journal(s, lambda j: lab_status_text(Lab(bot.base, j, client=None)))
+
+        def approve(arg: str) -> str:
+            card_id = arg.strip().lower()
+            if not card_id:
+                return "Usage: /approve <id>  (ids are shown by /strategies)"
+            card = with_journal(s, lambda j: Lab(bot.base, j, client=None).promote(card_id, by="owner"))
+            if not card:
+                return f"No challenger [{card_id}] is ready to approve. See /strategies."
+            return f"✅ Promoted {card.name} [{card.id}]. The desk switches at its next check.\n{card.describe_diff(bot.card)}"
+
+        def reject(arg: str) -> str:
+            ok = with_journal(s, lambda j: Lab(bot.base, j, client=None).reject(arg.strip().lower()))
+            return "Rejected." if ok else "No such challenger (or it is already the champion). See /strategies."
+
+        def lab_now() -> str:
+            if not s.lab_enabled:
+                return "The strategy lab is switched off (LAB_ENABLED=false)."
+            threading.Thread(target=lambda: run_lab(bot, tg, trade_lock, "requested on Telegram"), daemon=True).start()
+            return "🔬 Lab started: downloading history and testing challengers. Results arrive here in a few minutes."
+
         tg.listen({
             "/update": update_now,
             "/version": version_text,
+            "/strategies": lab_status,
+            "/approve": approve,
+            "/reject": reject,
+            "/lab": lab_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
-                                                         performance(j, bot.last_price))),
+                                                         performance(j, bot.last_price))
+                                            + (("\n\n" + scorecard_block(bot, j)) if scorecard_block(bot, j) else "")),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
                                                                      status_extra(bot, s))),
             "/watchlist": lambda: with_journal(s, lambda j: watchlist_text(j.get("watchlist") or default_watchlist(s))),
@@ -250,7 +342,10 @@ def cmd_run(s: Settings, args) -> None:
         while not stop.is_set():
             n += 1
             try:
-                summary = bot.run_cycle()
+                with trade_lock:
+                    summary = bot.run_cycle()
+                    if (why := Lab(bot.base, bot.journal, client=None).watch_live()):
+                        tg.send(f"⏪ Strategy rolled back to the previous champion: {why}. Review /strategies.")
             except Exception as e:  # keep the desk alive; the service would restart it anyway
                 log.exception("Cycle %s failed", n)
                 tg.send_once("cycle", f"⚠️ A trading cycle failed: {e}\nThe desk keeps running and retries.")
@@ -272,6 +367,7 @@ def cmd_run(s: Settings, args) -> None:
                                  every_hours=12)
                     break
             weekly_backup(bot, tg)
+            maybe_weekly_lab(bot, tg, s, trade_lock)
             if bot.llm and bot.llm.budget_hit:
                 tg.send_once("ai-budget", f"💸 Claude's daily budget (${s.ai_daily_budget_usd:.2f}) is used up. "
                                           "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)

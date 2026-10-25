@@ -39,6 +39,7 @@ class ClaudeJSON:
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3, timeout=120)
         self.daily_budget = daily_budget_usd
+        self.pct_daily_budget = 0.0   # set by the orchestrator from the account size (AI_BUDGET_PCT_MONTH)
         self.budget_hit = False
         self.store = store
         self._day: dt.date | None = None
@@ -62,12 +63,17 @@ class ClaudeJSON:
         self._roll_day()
         return self._spent
 
+    def effective_daily_budget(self) -> float:
+        """The flat daily cap, or the percentage-of-account cap, whichever is lower."""
+        caps = [c for c in (self.daily_budget, self.pct_daily_budget) if c]
+        return min(caps) if caps else 0.0
+
     def _allowed(self) -> bool:
         self._roll_day()
-        if self.daily_budget and self._spent >= self.daily_budget:
+        budget = self.effective_daily_budget()
+        if budget and self._spent >= budget:
             if not self.budget_hit:
-                log.warning("Claude daily budget $%.2f reached - using rule-based logic until tomorrow (UTC)",
-                            self.daily_budget)
+                log.warning("Claude daily budget $%.2f reached - using rule-based logic until tomorrow (UTC)", budget)
             self.budget_hit = True
             return False
         return True

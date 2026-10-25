@@ -65,13 +65,14 @@ def test_decision_uses_claude_and_falls_back():
     calls = []
     claude = SimpleNamespace(ask=lambda *a, **k: calls.append(1) or {"action": "BUY", "confidence": 0.9, "reasoning": "x"})
     agent = DecisionAgent(claude)
-    assert agent.run("BTCUSDT", reports(0.2), holding=False)["source"] == "claude"   # real buy signal: ask
-    assert agent.run("BTCUSDT", reports(0.22), holding=False)["source"] == "claude-reused"  # unchanged: reuse
+    assert agent.run("BTCUSDT", reports(0.3), holding=False)["source"] == "rules"    # rules say HOLD: no AI (veto-only)
+    assert agent.run("BTCUSDT", reports(0.4), holding=False)["source"] == "claude"   # rules would buy: ask
+    assert agent.run("BTCUSDT", reports(0.42), holding=False)["source"] == "claude-reused"  # unchanged: reuse
     assert agent.run("ETHUSDT", reports(0.0), holding=False)["source"] == "rules"    # neutral: free rules
     assert agent.run("ETHUSDT", reports(0.5), holding=True)["source"] == "rules"     # holding + positive: keep
     assert len(calls) == 1
     broken = SimpleNamespace(ask=lambda *a, **k: None)
-    assert DecisionAgent(broken).run("BTCUSDT", reports(0.3), holding=False)["source"] == "rules"
+    assert DecisionAgent(broken).run("BTCUSDT", reports(0.4), holding=False)["source"] == "rules"
 
 
 PORT = {"cash": 10_000, "equity": 10_000, "open_positions": 0, "day_start_equity": 10_000}

@@ -67,10 +67,11 @@ class DailySeries:
 
 class Backtest:
     def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None,
-                 days: int | None = None, btc_history: list[dict] | None = None):
+                 days: int | None = None, btc_history: list[dict] | None = None, end_ms: int | None = None):
         self.s = s
         self.history = history
         self.days = days
+        self.end_ms = end_ms  # evaluate a window that ended in the past (out-of-sample checks)
         self.decision = decision or DecisionAgent()
         self.risk = RiskManagerAgent(s)
         self.technical, self.prediction = TechnicalAnalysisAgent(), PredictionAgent()
@@ -84,7 +85,9 @@ class Backtest:
         s = self.s
         times = sorted(set.intersection(*(set(c["time"] for c in h) for h in self.history.values())))
         by_time = {sym: {c["time"]: i for i, c in enumerate(h)} for sym, h in self.history.items()}
-        if self.days:  # trade only the last `days`; earlier history feeds the long averages
+        if self.end_ms:
+            times = [t for t in times if t <= self.end_ms]
+        if self.days and times:  # trade only the last `days`; earlier history feeds the long averages
             times = [t for t in times if t >= times[-1] - self.days * 86_400_000]
         step_ms = times[1] - times[0] if len(times) > 1 else 3_600_000
         cash, positions, trades, curve = s.starting_balance, {}, [], []
@@ -168,6 +171,12 @@ class Backtest:
         # value anything still open at the last price
         final = curve[-1][1] if curve else s.starting_balance
         traded = [t for t, _ in curve]
+        if not traded:
+            return {"days": 0, "start_balance": s.starting_balance, "final_balance": s.starting_balance, "return_pct": 0.0,
+                    "buy_and_hold_pct": {}, "basket_hold_pct": None, "trades": 0, "trades_per_week": 0.0,
+                    "fees_paid": 0.0, "fees_pct_of_start": 0.0, "win_rate_pct": None, "avg_win": None, "avg_loss": None,
+                    "profit_factor": None, "max_drawdown_pct": 0.0, "avg_hold_hours": None,
+                    "exits": {"stop-loss": 0, "take-profit": 0, "signal": 0}, "decisions": decisions, "mentor_vetoes": {}}
         result = self._metrics(trades, curve, final, decisions, traded)
         result["mentor_vetoes"] = vetoes
         return result

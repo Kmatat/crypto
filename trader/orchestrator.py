@@ -40,16 +40,23 @@ from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .llm import ClaudeJSON
+from .strategy import StrategyCard
 
 log = logging.getLogger("orchestrator")
 
 
 class Orchestrator:
     def __init__(self, s: Settings, journal: Journal | None = None):
+        self.base = s                       # the owner's settings; the champion strategy card is applied on top
         self.s = s
         self.journal = journal or Journal(s.db_path, s.starting_balance)
+        self.card: StrategyCard | None = None
         self.llm = ClaudeJSON(s.claude_model, s.anthropic_key, s.ai_daily_budget_usd, store=self.journal) \
             if s.use_claude else None
+        if self.llm and s.ai_budget_pct_month:
+            # e.g. 0.25% of $10,000 a month = $25/month = about $0.83 a day: the AI bill stays a small fraction
+            # of any plausible edge, so a cheap model is the only sensible choice at this account size
+            self.llm.pct_daily_budget = s.starting_balance * s.ai_budget_pct_month / 100 / 30
 
         public = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
         testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) \
@@ -121,9 +128,32 @@ class Orchestrator:
         self.scout_update = {**new, "added": [s for s in new["symbols"] if s not in before],
                              "removed": [s for s in before if s not in new["symbols"]]}
 
+    # ---- strategy card ----
+    def apply_champion(self) -> StrategyCard:
+        """Run whatever strategy card is champion (set by the lab, the owner's /approve, or a rollback)."""
+        state = self.journal.get("strategy_champion")
+        if state:
+            card = StrategyCard.from_dict(state["card"])
+        else:
+            card = StrategyCard.from_settings(self.base)
+            self.journal.set("strategy_champion", {"card": card.to_dict(), "since": dt.datetime.now(dt.timezone.utc)
+                             .isoformat(timespec="seconds"), "by": "owner settings", "previous": None})
+        if self.card is None or card.id != self.card.id:
+            self.s = card.settings(self.base)
+            card.apply_decision_rules()
+            self.risk = RiskManagerAgent(self.s)
+            self.mentor = MentorAgent(self.s.mentor_checks, self.s.min_reward_risk, self.s.cooldown_hours) \
+                if self.s.mentor_checks else None
+            self.market.interval = self.s.interval
+            if self.card is not None:
+                log.info("Strategy switched to %s [%s]", card.name, card.id)
+            self.card = card
+        return card
+
     # ---- the cycle ----
     def run_cycle(self) -> list[dict]:
         summary: list[dict] = []
+        self.apply_champion()
         try:
             self.maybe_scout()
         except Exception as e:  # keep trading the current watchlist
@@ -206,7 +236,10 @@ class Orchestrator:
                 if review:
                     reports["mentor"] = {"pass": review["pass"], "checklist": MentorAgent.summary(review)}
                     c["mentor"] = review
-                decision = self.decision.run(sym, reports, holding=position is not None)
+                # Claude costs money: skip it when a buy is doomed anyway (checklist failed, no free slot, limits)
+                slots_full = position is None and len(positions) >= self.s.max_open_positions
+                use_ai = not (position is None and ((review and not review["pass"]) or slots_full))
+                decision = self.decision.run(sym, reports, holding=position is not None, use_ai=use_ai)
                 if decision["action"] == "BUY":
                     buys.append((sym, c, reports, decision))
                     continue

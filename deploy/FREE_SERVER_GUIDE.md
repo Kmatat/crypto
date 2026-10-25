@@ -126,6 +126,9 @@ You can now close the browser. The desk keeps running on the server.
 | `/status` | Open positions (with 🛡️ when the stop-loss and take-profit are live on Binance), why each coin was bought or skipped, when the next check is, and today's Claude spend |
 | `/report` | The performance figures |
 | `/watchlist` | Which coins the desk watches, and why the scout picked each one |
+| `/strategies` | The strategy in use, the challengers the lab is testing, and anything waiting for your approval |
+| `/approve <id>` / `/reject <id>` | Switch to a challenger that passed every test, or dismiss it |
+| `/lab` | Run the weekly strategy lab now (a few minutes; results arrive as a message) |
 | `/version` | Which code version is running, and whether a newer one is waiting |
 | `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |
 

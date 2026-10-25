@@ -65,7 +65,9 @@ stay comparable with the demo account.
 hourly candles. Checking every 15 minutes means they react sooner to news, to stop-losses and to new
 signals.
 
-Default weights for the rule-based decision: technical 35%, forecast 25%, news 25%, forex 15%.
+Default weights for the rule-based decision: technical 50%, forecast 30%, news 10%, forex 10%. News and
+forex weights are small because their accuracy is unmeasured; clearly negative news (score ≤ -0.5) still
+blocks a new buy.
 
 ---
 
@@ -136,7 +138,7 @@ brackets):
 |---|---|---|---|
 | Plain indicator rules (the original) | -2.2% (+26%) | -3.1% (+10%) | -10.1% (-38%) |
 | + 200-day rule and Bitcoin regime only | -0.3% | -0.3% | -0.9% |
-| **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 10% cap) | **+1.6%** | **+1.6%** | **+0.9%** |
+| **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 10% cap, news weight 10%) | **+1.9%** | **+1.9%** | **+1.3%** |
 
 The original rules had no edge: they lost a little in rallies and more in the bear market, and exchange
 fees were the whole difference (with fees set to zero the same trades made +5.7% over 180 days; 11 trades a
@@ -156,6 +158,47 @@ losing trade costs about 0.15% of the account, so the 3% daily limit almost neve
 backstop for flash crashes). The 10% overall brake is the control that matters: in the past year's prices it
 would have tripped and saved 6-16 points. When it trips, the desk now pauses new buys for 14 days
 (`BRAKE_PAUSE_DAYS`), then resumes at half size until the account has recovered half the loss.
+
+## How the desk improves itself (the strategy laboratory)
+
+The desk can create, test, promote and roll back strategies on its own, but inside a frame designed to
+keep it honest, because the reviews showed that on these markets random entries do about as well as
+indicators, so a loop that "keeps whatever backtested best" would mostly keep luck.
+
+```
+ Research agent ──► strategy cards (proposals)
+ (web research with Claude, or         │
+  neighbours of the champion)          ▼
+                              Laboratory exam: 5 periods × 2 coin sets, must beat the champion on
+                              most of them, never badly worse, enough trades, drawdown within limits
+                                       │ pass
+                                       ▼
+                              Forward test: the weeks AFTER the proposal (data that did not exist yet)
+                                       │ pass
+                                       ▼
+                              Owner approves on Telegram (/approve <id>)  ──►  new champion
+                                       │                                        │
+                              AUTO_PROMOTE=true skips this step         live watch: 30+ trades with a
+                                                                        profit factor under 0.7 → rollback
+```
+
+- **A strategy card** is a complete configuration: entry threshold, stop, target, trailing distance, which
+  checklist rules, cooling-off, reward-to-risk, sizing, position count and candle size. It is data, so the
+  system can invent as many as it likes. New *kinds* of rules still need code, which arrives through the
+  tested update pipeline; the research agent lists such ideas for the developer instead of inventing code.
+- **Hard bounds** (`trader/strategy.py`): a card may never enlarge positions beyond the owner's limits, never
+  touch the daily/overall loss brakes, the AI budget, the trading mode or the coin filters, and may change at
+  most two parameters at once versus the champion.
+- **Weekly run** (Monday, with the daily report): post-mortem of the last 30 days' losing trades ("lessons"),
+  a few proposals, the exam, forward tests of earlier proposals, and a Telegram summary. `/strategies` shows
+  the champion, the challengers and their status; `/lab` runs it now; `/approve <id>` and `/reject <id>` decide.
+- **Rollback:** a promoted champion whose live trades (30 or more) show a profit factor under 0.7 is replaced
+  by the previous champion automatically, with a Telegram alert. Every promotion and rollback is logged.
+- **Claude is measured, not trusted:** it is now a pure veto (consulted only when the rules would trade), it
+  is not consulted on buys the checklist or the risk limits would refuse anyway, and a code-computed
+  **scorecard** replays every veto against the real prices that followed: money the vetoes saved, money they
+  cost, and the hit rate of the news scores. The daily report shows it; after 50 divergent decisions it gives
+  a verdict. The AI budget is capped at a percentage of the account (`AI_BUDGET_PCT_MONTH`, 0.25%).
 
 ## Goals, and what success looks like
 

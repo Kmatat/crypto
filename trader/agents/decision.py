@@ -14,10 +14,12 @@ import time
 
 from ..llm import ClaudeJSON
 
-WEIGHTS = {"technical": 0.35, "prediction": 0.25, "news": 0.25, "forex": 0.15}
-BUY_THRESHOLD = 0.25
-SELL_THRESHOLD = -0.25
-AI_GATE = 0.15        # ask Claude only when |score| reaches this in the direction we could act
+# News and forex weights are deliberately small: their accuracy is unmeasured, and synthetic tests showed
+# noisy news scores swing results by as much as the whole rule edge. News can still block a buy (NEWS_VETO).
+WEIGHTS = {"technical": 0.50, "prediction": 0.30, "news": 0.10, "forex": 0.10}
+BUY_THRESHOLD = 0.35   # same selectivity as 0.25 had under the old weights (the score's scale changed with them)
+SELL_THRESHOLD = -0.35
+NEWS_VETO = -0.5      # clearly bad news for a coin blocks a new buy, whatever the chart says
 REUSE_MINUTES = 45    # reuse Claude's view for a coin while its inputs stay about the same
 
 DECISION_SCHEMA = {
@@ -56,11 +58,16 @@ class DecisionAgent:
     def combined_score(reports: dict) -> float:
         return round(sum(WEIGHTS[k] * float(reports[k]["score"]) for k in WEIGHTS), 3)
 
-    def run(self, symbol: str, reports: dict, holding: bool) -> dict:
+    def run(self, symbol: str, reports: dict, holding: bool, use_ai: bool = True) -> dict:
         score = self.combined_score(reports)
         rules_action = self._rules(score, holding)["action"]
+        news_score = float(reports.get("news", {}).get("score", 0) or 0)
+        if not holding and news_score <= NEWS_VETO:
+            return {"action": "HOLD", "confidence": 0.9, "source": "rules", "combined_score": score,
+                    "rules_action": rules_action,
+                    "reasoning": f"Clearly negative news for this coin (news score {news_score:+.2f}); no new buy."}
         decision = None
-        if self.llm and self.worth_asking(score, holding):
+        if self.llm and use_ai and self.worth_asking(score, holding):
             decision = self._reuse(symbol, score, holding)
             if decision is None:
                 decision = self._claude(symbol, reports, holding, score)
@@ -79,8 +86,9 @@ class DecisionAgent:
 
     @staticmethod
     def worth_asking(score: float, holding: bool) -> bool:
-        """Only a possible BUY (not holding, positive) or SELL (holding, negative) needs judgement."""
-        return (not holding and score >= AI_GATE) or (holding and score <= -AI_GATE)
+        """Claude is consulted only when the rules themselves would act: it can veto a trade, never
+        originate one, until its track record (the scorecard) says otherwise."""
+        return (not holding and score >= BUY_THRESHOLD) or (holding and score <= SELL_THRESHOLD)
 
     def _reuse(self, symbol: str, score: float, holding: bool) -> dict | None:
         r = self._recent.get(symbol)

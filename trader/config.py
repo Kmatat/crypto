@@ -52,7 +52,14 @@ class Settings:
     min_volume_musd: float = 10      # scout ignores coins with less 24h trading volume (million USD)
     news_refresh_minutes: int = 30
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
+    ai_budget_pct_month: float = 0.25  # ... and never more than this % of the account per month (0 = off)
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
+    # ---- strategy laboratory (trader/lab.py): the desk proposes, tests and promotes strategy cards ----
+    lab_enabled: bool = True
+    lab_weekday: int = 0             # 0 = Monday: weekly research + exam
+    lab_alt_symbols: tuple = ("BNBUSDT", "XRPUSDT", "ADAUSDT")  # second coin set every challenger must survive
+    research_candidates: int = 3     # new strategy proposals per week
+    auto_promote: bool = False       # True = promote a challenger that passed everything without asking the owner
     starting_balance: float = 10_000.0
     max_position_pct: float = 0.10   # ceiling per position; RISK_PER_TRADE_PCT can only make positions smaller
     max_open_positions: int = 3
@@ -111,7 +118,14 @@ class Settings:
             min_volume_musd=_f("MIN_VOLUME_MUSD", 10),
             news_refresh_minutes=int(os.getenv("NEWS_REFRESH_MINUTES", 30)),
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
+            ai_budget_pct_month=_f("AI_BUDGET_PCT_MONTH", 0.25),
             auto_update=_b("AUTO_UPDATE", True),
+            lab_enabled=_b("LAB_ENABLED", True),
+            lab_weekday=int(os.getenv("LAB_WEEKDAY", 0)),
+            lab_alt_symbols=tuple(x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT")
+                                  for x in os.getenv("LAB_ALT_SYMBOLS", "BNB,XRP,ADA").split(",") if x.strip()),
+            research_candidates=int(os.getenv("RESEARCH_CANDIDATES", 3)),
+            auto_promote=_b("AUTO_PROMOTE", False),
             starting_balance=_f("STARTING_BALANCE_USDT", 10_000),
             max_position_pct=_f("MAX_POSITION_PCT", 0.10),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),
