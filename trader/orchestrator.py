@@ -26,7 +26,7 @@ import datetime as dt
 import logging
 import time
 
-from .agents.decision import DecisionAgent
+from .agents.decision import NEWS_VETO, DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
 from .agents.head import HeadTraderAgent
@@ -280,7 +280,7 @@ class Orchestrator:
                 if review:
                     reports["mentor"] = {"pass": review["pass"], "checklist": MentorAgent.summary(review)}
                     c["mentor"] = review
-                score = DecisionAgent.combined_score(reports)
+                score = self.decision.score(reports)
                 base_thr = self.decision.threshold_for(sym)
                 news_score = float(reports["news"].get("score", 0) or 0)
                 thr, why = self.head.threshold(sym, base_thr, closes, positions, news_score) if self.head \
@@ -288,13 +288,16 @@ class Orchestrator:
                 reports["head"] = {"threshold": thr, "why": why}
                 # Claude costs money: a buy the checklist or the position limit refuses anyway is not worth a call
                 slots_full = position is None and len(positions) >= self.s.max_open_positions
-                eligible = position is not None or not ((review and not review["pass"]) or slots_full)
+                news_veto = position is None and news_score <= NEWS_VETO   # refused before any call is made
+                eligible = position is not None or not ((review and not review["pass"]) or slots_full or news_veto)
                 pending.append({"symbol": sym, "ctx": c, "reports": reports, "position": position, "score": score,
-                                "threshold": thr, "holding": position is not None, "eligible": eligible})
+                                "threshold": thr, "holding": position is not None, "eligible": eligible,
+                                "fresh": self.decision.has_fresh_view(sym, score, position is not None)})
             except Exception as e:
                 log.exception("Analysis failed for %s", sym)
                 summary.append({"symbol": sym, "stage": "analysis", "error": str(e)})
-        allowed = self.head.plan_ai(pending) if self.head else {p["symbol"] for p in pending if p["eligible"]}
+        allowed = self.head.plan_ai(pending, pace_minutes=self.pace["minutes"]) if self.head \
+            else {p["symbol"] for p in pending if p["eligible"]}
         buys = []
         for p in pending:
             sym, c, reports, position = p["symbol"], p["ctx"], p["reports"], p["position"]

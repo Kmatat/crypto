@@ -65,11 +65,11 @@ class FakeLLM:
     def __init__(self, picks, research=True):
         self.picks, self.with_research, self.asked = picks, research, []
 
-    def research(self, system, prompt, max_searches=5):
+    def research(self, system, prompt, max_searches=5, **kw):
         return {"text": "AVAX upgrade went live today.", "sources": ["https://news.example/avax"]} \
             if self.with_research else None
 
-    def ask(self, system, prompt, schema, effort="medium"):
+    def ask(self, system, prompt, schema, effort="medium", **kw):
         self.asked.append(prompt)
         return {"picks": self.picks, "avoid": [{"symbol": "pumpx", "reason": "pump and dump"}], "summary": "Calm."}
 
@@ -176,7 +176,7 @@ def test_old_60_minute_setting_becomes_15_but_explicit_new_settings_are_kept(mon
 def test_news_agent_returns_ai_pace_and_refreshes_for_new_coins(monkeypatch):
     calls = []
 
-    def ask(system, prompt, schema, effort="low"):
+    def ask(system, prompt, schema, effort="low", **kw):
         calls.append(prompt)
         return {"coins": [{"coin": "BTC", "score": 0.4, "summary": "ETF inflows"}], "market_mood": "upbeat",
                 "check_every_minutes": 5, "pace_reason": "CPI data in 20 minutes"}

@@ -10,7 +10,7 @@ from trader.agents import decision as dmod
 from trader.agents.decision import DecisionAgent
 from trader.agents.head import CORRELATED, NEWS_MIN_JUDGED, TILT, HeadTraderAgent, correlation
 from trader.backtest import Backtest
-from trader.calibration import CANDIDATES, calibrated_card, choose, study, study_text
+from trader.calibration import CANDIDATES, _shrink, calibrated_card, choose, study, study_text
 from trader.config import Settings
 from trader.journal import Journal
 from trader.lab import Lab, restore_decision_rules
@@ -63,16 +63,37 @@ def test_backtest_honours_per_coin_thresholds():
     assert loose["trades"] > strict["trades"]
 
 
-def test_choose_needs_evidence_and_shrinks_towards_the_common_threshold():
-    rows = [{"threshold": t, "return_pct": 1.0 + (4.0 if t == 0.5 else 0.0), "trades": 20 if t == 0.5 else 15,
-             "profit_factor": 1.1, "max_drawdown_pct": 1.0} for t in CANDIDATES]
-    c = choose(rows, 0.35, 10.0)
-    assert c["best"] == 0.5 and c["trades"] == 20 and 0.35 < c["threshold"] < 0.5   # half-way, on 20 trades
-    assert "pulled towards 0.35" in c["why"] and c["base_return_pct"] == 1.0
-    thin = [dict(r, trades=5) for r in rows]
-    assert choose(thin, 0.35, 10.0)["threshold"] == 0.35 and "fewer than" in choose(thin, 0.35, 10.0)["why"]
-    deep = [dict(r, max_drawdown_pct=50.0) for r in rows]
-    assert choose(deep, 0.35, 10.0)["threshold"] == 0.35
+def rows_for(best=0.5, best_ret=5.0, base_ret=1.0, n=40, halves=((20, 2.5, 1.0), (20, 2.5, 0.0)), pf=1.5, dd=1.0):
+    """Rows for every candidate: `best` makes best_ret, the common 0.35 makes base_ret, the rest less.
+    halves: (trades, best half return, common half return) for each half."""
+    out = []
+    for t in CANDIDATES:
+        if abs(t - best) < 1e-9:
+            ret, hv = best_ret, [{"trades": h[0], "return_pct": h[1]} for h in halves]
+        elif abs(t - 0.35) < 1e-9:
+            ret, hv = base_ret, [{"trades": h[0], "return_pct": h[2]} for h in halves]
+        else:
+            ret, hv = base_ret - 1, [{"trades": h[0], "return_pct": -1.0} for h in halves]
+        out.append({"threshold": t, "return_pct": ret, "trades": n, "profit_factor": pf, "max_drawdown_pct": dd,
+                    "halves": hv})
+    return out
+
+
+def test_choose_requires_profit_a_clear_edge_and_both_halves_then_shrinks():
+    c = choose(rows_for(), 0.35, 10.0)
+    assert c["best"] == 0.5 and c["threshold"] == 0.45 and c["edge"] == 4.0   # 3 steps x 40/60 = 2 steps
+    assert "won both halves" in c["why"] and "moved only to 0.45" in c["why"]
+    thin = choose(rows_for(halves=((30, 2.5, 1.0), (5, 2.5, 0.0))), 0.35, 10.0)
+    assert thin["threshold"] == 0.35 and "each half" in thin["why"]            # one market phase only
+    small = choose(rows_for(best_ret=1.5), 0.35, 10.0)
+    assert small["threshold"] == 0.35 and "not evidence" in small["why"]       # 0.5 points is noise
+    one_half = choose(rows_for(halves=((20, 2.5, 1.0), (20, -0.5, 0.0))), 0.35, 10.0)
+    assert one_half["threshold"] == 0.35 and "half 2" in one_half["why"]
+    loser = choose(rows_for(best_ret=-0.5, base_ret=-3.0, pf=0.8), 0.35, 10.0)
+    assert loser["threshold"] == 0.35 and "made money" in loser["why"]
+    assert choose(rows_for(dd=50.0), 0.35, 10.0)["threshold"] == 0.35           # too deep a drop
+    few = choose(rows_for(n=15, best=0.4, halves=((15, 2.5, 1.0), (15, 2.5, 0.0))), 0.35, 10.0)
+    assert few["threshold"] == 0.35 and "too few to move a full step" in few["why"]   # one step needs > 20 trades
 
 
 def test_study_and_calibrated_card_on_synthetic_history(monkeypatch):
@@ -163,7 +184,8 @@ def test_playbook_carries_the_desk_knowledge():
     assert head.playbook() == ""
     Lab(s, j, client=None, fetch=fake_fetch).champion()
     j.set("lessons", {"notes": ["many stop-losses hit within two hours of entry"]})
-    j.set("threshold_study", {"coins": {"XRPUSDT": {"threshold": 0.45, "why": "best 0.5 (+2% on 30 trades)"}}})
+    j.set("threshold_study", {"base": 0.35, "proposed_card": None,
+                              "coins": {"XRPUSDT": {"threshold": 0.45, "why": "best 0.5 (+2% on 30 trades)"}}})
     j.set("last_review", {"review": {"summary": "Too early to tell.", "failing": ["fees"]}})
     head._playbook = None
     text = head.playbook()
@@ -194,7 +216,8 @@ def test_head_study_feeds_the_laboratory(monkeypatch):
     head = HeadTraderAgent(s, j)
     result, card = head.study(lab, ["BTCUSDT", "ETHUSDT"])
     assert set(j.get("threshold_study")["coins"]) == {"BTCUSDT", "ETHUSDT"} and j.events()[-1]["kind"] == "head"
-    assert "Threshold study" in head.playbook()
+    moved = [c for c in result["coins"].values() if c["threshold"] != 0.35]
+    assert ("Threshold study" in head.playbook()) == bool(moved) and result["proposed_card"] == (card.id if card else None)
     if card is not None:
         assert lab.add_challenger(card)["status"] == "proposed"
         lab.run_week([])
@@ -205,12 +228,132 @@ def test_study_cards_must_win_the_held_out_windows():
     s = Settings(offline=True, symbols=["BTCUSDT"], lab_alt_symbols=("BNBUSDT",))
     lab = Lab(s, Journal(":memory:", 10_000), client=None, fetch=fake_fetch)
     windows = [(90, 0), (180, 0), (365, 0), (180, 90), (180, 180)]
-    champ = {"tests": [{"coins": c, "days": d, "ending_days_ago": o, "return_pct": 1.0, "trades": 20, "profit_factor": 1.2,
-                        "max_drawdown_pct": 2.0, "basket_hold_pct": 0} for c in ("BTC", "BNB") for d, o in windows],
+    champ = {"tests": [{"coins": c, "days": d, "ending_days_ago": o, "return_pct": 1.0 + i / 10, "trades": 20,
+                        "profit_factor": 1.2, "max_drawdown_pct": 2.0, "basket_hold_pct": 0}
+                       for c in ("BTC", "BNB") for i, (d, o) in enumerate(windows)],
              "mean_return": 1.0, "worst_return": 1.0, "total_trades": 200, "mean_profit_factor": 1.2, "max_drawdown_pct": 2.0}
-    better = {**champ, "tests": [{**t, "return_pct": 2.0} for t in champ["tests"]]}
+    better = {**champ, "tests": [{**t, "return_pct": t["return_pct"] + 1} for t in champ["tests"]]}
     better["tests"][0] = {**better["tests"][0], "return_pct": 0.5}   # loses only the BTC 90-day holdout: 9 of 10 wins
     assert lab.compare(better, champ)["passed"]                      # fine for an ordinary challenger
     v = lab.compare(better, champ, strict_holdout=True)
     assert not v["passed"] and "held-out window" in v["reasons"][0] and "BTC" in v["reasons"][0]
-    assert lab.compare({**better, "tests": [{**t, "return_pct": 2.0} for t in champ["tests"]]}, champ, strict_holdout=True)["passed"]
+    allwin = {**better, "tests": [{**t, "return_pct": t["return_pct"] + 1} for t in champ["tests"]]}
+    assert lab.compare(allwin, champ, strict_holdout=True)["passed"]
+    # a per-coin card that leaves the second coin set untouched: those five ties are not losses
+    core_only = {**champ, "tests": [{**t, "return_pct": t["return_pct"] + (1 if t["coins"] == "BTC" else 0)}
+                                    for t in champ["tests"]]}
+    v = lab.compare(core_only, champ, strict_holdout=True)
+    assert v["passed"] and v["ties"] == 5 and v["wins"] == 5
+
+
+def test_shrink_moves_whole_steps_towards_the_common_threshold():
+    assert [_shrink(0.35, 0.40, n) for n in (12, 20, 21)] == [0.35, 0.35, 0.40]     # one step needs > 20 trades
+    assert [_shrink(0.35, 0.45, n) for n in (60, 61)] == [0.40, 0.45]                # two steps need > 60
+    assert _shrink(0.35, 0.25, 30) == 0.30 and _shrink(0.35, 0.35, 99) == 0.35
+
+
+def test_held_coins_keep_the_cards_sell_bar():
+    j = Journal(":memory:", 10_000)
+    j.set("news_scorecard", {"judged": NEWS_MIN_JUDGED, "hit_rate_pct": 60.0})
+    head = HeadTraderAgent(Settings(), j)
+    closes = {"BTCUSDT": [100 + i for i in range(200)], "ETHUSDT": [50 + i / 2 for i in range(200)]}
+    held = {"BTCUSDT": {}, "ETHUSDT": {}}
+    assert head.threshold("ETHUSDT", 0.35, closes, held) == (0.35, "coin threshold (held: exits are not tilted)")
+    assert head.threshold("ETHUSDT", 0.35, closes, {"ETHUSDT": {}}, news_score=-0.8)[0] == 0.35
+    assert head.threshold("ETHUSDT", 0.35, closes, {"BTCUSDT": {}})[0] == pytest.approx(0.40)   # not held: tilted
+
+
+def test_one_study_card_per_held_out_period_and_no_duplicate_claims(monkeypatch):
+    monkeypatch.setattr(lab_module, "WINDOWS", TEST_WINDOWS)
+    s = Settings(offline=True, symbols=["BTCUSDT", "ETHUSDT"], lab_alt_symbols=("BNBUSDT", "XRPUSDT"))
+    j = Journal(":memory:", 10_000)
+    lab = Lab(s, j, client=None, fetch=fake_fetch)
+    head = HeadTraderAgent(s, j)
+    forced = {"base": 0.35, "studied_at": "2026-01-01T00:00:00+00:00", "study_days": 30, "holdout_days": 10,
+              "coins": {"BTCUSDT": {"threshold": 0.45, "why": "w", "edge": 2.0, "rows": []}}}
+    monkeypatch.setattr("trader.calibration.study", lambda *a, **k: json.loads(json.dumps(forced)))
+    _, card = head.study(lab, ["BTCUSDT"])
+    assert card is not None and "proposed" in j.events()[-1]["text"]
+    lab.add_challenger(card)
+    _, again = head.study(lab, ["BTCUSDT"])
+    assert again is None and "already proposed" in j.events()[-1]["text"]          # same card: not claimed again
+    forced["coins"]["BTCUSDT"]["threshold"] = 0.40
+    _, other = head.study(lab, ["BTCUSDT"])
+    assert other is None and f"one study card per" in j.events()[-1]["text"]       # within 90 days of the last
+
+
+def test_cards_from_before_1_4_keep_their_ids_and_stored_ids_are_repaired():
+    from trader.lab import migrate_ids
+    import hashlib
+    old_style = StrategyCard("x")
+    params = old_style.params()
+    assert "coin_thresholds" not in params                                          # empty table: old id kept
+    assert old_style.id == hashlib.sha1(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+    j = Journal(":memory:", 10_000)
+    stored = {**old_style.to_dict(), "id": "deadbeef"}                              # id written by 1.4.0-1.4.2
+    j.set("strategy_champion", {"card": stored, "since": "x", "by": "owner settings", "previous": None})
+    j.set("strategy_challengers", [{"card": {**StrategyCard("y", trail_atr=3.0).to_dict(), "id": "cafecafe"},
+                                    "status": "ready", "proposed_at": "x", "notes": []}])
+    j.set("strategy_history", [{"ts": "x", "event": "promote", "id": "deadbeef", "name": "x"}])
+    assert migrate_ids(j) == 2 and migrate_ids(j) == 0
+    assert j.get("strategy_champion")["card"]["id"] == old_style.id and j.get("strategy_history")[0]["id"] == old_style.id
+    lab = Lab(Settings(offline=True), j, client=None)
+    ready_id = StrategyCard("y", trail_atr=3.0).id
+    assert lab.promote(ready_id, by="owner") is not None                            # /approve works again
+
+
+def test_per_coin_changes_count_one_each_and_unexamined_coins_are_refused():
+    champ = StrategyCard("c")
+    many = StrategyCard("m", coin_thresholds={"BTCUSDT": 0.4, "ETHUSDT": 0.4, "SOLUSDT": 0.3})
+    assert many.change_count(champ) == 3 and StrategyCard("o", trail_atr=3.0).change_count(champ) == 1
+    s = Settings(offline=True, symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"], lab_alt_symbols=("BNBUSDT",))
+    lab = Lab(s, Journal(":memory:", 10_000), client=None)
+    assert "3 changes" in lab.add_challenger(many)["notes"][0]
+    doge = lab.add_challenger(StrategyCard("d", coin_thresholds={"DOGEUSDT": 0.4}))
+    assert doge["status"] == "rejected" and "never trades: DOGE" in doge["notes"][0]
+
+
+def test_the_exam_never_touches_the_live_rules(monkeypatch):
+    monkeypatch.setattr(lab_module, "WINDOWS", TEST_WINDOWS)
+    s = Settings(offline=True, symbols=["BTCUSDT"], lab_alt_symbols=("BNBUSDT",))
+    lab = Lab(s, Journal(":memory:", 10_000), client=None, fetch=fake_fetch)
+    before = (dmod.BUY_THRESHOLD, dict(dmod.WEIGHTS), dict(dmod.COIN_THRESHOLDS))
+    seen = []
+    real_run = Backtest.run
+
+    def spy(self):
+        seen.append((dmod.BUY_THRESHOLD, dict(dmod.COIN_THRESHOLDS)))   # what a live decision would see meanwhile
+        return real_run(self)
+    monkeypatch.setattr(Backtest, "run", spy)
+    ev = lab.evaluate(StrategyCard("strict", buy_threshold=0.55, coin_thresholds={"BTCUSDT": 0.6}))
+    assert seen and all(x == (before[0], before[2]) for x in seen) and len(ev["tests"]) == 10
+    strict = Lab(s, Journal(":memory:", 10_000), client=None, fetch=fake_fetch).evaluate(StrategyCard("strict", buy_threshold=0.55))
+    loose = Lab(s, Journal(":memory:", 10_000), client=None, fetch=fake_fetch).evaluate(StrategyCard("loose", buy_threshold=0.2))
+    assert strict["total_trades"] < loose["total_trades"]                     # the card's own rules were used
+
+
+def test_history_downloads_retry_transient_errors_and_bad_coin_buy_is_a_usage_error(capsys):
+    import argparse
+    import requests
+    from trader.backtest import _klines_page, parse_coin_buy
+    from trader.binance_client import BinanceError
+    calls = []
+
+    class Flaky:
+        def klines(self, *a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise requests.ConnectionError("reset")
+            return [{"time": 1}]
+    assert _klines_page(Flaky(), "BTCUSDT", "1h", 0, sleep=lambda s: None) == [{"time": 1}] and len(calls) == 3
+
+    class Refused:
+        def klines(self, *a, **k):
+            raise BinanceError("HTTP 400: Invalid symbol.")
+    with pytest.raises(BinanceError):
+        _klines_page(Refused(), "NOPEUSDT", "1h", 0, sleep=lambda s: None)   # not transient: no retry
+    ap = argparse.ArgumentParser(prog="trader backtest")
+    assert parse_coin_buy(ap, "btc=0.4, ETHUSDT=0.3,") == {"BTCUSDT": 0.4, "ETHUSDT": 0.3}
+    with pytest.raises(SystemExit):
+        parse_coin_buy(ap, "BTC:0.4")
+    assert "--coin-buy expects COIN=VALUE" in capsys.readouterr().err

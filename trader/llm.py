@@ -46,31 +46,48 @@ class ClaudeJSON:
         self._spent = 0.0
         self.calls = 0            # calls made in this process, and their total cost: the running average
         self.cost_sum = 0.0       # tells the head trader how many calls today's remaining budget buys
+        self.by_caller: dict[str, dict] = {}   # "news" / "decision" / "scout" / ... -> {"calls", "usd"} (today)
         saved = store.get("ai_spend") if store else None
         if saved and saved.get("date") == dt.datetime.now(dt.timezone.utc).date().isoformat():
             self._day, self._spent = dt.date.fromisoformat(saved["date"]), float(saved["usd"])
+            self.by_caller = {k: dict(v) for k, v in (saved.get("by_caller") or {}).items()}
 
     # ---- spending ----
     def _roll_day(self) -> None:
         today = dt.datetime.now(dt.timezone.utc).date()
         if self._day != today:
             self._day, self._spent, self.budget_hit = today, 0.0, False
+            self.by_caller = {k: {"calls": 0, "usd": 0.0, "avg": v.get("usd", 0) / v["calls"] if v.get("calls") else v.get("avg")}
+                              for k, v in self.by_caller.items()}  # today's counts restart; yesterday's average is kept
 
     def _save(self) -> None:
         if self.store:
-            self.store.set("ai_spend", {"date": self._day.isoformat(), "usd": round(self._spent, 6)})
+            self.store.set("ai_spend", {"date": self._day.isoformat(), "usd": round(self._spent, 6),
+                                        "by_caller": self.by_caller})
 
     @property
     def spent_today(self) -> float:
         self._roll_day()
         return self._spent
 
-    def avg_call_cost(self) -> float:
-        """Average cost of one call so far today, or a price-table estimate (6,000 tokens in, 400 out) before any."""
-        if self.calls:
-            return self.cost_sum / self.calls
+    TYPICAL_TOKENS = {"news": (2000, 400), "decision": (6000, 400), "scout": (25000, 2000), "research": (25000, 3000),
+                      "review": (15000, 2000)}
+
+    def avg_call_cost(self, caller: str | None = None) -> float:
+        """Average cost of one call: for one caller (today, else its last known average, else a price-table estimate
+        from its typical size), or over every call this process made."""
         price_in, price_out = PRICES_PER_MTOK.get(self.model, PRICES_PER_MTOK["claude-opus-5-5"])
-        return 6000 / 1e6 * price_in + 400 / 1e6 * price_out
+        if caller is None:
+            if self.calls:
+                return self.cost_sum / self.calls
+            return 6000 / 1e6 * price_in + 400 / 1e6 * price_out
+        c = self.by_caller.get(caller) or {}
+        if c.get("calls"):
+            return c["usd"] / c["calls"]
+        if c.get("avg"):
+            return c["avg"]
+        tin, tout = self.TYPICAL_TOKENS.get(caller, (6000, 400))
+        return tin / 1e6 * price_in + tout / 1e6 * price_out
 
     def effective_daily_budget(self) -> float:
         """The flat daily cap, or the percentage-of-account cap, whichever is lower."""
@@ -87,7 +104,7 @@ class ClaudeJSON:
             return False
         return True
 
-    def _track(self, resp) -> None:
+    def _track(self, resp, caller: str = "other") -> None:
         price_in, price_out = PRICES_PER_MTOK.get(self.model, PRICES_PER_MTOK["claude-opus-5-5"])
         u = resp.usage
         tokens_in = ((u.input_tokens or 0) + 1.25 * (getattr(u, "cache_creation_input_tokens", 0) or 0)
@@ -99,6 +116,9 @@ class ClaudeJSON:
         cost = tokens_in / 1e6 * price_in + (u.output_tokens or 0) / 1e6 * price_out + searches * WEB_SEARCH_USD
         self.calls += 1
         self.cost_sum += cost
+        c = self.by_caller.setdefault(caller, {"calls": 0, "usd": 0.0})
+        c["calls"] = c.get("calls", 0) + 1
+        c["usd"] = round(c.get("usd", 0.0) + cost, 6)
         self._spent += cost
         self._save()
         if self.store:
@@ -121,7 +141,7 @@ class ClaudeJSON:
             log.warning("Claude unreachable - using rule-based fallback")
 
     # ---- calls ----
-    def ask(self, system: str, prompt: str, schema: dict, effort: str = "medium") -> dict | None:
+    def ask(self, system: str, prompt: str, schema: dict, effort: str = "medium", caller: str = "other") -> dict | None:
         """One question, answered as JSON matching `schema`."""
         if not self._allowed():
             return None
@@ -134,7 +154,7 @@ class ClaudeJSON:
         except API_ERRORS as e:
             self._log_error(e)
             return None
-        self._track(resp)
+        self._track(resp, caller)
         if resp.stop_reason in ("refusal", "max_tokens"):
             log.warning("Claude stopped with %s - using rule-based fallback", resp.stop_reason)
             return None
@@ -144,7 +164,8 @@ class ClaudeJSON:
         except json.JSONDecodeError:
             return None
 
-    def research(self, system: str, prompt: str, max_searches: int = 5, effort: str = "medium") -> dict | None:
+    def research(self, system: str, prompt: str, max_searches: int = 5, effort: str = "medium",
+                 caller: str = "research") -> dict | None:
         """Let Claude search the web; returns {"text": notes, "sources": [urls]}."""
         if not self._allowed():
             return None
@@ -163,7 +184,7 @@ class ClaudeJSON:
             except API_ERRORS as e:
                 self._log_error(e)
                 break
-            self._track(resp)
+            self._track(resp, caller)
             for b in resp.content:
                 if b.type == "text":
                     texts.append(b.text)

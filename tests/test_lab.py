@@ -97,7 +97,7 @@ def test_exam_covers_windows_and_coin_sets_and_verdict_is_strict(lab):
     assert len(ev["tests"]) == 10 and {t["coins"] for t in ev["tests"]} == {"BTC,ETH", "BNB,XRP"}
     assert {(t["days"], t["ending_days_ago"]) for t in ev["tests"]} == set(TEST_WINDOWS)
     same = lab.compare(ev, ev)
-    assert not same["passed"] and "only 0 of 10" in same["reasons"][0]        # equal is not better
+    assert not same["passed"] and "not enough evidence" in same["reasons"][0]  # identical results prove nothing
     better = {**ev, "tests": [{**t, "return_pct": t["return_pct"] + 1} for t in ev["tests"]],
               "total_trades": 100, "mean_profit_factor": 1.2, "max_drawdown_pct": 3.0}
     assert lab.compare(better, ev)["passed"]

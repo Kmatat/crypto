@@ -34,11 +34,30 @@ CACHE_MAX = 400_000   # (coin, hour) indicator entries kept for the laboratory; 
 INTERVAL_MS = {"1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000}
 
 
+RETRY_WAITS = (2, 5, 10)  # seconds between attempts at one page of public candles (a few hundred pages per lab run)
+
+
+def _klines_page(client: BinanceClient, symbol: str, interval: str, start: int, sleep=time.sleep) -> list[dict]:
+    """One page of public candles, retried on a network error, a rate limit or a server error: one hiccup in the
+    few hundred requests of a lab run must not cancel the week's study or exam. Reading prices is safe to repeat."""
+    import requests
+    from .binance_client import BinanceError
+    for wait in (*RETRY_WAITS, None):
+        try:
+            return client.klines(symbol, interval, limit=1000, start_ms=start)
+        except (requests.RequestException, BinanceError) as e:
+            transient = isinstance(e, requests.RequestException) or str(e).startswith(("HTTP 5", "HTTP 429", "HTTP 418"))
+            if wait is None or not transient:
+                raise
+            sleep(wait)
+    return []
+
+
 def fetch_history(client: BinanceClient, symbol: str, days: int, interval: str = "1h") -> list[dict]:
     start = int((time.time() - (days + EXTRA_DAYS) * 24 * 3600) * 1000)
     out: list[dict] = []
     while True:
-        rows = client.klines(symbol, interval, limit=1000, start_ms=start)
+        rows = _klines_page(client, symbol, interval, start)
         if not rows:
             break
         out += rows
@@ -253,6 +272,20 @@ def print_result(r: dict) -> None:
     print(f"Decisions           {r['decisions']}")
 
 
+def parse_coin_buy(ap: argparse.ArgumentParser, text: str) -> dict[str, float]:
+    """'BTC=0.4,ETH=0.3' -> {'BTCUSDT': 0.4, 'ETHUSDT': 0.3}; anything else is a usage error, not a traceback."""
+    out: dict[str, float] = {}
+    for item in filter(None, (x.strip() for x in text.split(","))):
+        try:
+            coin, value = item.split("=")
+            threshold = float(value)
+        except ValueError:
+            ap.error(f"--coin-buy expects COIN=VALUE[,COIN=VALUE], e.g. BTC=0.4,ETH=0.3 (got {item!r})")
+        coin = coin.strip().upper()
+        out[coin + ("" if coin.endswith("USDT") else "USDT")] = threshold
+    return out
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="trader backtest")
     ap.add_argument("--days", type=int, default=180)
@@ -274,6 +307,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--interval", default="1h", choices=sorted(INTERVAL_MS), help="candle size (live: CANDLE_INTERVAL)")
     ap.add_argument("--coin-buy", default="", help="per-coin buy thresholds, e.g. BTC=0.4,ETH=0.3 (others use --buy)")
     args = ap.parse_args(argv)
+    coin_buy = parse_coin_buy(ap, args.coin_buy) if args.coin_buy else {}  # before any download: bad input fails fast
 
     from .agents import decision as dmod
     symbols = [x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT") for x in args.symbols.split(",")]
@@ -311,10 +345,7 @@ def main(argv: list[str]) -> int:
 
     if args.coin_buy:
         dmod.COIN_THRESHOLDS.clear()
-        for item in args.coin_buy.split(","):
-            coin, value = item.split("=")
-            coin = coin.strip().upper()
-            dmod.COIN_THRESHOLDS[coin + ("" if coin.endswith("USDT") else "USDT")] = float(value)
+        dmod.COIN_THRESHOLDS.update(coin_buy)
     if not args.sweep:
         dmod.BUY_THRESHOLD = args.buy or dmod.BUY_THRESHOLD
         dmod.SELL_THRESHOLD = args.sell or dmod.SELL_THRESHOLD

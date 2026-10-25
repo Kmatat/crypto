@@ -53,26 +53,50 @@ SYSTEM = (
 class DecisionAgent:
     name = "decision"
 
-    def __init__(self, llm: ClaudeJSON | None = None, coin_thresholds: dict[str, float] | None = None):
+    def __init__(self, llm: ClaudeJSON | None = None, coin_thresholds: dict[str, float] | None = None,
+                 weights: dict[str, float] | None = None, buy_threshold: float | None = None):
+        """With no rules given, the agent follows the module's rules (the champion card applied to the live desk).
+        The laboratory and the threshold study pass a card's own rules instead, so examining a strategy never
+        changes what the live desk is doing at the same moment."""
         self.llm = llm
-        self.coin_thresholds = dict(coin_thresholds or {})  # instance override (used by the threshold study)
+        self.coin_thresholds = dict(coin_thresholds) if coin_thresholds is not None else None
+        self.weights = dict(weights) if weights else None
+        self.buy_threshold = buy_threshold
         self.playbook = ""                                   # the head trader's knowledge, shown to Claude
         self._recent: dict[str, dict] = {}
+
+    @classmethod
+    def for_card(cls, card, coin_thresholds: dict[str, float] | None = None) -> "DecisionAgent":
+        """An agent that decides exactly as `card` would (for backtests), whatever card the live desk runs."""
+        return cls(coin_thresholds=card.coin_thresholds if coin_thresholds is None else coin_thresholds,
+                   weights=card.weights, buy_threshold=card.buy_threshold)
 
     def threshold_for(self, symbol: str, override: float | None = None) -> float:
         """The buy threshold for a coin: the head trader's value for this check if given, else the card's
         per-coin value, else the common threshold. The sell threshold is always its mirror image."""
         if override is not None:
             return override
-        return self.coin_thresholds.get(symbol, COIN_THRESHOLDS.get(symbol, BUY_THRESHOLD))
+        base = BUY_THRESHOLD if self.buy_threshold is None else self.buy_threshold
+        table = COIN_THRESHOLDS if self.coin_thresholds is None else self.coin_thresholds
+        return table.get(symbol, base)
 
     @staticmethod
-    def combined_score(reports: dict) -> float:
-        return round(sum(WEIGHTS[k] * float(reports[k]["score"]) for k in WEIGHTS), 3)
+    def combined_score(reports: dict, weights: dict[str, float] | None = None) -> float:
+        w = weights or WEIGHTS
+        return round(sum(w[k] * float(reports[k]["score"]) for k in w), 3)
+
+    def score(self, reports: dict) -> float:
+        return self.combined_score(reports, self.weights)
+
+    def has_fresh_view(self, symbol: str, score: float, holding: bool) -> bool:
+        """Claude's opinion on this coin from the last REUSE_MINUTES still applies: answering costs nothing."""
+        r = self._recent.get(symbol)
+        return bool(r and time.time() - r["ts"] < REUSE_MINUTES * 60 and r["holding"] == holding
+                    and abs(r["score"] - score) < 0.1)
 
     def run(self, symbol: str, reports: dict, holding: bool, use_ai: bool = True,
             threshold: float | None = None) -> dict:
-        score = self.combined_score(reports)
+        score = self.score(reports)
         thr = self.threshold_for(symbol, threshold)
         rules_action = self._rules(score, holding, thr)["action"]
         news_score = float(reports.get("news", {}).get("score", 0) or 0)
@@ -81,9 +105,9 @@ class DecisionAgent:
                     "rules_action": rules_action, "threshold": thr,
                     "reasoning": f"Clearly negative news for this coin (news score {news_score:+.2f}); no new buy."}
         decision = None
-        if self.llm and use_ai and self.worth_asking(score, holding, thr):
-            decision = self._reuse(symbol, score, holding)
-            if decision is None:
+        if self.llm and self.worth_asking(score, holding, thr):
+            decision = self._reuse(symbol, score, holding)  # a still-valid opinion is free: used even when no call was allotted
+            if decision is None and use_ai:
                 decision = self._claude(symbol, reports, holding, score, thr)
                 if decision:
                     self._recent[symbol] = {"decision": dict(decision), "score": score, "holding": holding,
@@ -107,10 +131,8 @@ class DecisionAgent:
         return (not holding and score >= thr) or (holding and score <= -thr)
 
     def _reuse(self, symbol: str, score: float, holding: bool) -> dict | None:
-        r = self._recent.get(symbol)
-        if r and time.time() - r["ts"] < REUSE_MINUTES * 60 and r["holding"] == holding \
-                and abs(r["score"] - score) < 0.1:
-            return {**r["decision"], "source": "claude-reused"}
+        if self.has_fresh_view(symbol, score, holding):
+            return {**self._recent[symbol]["decision"], "source": "claude-reused"}
         return None
 
     @staticmethod
@@ -141,7 +163,7 @@ class DecisionAgent:
                f"more risk):\n<data>\n{self.playbook}\n</data>\n\n" if self.playbook else "")
             + f"Analyst reports (JSON):\n{json.dumps(reports, indent=2, default=str)}"
         )
-        data = self.llm.ask(SYSTEM, prompt, DECISION_SCHEMA, effort="medium")
+        data = self.llm.ask(SYSTEM, prompt, DECISION_SCHEMA, effort="medium", caller="decision")
         if not data:
             return None
         data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))

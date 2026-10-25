@@ -70,6 +70,8 @@ class StrategyCard:
         for k in ("name", "rationale", "source", "created_at"):
             d.pop(k)
         d["checks"] = sorted(d["checks"])
+        if not d["coin_thresholds"]:  # a card without per-coin thresholds keeps the id it had before 1.4.0
+            d.pop("coin_thresholds")
         return d
 
     def to_dict(self) -> dict:
@@ -130,21 +132,35 @@ class StrategyCard:
         return out
 
     def diff(self, other: "StrategyCard") -> list[str]:
-        """Fields that differ from another card (used for the MAX_CHANGES rule and for reports)."""
+        """Fields that differ from another card (for reports)."""
         a, b = self.params(), other.params()
-        return [k for k in a if a[k] != b[k]]
+        return [k for k in dict.fromkeys([*a, *b]) if a.get(k) != b.get(k)]
+
+    def coin_changes(self, other: "StrategyCard") -> list[str]:
+        """Coins whose effective buy threshold differs between the two cards."""
+        coins = set(self.coin_thresholds) | set(other.coin_thresholds)
+        return sorted(c for c in coins if abs(float(self.coin_thresholds.get(c, self.buy_threshold))
+                                              - float(other.coin_thresholds.get(c, other.buy_threshold))) > 1e-9)
+
+    def change_count(self, other: "StrategyCard") -> int:
+        """Changes for the MAX_CHANGES rule: every differing field counts once, and each coin whose own threshold
+        differs counts as a change of its own (eight re-tuned coins are eight changes, not one)."""
+        fields = [k for k in self.diff(other) if k != "coin_thresholds"]
+        coins = self.coin_changes(other) if "coin_thresholds" in self.diff(other) else []
+        return len(fields) + len(coins)
 
     def describe_diff(self, other: "StrategyCard") -> str:
         a, b = self.params(), other.params()
         parts = []
         for k in self.diff(other):
             if k == "coin_thresholds":
-                coins = sorted(set(a[k]) | set(b[k]))
+                ca, cb = a.get(k) or {}, b.get(k) or {}
+                coins = sorted(set(ca) | set(cb))
                 parts.append("coin thresholds: " + ", ".join(
-                    f"{c.removesuffix('USDT')} {b[k].get(c, other.buy_threshold):g} → {a[k].get(c, self.buy_threshold):g}"
+                    f"{c.removesuffix('USDT')} {cb.get(c, other.buy_threshold):g} → {ca.get(c, self.buy_threshold):g}"
                     for c in coins))
             else:
-                parts.append(f"{k}: {b[k]} → {a[k]}")
+                parts.append(f"{k}: {b.get(k)} → {a.get(k)}")
         return ", ".join(parts) or "identical"
 
     # ---- apply ----

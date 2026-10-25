@@ -162,7 +162,7 @@ class MarketScoutAgent:
             "partnerships, hacks, token unlocks, delistings. Focus on the 8-10 most interesting candidates and write "
             "short notes per coin: what happened, when, and why it matters for the next few days. Also say which "
             "assets in the list are not crypto coins (stablecoins, gold, tokenized stocks) so we can exclude them.",
-            max_searches=5,
+            max_searches=5, caller="scout",
         )
         notes = research["text"] if research else "(web research unavailable - judge from the market data only)"
         data = self.llm.ask(
@@ -173,7 +173,7 @@ class MarketScoutAgent:
             "reason a business manager can follow. Coins that moved more than "
             f"{MAX_PICK_MOVE_PCT}% in 24h are not eligible. List candidates to avoid with the reason. "
             "Add a 1-2 sentence market summary.",
-            PICK_SCHEMA, effort="medium",
+            PICK_SCHEMA, effort="medium", caller="scout",
         )
         if not data:
             return None

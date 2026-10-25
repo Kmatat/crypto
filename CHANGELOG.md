@@ -5,6 +5,32 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.3 - 2026-10-25
+
+Fixes from an independent review of 1.4.0 (22 confirmed findings).
+
+- Fix (live trading): the head trader's portfolio and news tilts were also applied to coins already held, where
+  a higher threshold makes SELLING harder. With today's correlations (0.8-0.9 between all majors) every held coin's
+  sell bar moved from -0.35 to -0.45 with three positions. Held coins now keep the strategy's own sell bar.
+- Fix: a per-coin threshold card could never pass the exam, because the coin set it did not touch tied with the
+  champion and ties counted as losses. The exam now judges only tests where the card trades differently, counts
+  repeated identical windows once, and requires at least three such tests.
+- The threshold study is rebuilt on the review's statistics: only the coins the exam trades; a coin needs a
+  profitable threshold that beats the common one by a point and wins both half-years with 12+ trades in each;
+  shrinkage works in whole steps (it was cancelled by rounding); a card changes at most two coins, each coin
+  counting as a change; one study card per 90-day held-out period; the playbook calls a study pick a proposal
+  under test, not a rule. On today's data no coin qualifies.
+- Fix: 1.4.0 changed every stored strategy id, so `/approve` and `/reject` failed for challengers created
+  before it. Ids from before 1.4.0 are valid again and ids stored since are repaired at start.
+- The exam and the study run on the card's own rules instead of changing the live desk's rules while they run.
+- The forward test keeps waiting (up to 90 days) when too few trades happened, instead of failing the card for a
+  quiet market; it judges both exam coin sets.
+- The weekly lab stops between tests when the desk restarts (and runs again afterwards) instead of being killed.
+- Claude's budget: spend is tracked per agent (news, decisions, scout, research, review); the head trader keeps
+  enough for the news agent's remaining refreshes, plans at the desk's actual check pace, and does not spend a
+  call on a coin whose recent opinion still applies or whose buy the news veto refuses anyway.
+- History downloads retry network errors and rate limits; `backtest --coin-buy` reports a typo instead of crashing.
+
 ## 1.4.2 - 2026-10-25
 
 - Fix: the "one rule refused every buy signal" alarm judged the last 24 hours, so right after 1.4.1 corrected the

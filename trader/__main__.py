@@ -25,7 +25,7 @@ from .journal import Journal
 from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
 from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
-from .lab import Lab, status_text as lab_status_text, week_report
+from .lab import Lab, LabInterrupted, status_text as lab_status_text, week_report
 from .agents.head import HeadTraderAgent
 from .agents.research import ResearchAgent, review_text
 from .calibration import study_text
@@ -259,11 +259,15 @@ def send_notebook(bot: Orchestrator, tg: Telegram, caption: str, notes: Notes | 
         path.unlink(missing_ok=True)
 
 
-def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason: str) -> str:
-    """Weekly research + exam + forward tests. Holds the trade lock: never overlaps a trading decision."""
+def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason: str, should_stop=None) -> str:
+    """Weekly research + exam + forward tests. Holds the trade lock, so it never interleaves with a trading
+    decision (positions keep their stop-loss and take-profit on the exchange meanwhile). `should_stop` is checked
+    between tests: a restart stops the lab within seconds instead of being killed after ten minutes."""
     with trade_lock:
         heartbeat(bot, note="weekly strategy lab running (no market checks until it finishes)")
         lab = Lab(bot.base, bot.journal, client=bot.market.client)
+        if should_stop:
+            lab.should_stop = should_stop
         research = ResearchAgent(bot.llm)
         lessons = research.lessons(bot.journal)
         bot.journal.set("lessons", lessons)
@@ -273,8 +277,11 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         study_result, study_card = None, None
         if bot.head:
             try:  # the head trader's threshold study becomes a challenger like any other proposal
-                coins = list(dict.fromkeys(list(bot.base.symbols) + bot.watchlist()["symbols"]))
-                study_result, study_card = bot.head.study(lab, coins)
+                # only coins the exam trades: a threshold for a coin the exam never sees would go live unexamined
+                coins = list(dict.fromkeys(list(bot.base.symbols) + list(bot.base.lab_alt_symbols)))
+                study_result, study_card = bot.head.study(lab, coins, should_stop=lab.should_stop)
+            except LabInterrupted:
+                raise
             except Exception as e:  # noqa: BLE001 - the lab must still run without the study
                 log.exception("Threshold study failed")
                 bot.journal.event("error", f"Threshold study failed: {e}")
@@ -318,7 +325,7 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         return text
 
 
-def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: threading.Lock) -> None:
+def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: threading.Lock, should_stop=None) -> None:
     if not s.lab_enabled or s.offline:
         return
     now = dt.datetime.now(dt.timezone.utc)
@@ -327,7 +334,10 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
         return
     bot.journal.set("lab_week", week)
     try:
-        run_lab(bot, tg, trade_lock, "scheduled weekly run")
+        run_lab(bot, tg, trade_lock, "scheduled weekly run", should_stop=should_stop)
+    except LabInterrupted:
+        bot.journal.set("lab_week", None)  # it runs again after the restart
+        bot.journal.event("lab", "Weekly lab interrupted by a restart; it runs again after the restart")
     except Exception as e:
         log.exception("Weekly lab failed")
         bot.journal.event("error", f"Weekly lab failed: {e}")
@@ -403,6 +413,7 @@ def cmd_run(s: Settings, args) -> None:
     lock = single_instance(s.db_path)  # noqa: F841 - held until exit
     bot = Orchestrator(s)
     trade_lock = threading.Lock()
+    stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish; the lab stops early
     tg = Telegram(s.telegram_token, s.telegram_chat_id) if not s.offline else Telegram("")
     mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
         "offline test (made-up prices)" if s.offline else "paper trading at real prices"
@@ -461,7 +472,15 @@ def cmd_run(s: Settings, args) -> None:
         def lab_now() -> str:
             if not s.lab_enabled:
                 return "The strategy lab is switched off (LAB_ENABLED=false)."
-            threading.Thread(target=lambda: run_lab(bot, tg, trade_lock, "requested on Telegram"), daemon=True).start()
+            def lab_thread():
+                try:
+                    run_lab(bot, tg, trade_lock, "requested on Telegram", should_stop=stop.is_set)
+                except LabInterrupted:
+                    pass  # the desk is stopping
+                except Exception as e:  # noqa: BLE001
+                    log.exception("Lab failed")
+                    tg.send(f"⚠️ The strategy lab failed: {e}. The strategy in force keeps trading.")
+            threading.Thread(target=lab_thread, daemon=True).start()
             return "🔬 Lab started: downloading history and testing challengers. Results arrive here in a few minutes."
 
         def playbook_now() -> str:
@@ -551,7 +570,6 @@ def cmd_run(s: Settings, args) -> None:
     n = 0
     seen_errors: dict = {}
     last_minutes = s.cycle_minutes
-    stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
         while not stop.is_set():
@@ -593,7 +611,7 @@ def cmd_run(s: Settings, args) -> None:
                                  every_hours=12)
                     break
             weekly_backup(bot, tg)
-            maybe_weekly_lab(bot, tg, s, trade_lock)
+            maybe_weekly_lab(bot, tg, s, trade_lock, should_stop=stop.is_set)
             if bot.llm and bot.llm.budget_hit:
                 tg.send_once("ai-budget", f"💸 Claude's daily budget (${bot.llm.effective_daily_budget():.2f}) is used up. "
                                           "The agents use the free built-in rules until 00:00 UTC.", every_hours=12)

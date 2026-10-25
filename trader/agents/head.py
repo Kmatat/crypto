@@ -60,14 +60,16 @@ class HeadTraderAgent:
         self.last_plan: dict = {}
 
     # ---- Claude's budget: who may consult it this check ----
-    def plan_ai(self, candidates: list[dict], now: dt.datetime | None = None) -> set[str]:
-        """candidates: {symbol, holding, score, threshold, eligible}. Returns the symbols that may ask Claude.
-        Only coins where the rules would act are worth a call (Claude is a veto); positions at risk come
-        first, then the strongest new signals; the day's budget is spread over the day's remaining checks."""
+    def plan_ai(self, candidates: list[dict], now: dt.datetime | None = None, pace_minutes: float | None = None) -> set[str]:
+        """candidates: {symbol, holding, score, threshold, eligible, fresh}. Returns the symbols that may ask Claude.
+        Only coins where the rules would act are worth a call (Claude is a veto); a coin whose last opinion is still
+        valid is answered free from it; positions at risk come first, then the strongest new signals; the day's
+        budget, minus what the news agent will need for the rest of the day, is spread over the day's remaining
+        checks at the pace the desk actually runs."""
         if not self.llm:
             self.last_plan = {"allowed": [], "skipped": [], "why": "Claude is not configured"}
             return set()
-        worth = [c for c in candidates if c.get("eligible")
+        worth = [c for c in candidates if c.get("eligible") and not c.get("fresh")
                  and ((c["holding"] and c["score"] <= -c["threshold"]) or (not c["holding"] and c["score"] >= c["threshold"]))]
         worth.sort(key=lambda c: (0 if c["holding"] else 1, -(abs(c["score"]) - c["threshold"])))
         now = now or dt.datetime.now(dt.timezone.utc)
@@ -75,13 +77,19 @@ class HeadTraderAgent:
         if not budget:
             allowed, why = worth, "no daily cap set"
         else:
-            remaining = max(0.0, budget - self.llm.spent_today)
-            per_call = max(self.llm.avg_call_cost(), 1e-6)
-            affordable = remaining / per_call
             minutes_left = max(1.0, 24 * 60 - (now.hour * 60 + now.minute))
-            checks_left = max(1, math.ceil(minutes_left / max(1, self.s.cycle_minutes)))
+            news_reserve = 0.0
+            if getattr(self.llm, "by_caller", None) is not None:  # the news agent refreshes every NEWS_REFRESH_MINUTES
+                news_reserve = self.llm.avg_call_cost("news") * minutes_left / max(1, self.s.news_refresh_minutes)
+            remaining = max(0.0, budget - self.llm.spent_today - news_reserve)
+            per_call = max(self.llm.avg_call_cost("decision") if news_reserve or getattr(self.llm, "by_caller", None) is not None
+                           else self.llm.avg_call_cost(), 1e-6)
+            affordable = remaining / per_call
+            checks_left = max(1, math.ceil(minutes_left / max(1.0, pace_minutes or self.s.cycle_minutes)))
             if affordable < 1:
-                n, why = 0, f"today's AI budget is spent (${remaining:.2f} left, about ${per_call:.3f} a call)"
+                n, why = 0, (f"today's AI budget is spent (${remaining:.2f} left, about ${per_call:.3f} a call"
+                             + (f"; ${news_reserve:.2f} kept for the news agent's remaining refreshes" if news_reserve else "")
+                             + ")")
             elif affordable >= checks_left:
                 n = int(affordable // checks_left)
                 why = f"${remaining:.2f} left for {checks_left} more checks today: up to {n} call(s) per check"
@@ -100,8 +108,12 @@ class HeadTraderAgent:
     # ---- thresholds for this check ----
     def threshold(self, symbol: str, base: float, closes: dict[str, list[float]], positions: dict,
                   news_score: float = 0.0) -> tuple[float, str]:
-        """The coin's threshold for this check and the reason: the card's value, raised by TILT for every held
-        coin that moves with this one (the same bet twice), tilted by news only once news has proven itself."""
+        """The coin's threshold for this check and the reason. Only a coin not yet held is tilted: raised by TILT for
+        every held coin that moves with it (buying it would be the same bet twice), and tilted by news only once news
+        has proven itself. A held coin keeps the card's sell bar, which is what the laboratory measured: raising it
+        would make selling harder, the opposite of the intent."""
+        if symbol in positions:
+            return round(base, 2), "coin threshold (held: exits are not tilted)"
         tilt, reasons = 0.0, []
         mine = closes.get(symbol)
         for held in positions:
@@ -137,8 +149,16 @@ class HeadTraderAgent:
             lines.append(f"Strategy in force: {summary_line(champ)}. Buy thresholds: {thresholds_line(champ)}.")
         study = j.get("threshold_study")
         if study:
-            lines.append("Threshold study: " + "; ".join(f"{sym.removesuffix('USDT')} {c['threshold']:g} ({c['why']})"
-                                                         for sym, c in study["coins"].items())[:400])
+            moved = {sym: c for sym, c in study["coins"].items() if abs(c["threshold"] - study["base"]) > 1e-9}
+            card_id = study.get("proposed_card")
+            fate = next((c["status"] for c in (j.get("strategy_challengers") or []) if c["card"]["id"] == card_id), None)
+            if moved and fate not in ("lab_failed", "forward_failed", "rejected"):
+                # a proposal under test, not settled knowledge: the exam and the forward test decide
+                lines.append("Threshold study (a proposal still under test, not a rule): " + "; ".join(
+                    f"{sym.removesuffix('USDT')} {c['threshold']:g}" for sym, c in moved.items()))
+            elif moved:
+                lines.append("Threshold study: its per-coin proposal was rejected by the laboratory; all coins keep the "
+                             "strategy's thresholds")
         lessons = j.get("lessons") or {}
         if lessons.get("notes"):
             lines.append("Lessons from live trading: " + "; ".join(lessons["notes"]))
@@ -160,17 +180,36 @@ class HeadTraderAgent:
         return text
 
     # ---- weekly: the threshold study, handed to the laboratory ----
-    def study(self, lab, symbols: list[str]) -> tuple[dict, StrategyCard | None]:
+    def study(self, lab, symbols: list[str], should_stop=None) -> tuple[dict, StrategyCard | None]:
+        """The threshold study, on the coins the exam trades (core and second set), handed to the laboratory.
+        At most one study card per held-out period: the exam's newest window must be new data for every card, or a
+        weekly re-study would keep retrying the same recent weeks until a lucky card passed."""
         from ..calibration import HOLDOUT_DAYS, STUDY_DAYS, calibrated_card, study as run_study
         champ = lab.champion()
         symbols = list(dict.fromkeys(symbols))
         hist = lab.history(symbols, champ.interval, days=STUDY_DAYS + HOLDOUT_DAYS + 1)
-        result = run_study(champ, lab.s, hist, hist["BTCUSDT"], symbols)
-        self.journal.set("threshold_study", result)
+        result = run_study(champ, lab.s, hist, hist["BTCUSDT"], symbols, should_stop=should_stop)
         card = calibrated_card(champ, result)
         changed = [f"{sym.removesuffix('USDT')} {c['threshold']:g}" for sym, c in result["coins"].items()
                    if abs(c["threshold"] - champ.buy_threshold) > 1e-9]
+        note = ""
+        if card:
+            seen = next((c for c in lab.challengers() if c["card"]["id"] == card.id), None)
+            last = self.journal.get("study_card_proposed_at")
+            recent = last and (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last)).days < HOLDOUT_DAYS
+            if seen:
+                note = f"; the same thresholds as [{card.id}], already {seen['status']}: not proposed again"
+                card = None
+            elif recent:
+                note = (f"; not proposed: the last study card was examined on held-out days that still overlap these "
+                        f"(one study card per {HOLDOUT_DAYS} days)")
+                card = None
+            else:
+                note = f"; proposed {card.name} [{card.id}] to the laboratory"
+                self.journal.set("study_card_proposed_at", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        result["proposed_card"] = card.id if card else None
+        self.journal.set("threshold_study", result)
         self.journal.event("head", "Threshold study done: " + (", ".join(changed) if changed else "no coin earned a different threshold")
-                           + (f"; proposed {card.name} [{card.id}] to the laboratory" if card else ""))
+                           + note)
         self._playbook = None
         return result, card

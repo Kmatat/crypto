@@ -21,7 +21,9 @@ import math
 import time
 
 from .agents import decision as dmod
+from .agents.decision import DecisionAgent
 from .backtest import EXTRA_DAYS, Backtest, fetch_history
+from .calibration import HOLDOUT_DAYS
 from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, Settings
 from .journal import Journal
@@ -35,10 +37,48 @@ MIN_PASS_SHARE = 0.6        # challenger must beat the champion on at least this
 MAX_WORSE_POINTS = 2.0      # ... and never be worse by more than this on any test
 MIN_TOTAL_TRADES = 40       # across all tests; fewer is not evidence
 FORWARD_MIN_DAYS = 28       # forward test length before a challenger can be promoted
-FORWARD_MIN_TRADES = 8
+FORWARD_MIN_TRADES = 8      # fewer in the forward period is "no evidence yet": the test keeps waiting...
+FORWARD_MAX_DAYS = 90       # ...up to this long; then a still-thin forward period counts as a failure
+MIN_INFORMATIVE_TESTS = 3   # exam tests on which challenger and champion actually traded differently
 ROLLBACK_MIN_TRADES = 30    # live trades under a champion before its profit factor is judged
 ROLLBACK_PROFIT_FACTOR = 0.7
-HOLDOUT_WINDOW = 90         # the threshold study never sees the most recent 90 days; its cards must win them
+HOLDOUT_WINDOW = HOLDOUT_DAYS  # the threshold study never sees the most recent days; its cards must win them
+
+
+class LabInterrupted(Exception):
+    """The desk is stopping (an update or a reboot): the lab stops between two tests and runs again later."""
+
+
+def migrate_ids(journal: Journal) -> int:
+    """Stored card ids must equal StrategyCard.id: /approve, /reject, the lab's duplicate check and the notebook's
+    live record compare them. 1.4.0-1.4.2 hashed an empty per-coin threshold table into every id; 1.4.3 does not
+    (so ids from before 1.4.0 are valid again). Idempotent; returns how many stored ids changed."""
+    mapping: dict[str, str] = {}
+
+    def fix(card: dict | None) -> None:
+        if not card:
+            return
+        new = StrategyCard.from_dict(card).id
+        if card.get("id") and card["id"] != new:
+            mapping[card["id"]] = new
+        card["id"] = new
+    state = journal.get("strategy_champion")
+    if state:
+        fix(state.get("card"))
+        fix(state.get("previous"))
+    items = journal.get("strategy_challengers") or []
+    for c in items:
+        fix(c.get("card"))
+    if not mapping:
+        return 0
+    journal.set("strategy_champion", state) if state else None
+    journal.set("strategy_challengers", items)
+    hist = journal.get("strategy_history") or []
+    for h in hist:
+        if h.get("id") in mapping:
+            h["id"] = mapping[h["id"]]
+    journal.set("strategy_history", hist)
+    return len(mapping)
 
 
 def now_iso() -> str:
@@ -64,6 +104,8 @@ class Lab:
         self._history: dict[tuple[str, str], list[dict]] = dict(history or {})  # (symbol, interval) -> candles
         self._history_days: dict[tuple[str, str], int] = {k: 10_000 for k in self._history}  # how many days each holds
         self._analysis: dict[str, dict] = {}  # interval -> indicator cache shared by every window and card (see Backtest)
+        self.should_stop = lambda: False       # set by the desk: True when it is stopping (LabInterrupted)
+        migrate_ids(journal)
 
     # ---- state ----
     def champion(self) -> StrategyCard:
@@ -100,9 +142,12 @@ class Lab:
         if card.id == champ.id or any(c["card"]["id"] == card.id for c in items):
             return None
         problems = card.violations()
-        changes = card.diff(champ)
-        if len(changes) > MAX_CHANGES:
-            problems.append(f"changes {len(changes)} fields (max {MAX_CHANGES}): {', '.join(changes)}")
+        if (n := card.change_count(champ)) > MAX_CHANGES:
+            problems.append(f"makes {n} changes at once (max {MAX_CHANGES}): {card.describe_diff(champ)}")
+        examined = set(self.s.symbols) | set(self.s.lab_alt_symbols)
+        if untested := [c for c in card.coin_changes(champ) if c not in examined]:
+            problems.append("sets thresholds for coins the exam never trades: "
+                            + ", ".join(c.removesuffix("USDT") for c in untested))
         entry = {"card": card.to_dict(), "proposed_at": now_iso(), "status": "rejected" if problems else "proposed",
                  "notes": problems, "lab": None, "forward": None}
         items.append(entry)
@@ -128,26 +173,26 @@ class Lab:
     # ---- exam ----
     def evaluate(self, card: StrategyCard, coin_sets: list[list[str]] | None = None) -> dict:
         coin_sets = coin_sets or [list(self.s.symbols), list(self.s.lab_alt_symbols)]
-        saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS), dict(dmod.COIN_THRESHOLDS))
         tests = []
-        try:
-            card.apply_decision_rules()
-            settings = card.settings(self.s)
-            for coins in coin_sets:
-                hist = self.history(coins, card.interval)
-                btc = hist["BTCUSDT"]
-                data = {c: hist[c] for c in coins}
-                last_ms = min(h[-1]["time"] for h in data.values())
-                cache = self._analysis.setdefault(card.interval, {})
-                for days, offset in WINDOWS:
-                    end = last_ms - offset * 86_400_000 if offset else None
-                    r = Backtest(settings, data, days=days, btc_history=btc, end_ms=end, analysis_cache=cache).run()
-                    tests.append({"coins": ",".join(c.removesuffix("USDT") for c in coins), "days": days,
-                                  "ending_days_ago": offset, "return_pct": r["return_pct"], "trades": r["trades"],
-                                  "profit_factor": r["profit_factor"], "max_drawdown_pct": r["max_drawdown_pct"],
-                                  "basket_hold_pct": r["basket_hold_pct"]})
-        finally:
-            restore_decision_rules(saved)
+        settings = card.settings(self.s)
+        # the card's own rules: examining a strategy never changes what the live desk decides meanwhile
+        decision = DecisionAgent.for_card(card)
+        for coins in coin_sets:
+            hist = self.history(coins, card.interval)
+            btc = hist["BTCUSDT"]
+            data = {c: hist[c] for c in coins}
+            last_ms = min(h[-1]["time"] for h in data.values())
+            cache = self._analysis.setdefault(card.interval, {})
+            for days, offset in WINDOWS:
+                if self.should_stop():
+                    raise LabInterrupted()
+                end = last_ms - offset * 86_400_000 if offset else None
+                r = Backtest(settings, data, decision=decision, days=days, btc_history=btc, end_ms=end,
+                             analysis_cache=cache).run()
+                tests.append({"coins": ",".join(c.removesuffix("USDT") for c in coins), "days": days,
+                              "ending_days_ago": offset, "return_pct": r["return_pct"], "trades": r["trades"],
+                              "profit_factor": r["profit_factor"], "max_drawdown_pct": r["max_drawdown_pct"],
+                              "basket_hold_pct": r["basket_hold_pct"]})
         returns = [t["return_pct"] for t in tests]
         pfs = [t["profit_factor"] for t in tests if t["profit_factor"] is not None]
         return {"tests": tests, "mean_return": round(sum(returns) / len(returns), 2), "worst_return": min(returns),
@@ -159,17 +204,33 @@ class Lab:
         study of past prices (the threshold study): most exam windows overlap what the study saw, so such a
         card must also win every window that the study never saw (the most recent HOLDOUT_WINDOW days)."""
         pairs = list(zip(challenger["tests"], champion["tests"]))
-        wins = sum(1 for a, b in pairs if a["return_pct"] > b["return_pct"])
+        # Only tests that tell the two cards apart are evidence. An exact tie (same return, same trades) means the
+        # card did not change that test: a coin set its per-coin thresholds do not touch, or a window with no trades.
+        # Nested windows that end on the same trades give the same pair again: counted once.
+        informative, seen = [], set()
+        for a, b in pairs:
+            if a["return_pct"] == b["return_pct"] and a["trades"] == b["trades"]:
+                continue
+            key = (a["coins"], a["return_pct"], a["trades"], b["return_pct"], b["trades"])
+            if key not in seen:
+                seen.add(key)
+                informative.append((a, b))
+        wins = sum(1 for a, b in informative if a["return_pct"] > b["return_pct"])
         worst_gap = max(b["return_pct"] - a["return_pct"] for a, b in pairs)
         reasons = []
+        if len(informative) < MIN_INFORMATIVE_TESTS:
+            reasons.append(f"traded differently from the champion on only {len(informative)} distinct test(s) of "
+                           f"{len(pairs)} (need {MIN_INFORMATIVE_TESTS}): not enough evidence either way")
         if strict_holdout:
-            lost = [a["coins"] for a, b in pairs
-                    if a["ending_days_ago"] == 0 and a["days"] <= HOLDOUT_WINDOW and a["return_pct"] <= b["return_pct"]]
-            if lost:
-                reasons.append(f"a study card must beat the champion on every held-out window (last {HOLDOUT_WINDOW} days); "
-                               f"it lost on {', '.join(lost)}")
-        if wins < math.ceil(MIN_PASS_SHARE * len(pairs)):
-            reasons.append(f"beat the champion on only {wins} of {len(pairs)} tests")
+            held = [(a, b) for a, b in informative if a["ending_days_ago"] == 0 and a["days"] <= HOLDOUT_WINDOW]
+            lost = [a["coins"] for a, b in held if a["return_pct"] <= b["return_pct"]]
+            if not held:
+                reasons.append(f"made no difference on any held-out window (last {HOLDOUT_WINDOW} days)")
+            elif lost:
+                reasons.append(f"a study card must beat the champion on every held-out window it changes (last "
+                               f"{HOLDOUT_WINDOW} days); it lost on {', '.join(lost)}")
+        if informative and wins < math.ceil(MIN_PASS_SHARE * len(informative)):
+            reasons.append(f"beat the champion on only {wins} of {len(informative)} tests where it traded differently")
         if worst_gap > MAX_WORSE_POINTS:
             reasons.append(f"worse than the champion by {worst_gap:.1f} points on one test (limit {MAX_WORSE_POINTS})")
         if challenger["total_trades"] < MIN_TOTAL_TRADES:
@@ -178,7 +239,8 @@ class Lab:
             reasons.append(f"average profit factor {challenger['mean_profit_factor']} below 1.0")
         if challenger["max_drawdown_pct"] > self.s.max_drawdown_pct * 100:
             reasons.append(f"worst drop {challenger['max_drawdown_pct']}% exceeds the {self.s.max_drawdown_pct:.0%} limit")
-        return {"passed": not reasons, "wins": wins, "tests": len(pairs), "worst_gap": round(worst_gap, 2), "reasons": reasons}
+        return {"passed": not reasons, "wins": wins, "tests": len(informative), "ties": len(pairs) - len(informative),
+                "worst_gap": round(worst_gap, 2), "reasons": reasons}
 
     def forward_test(self, entry: dict, champion: StrategyCard) -> dict:
         """The weeks since the proposal: data that did not exist when the idea was born."""
@@ -188,26 +250,35 @@ class Lab:
         if days < FORWARD_MIN_DAYS:
             return {"ready": False, "passed": None, "days": round(days, 1),
                     "reason": f"forward test needs {FORWARD_MIN_DAYS} days, has {days:.0f}"}
-        results = {}
-        for name, c in (("challenger", card), ("champion", champion)):
-            saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS), dict(dmod.COIN_THRESHOLDS))
-            try:
-                c.apply_decision_rules()
-                hist = self.history(list(self.s.symbols), c.interval)
-                data = {x: hist[x] for x in self.s.symbols}
-                results[name] = Backtest(c.settings(self.s), data, days=int(days) + 1, btc_history=hist["BTCUSDT"],
-                                         analysis_cache=self._analysis.setdefault(c.interval, {})).run()
-            finally:
-                restore_decision_rules(saved)
-        ch, cp = results["challenger"], results["champion"]
+        # both exam coin sets, each on its own: a card that only re-tunes the second set's coins is judged there
+        sets = [list(self.s.symbols)] + ([list(self.s.lab_alt_symbols)] if self.s.lab_alt_symbols else [])
+        per_set = []
+        for coins in sets:
+            row = {}
+            for name, c in (("challenger", card), ("champion", champion)):
+                hist = self.history(coins, c.interval)
+                row[name] = Backtest(c.settings(self.s), {x: hist[x] for x in coins}, decision=DecisionAgent.for_card(c),
+                                     days=int(days) + 1, btc_history=hist["BTCUSDT"],
+                                     analysis_cache=self._analysis.setdefault(c.interval, {})).run()
+            per_set.append(row)
+        different = [r for r in per_set if (r["challenger"]["return_pct"], r["challenger"]["trades"])
+                     != (r["champion"]["return_pct"], r["champion"]["trades"])] or per_set[:1]
+        ch_trades = sum(r["challenger"]["trades"] for r in different)
+        ch_ret = round(sum(r["challenger"]["return_pct"] for r in different) / len(different), 2)
+        cp_ret = round(sum(r["champion"]["return_pct"] for r in different) / len(different), 2)
+        if ch_trades < FORWARD_MIN_TRADES and days < FORWARD_MAX_DAYS:  # absence of evidence: keep waiting
+            return {"ready": False, "passed": None, "days": round(days, 1), "challenger_trades": ch_trades,
+                    "reason": f"only {ch_trades} trades in {days:.0f} forward days (need {FORWARD_MIN_TRADES}); "
+                              f"waiting up to {FORWARD_MAX_DAYS} days"}
         reasons = []
-        if ch["trades"] < FORWARD_MIN_TRADES:
-            reasons.append(f"only {ch['trades']} trades in the forward period (need {FORWARD_MIN_TRADES})")
-        if ch["return_pct"] < cp["return_pct"] - 0.5:
-            reasons.append(f"forward return {ch['return_pct']:+.2f}% vs champion {cp['return_pct']:+.2f}%")
-        return {"ready": True, "passed": not reasons, "days": round(days, 1), "challenger_return": ch["return_pct"],
-                "champion_return": cp["return_pct"], "challenger_trades": ch["trades"], "reasons": reasons,
-                "tested_at": now_iso()}
+        if ch_trades < FORWARD_MIN_TRADES:
+            reasons.append(f"only {ch_trades} trades in {days:.0f} forward days (need {FORWARD_MIN_TRADES}): no evidence")
+        for r in different:
+            if r["challenger"]["return_pct"] < r["champion"]["return_pct"] - 0.5:
+                reasons.append(f"forward return {r['challenger']['return_pct']:+.2f}% vs champion "
+                               f"{r['champion']['return_pct']:+.2f}%")
+        return {"ready": True, "passed": not reasons, "days": round(days, 1), "challenger_return": ch_ret,
+                "champion_return": cp_ret, "challenger_trades": ch_trades, "reasons": reasons, "tested_at": now_iso()}
 
     # ---- the weekly run ----
     def run_week(self, proposals: list[StrategyCard]) -> dict:
@@ -219,6 +290,9 @@ class Lab:
         items = self.challengers()
         promoted = None
         for entry in items:
+            if self.should_stop():
+                self._save_challengers(items)
+                raise LabInterrupted()
             card = StrategyCard.from_dict(entry["card"])
             if entry["status"] == "proposed":
                 ev = self.evaluate(card)

@@ -162,7 +162,7 @@ class NewsAgent:
               "all coins. Use 0 when there is no meaningful news. Give a one-sentence summary per coin. "
               "Then set how often the desk should check the market for the next half hour, with a short reason."
         )
-        data = self.llm.ask(SYSTEM, prompt, SENTIMENT_SCHEMA, effort="low")
+        data = self.llm.ask(SYSTEM, prompt, SENTIMENT_SCHEMA, effort="low", caller="news")
         if not data:
             return None
         result: dict = {"_mood": data["market_mood"],

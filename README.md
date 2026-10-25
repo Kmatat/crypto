@@ -233,16 +233,21 @@ One buy threshold for every coin treats Bitcoin's signals and a small alt-coin's
 trustworthy. They are not. Since 1.4.0 a strategy card can carry a **threshold per coin** (sell is always the
 mirror image), and a **head trader** agent manages the other agents around it:
 
-- **The threshold study** (weekly, `trader/calibration.py`): each watched coin is replayed at every allowed
-  threshold over a year of history that stops 90 days ago. The best after-fee threshold is pulled back towards
-  the common one in proportion to how little evidence the coin produced (a handful of trades proves nothing),
-  and the result becomes a challenger for the laboratory. The exam's newest window is exactly the held-out 90
-  days, then the forward test, then your `/approve`. With too few trades the study changes nothing and says so;
-  on today's data that is the case for every coin, because the checklist kept the desk in cash for most of the year.
-- **Portfolio and news at decision time:** the head trader raises a coin's threshold by 0.05 for every coin
-  already held that moves with it (correlation above 0.7: the same bet twice), and tilts it for news only once
-  the scorecard shows news scores predict the next day at least 55% of the time over 30 judgements. Every
-  decision records the threshold it used and why (`TRADES.md`).
+- **The threshold study** (weekly, `trader/calibration.py`): each coin the exam trades (the core coins and the
+  second coin set) is replayed at every allowed threshold over the year that ends 90 days ago, judged as two
+  half-years. A coin gets its own threshold only if that threshold made money after fees, beat the common one by
+  at least one point, won in BOTH halves with at least 12 trades in each (a pick that works in one market phase
+  is not evidence), and is then moved back towards the common threshold in whole steps in proportion to the
+  sample (one step needs more than 20 trades). A card changes at most two coins, and only one study card is
+  examined per 90 days, so the exam's newest window is always new data. Then the exam (whose ties - tests the
+  card does not change - count neither for nor against it), the forward test and your `/approve`. On today's
+  data no coin qualifies: every coin had 0 trades in the second half of the study year, because the checklist
+  kept the desk in cash through the down-trend, and the study says so.
+- **Portfolio and news at decision time:** before buying, the head trader raises a coin's threshold by 0.05 for
+  every coin already held that moves with it (correlation above 0.7: the same bet twice), and tilts it for news
+  only once the scorecard shows news scores predict the next day at least 55% of the time over 30 judgements.
+  A coin already held is never tilted: its sell bar stays exactly what the laboratory measured. Every decision
+  records the threshold it used and why (`TRADES.md`).
 - **The AI budget goes where it changes a decision:** at each check the head trader ranks the coins where the
   rules would act (positions at risk first, then the strongest new signals) and spreads the day's budget over
   the day's remaining checks instead of spending it by noon. `/playbook` shows the last plan.

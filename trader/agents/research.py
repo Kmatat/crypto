@@ -178,7 +178,7 @@ class ResearchAgent:
             "and trailing stop, a 200-day trend filter, Bitcoin regime filter, cooling-off after losses, reward-to-risk "
             "minimum, position count and candle size (1h/2h/4h). Prefer sources with published rules or backtests "
             "(books, well-known traders, academic or exchange research). Summarise 4-6 concrete, testable ideas with "
-            "their source and the parameter values they imply.", max_searches=5)
+            "their source and the parameter values they imply.", max_searches=5, caller="research")
         notes = research["text"] if research else "(web research unavailable)"
         prompt = (
             f"Champion strategy (JSON):\n{json.dumps(champion.params(), indent=1)}\n\n"
@@ -192,7 +192,8 @@ class ResearchAgent:
             "passed and avoid what failed, and say so in the rationale. Give each a short name, a 2-3 sentence rationale "
             "for a business owner and its source. List separately any good ideas that would need new code."
         )
-        data = self.llm.ask(SYSTEM.format(max_changes=MAX_CHANGES), prompt, PROPOSAL_SCHEMA, effort="medium")
+        data = self.llm.ask(SYSTEM.format(max_changes=MAX_CHANGES), prompt, PROPOSAL_SCHEMA, effort="medium",
+                            caller="research")
         if not data:
             return []
         cards = []
@@ -226,7 +227,7 @@ class ResearchAgent:
         if not self.llm or not notebook:
             return None
         return self.llm.ask(REVIEW_SYSTEM, f"The desk's notebook:\n<data>\n{notebook}\n</data>\n\nWrite the review.",
-                            REVIEW_SCHEMA, effort="medium")
+                            REVIEW_SCHEMA, effort="medium", caller="review")
 
 
 def review_text(d: dict) -> str:
