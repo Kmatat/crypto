@@ -27,7 +27,8 @@ from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, Settings
 
 WARMUP = 200          # candles the indicators need before the first decision
-EXTRA_DAYS = 210      # history before the test window, so 200-day averages exist from day one
+EXTRA_DAYS = 210
+CACHE_MAX = 400_000   # (coin, hour) indicator entries kept for the laboratory; about 100 MB at most      # history before the test window, so 200-day averages exist from day one
 
 
 INTERVAL_MS = {"1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000}
@@ -124,13 +125,15 @@ class Backtest:
                 key = (sym, t)
                 a = self._cache.get(key)
                 if a is None:
-                    a = (self.technical.run(c), self.prediction.run(c))
-                    self._cache[key] = a
+                    tech = self.technical.run(c)
+                    a = (tech["score"], tech["atr"], self.prediction.run(c)["score"])  # all the rule core needs
+                    if len(self._cache) < CACHE_MAX:
+                        self._cache[key] = a
                 analysis[sym] = a
             # trailing stops follow new highs (Seykota / Turtles)
             for sym, p in positions.items():
                 p["high"] = max(p["high"], price[sym])
-                atr = analysis[sym][0]["atr"]
+                atr = analysis[sym][1]
                 new_stop = self.risk.trailing_stop({"stop_loss": p["stop"]}, p["high"], atr)
                 if new_stop:
                     p["stop"] = new_stop
@@ -146,16 +149,17 @@ class Backtest:
 
             buys = []
             for sym, c in candles.items():
-                tech, pred = analysis[sym]
-                reports = {"technical": tech, "prediction": pred, "news": {"score": 0.0}, "forex": {"score": 0.0}}
+                tech_score, atr, pred_score = analysis[sym]
+                reports = {"technical": {"score": tech_score, "atr": atr}, "prediction": {"score": pred_score},
+                           "news": {"score": 0.0}, "forex": {"score": 0.0}}
                 d = self.decision.run(sym, reports, holding=sym in positions)
                 decisions[d["action"]] += 1
                 if d["action"] == "SELL":
-                    verdict = self.risk.review(d, sym, price[sym], tech["atr"], portfolio)
+                    verdict = self.risk.review(d, sym, price[sym], atr, portfolio)
                     if verdict["approved"]:
                         cash += self._close(positions, trades, sym, price[sym], "signal", t)
                 elif d["action"] == "BUY":
-                    buys.append((d["confidence"], d["combined_score"], sym, tech["atr"], d))
+                    buys.append((d["confidence"], d["combined_score"], sym, atr, d))
             for _, _, sym, atr, d in sorted(buys, reverse=True):
                 portfolio.update(cash=cash, open_positions=len(positions),
                                  equity=cash + sum(p["qty"] * price[x] for x, p in positions.items()))
@@ -268,6 +272,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--risk", type=float, help="risk per trade as %% of equity, Turtle sizing (e.g. 1); 0 = fixed size")
     ap.add_argument("--trail", type=float, help="trailing stop distance in ATR (e.g. 2); 0 = off")
     ap.add_argument("--interval", default="1h", choices=sorted(INTERVAL_MS), help="candle size (live: CANDLE_INTERVAL)")
+    ap.add_argument("--coin-buy", default="", help="per-coin buy thresholds, e.g. BTC=0.4,ETH=0.3 (others use --buy)")
     args = ap.parse_args(argv)
 
     from .agents import decision as dmod
@@ -304,6 +309,12 @@ def main(argv: list[str]) -> int:
     def run(s):
         return Backtest(s, history, days=args.days, btc_history=btc).run()
 
+    if args.coin_buy:
+        dmod.COIN_THRESHOLDS.clear()
+        for item in args.coin_buy.split(","):
+            coin, value = item.split("=")
+            coin = coin.strip().upper()
+            dmod.COIN_THRESHOLDS[coin + ("" if coin.endswith("USDT") else "USDT")] = float(value)
     if not args.sweep:
         dmod.BUY_THRESHOLD = args.buy or dmod.BUY_THRESHOLD
         dmod.SELL_THRESHOLD = args.sell or dmod.SELL_THRESHOLD

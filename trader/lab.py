@@ -25,7 +25,7 @@ from .backtest import EXTRA_DAYS, Backtest, fetch_history
 from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, Settings
 from .journal import Journal
-from .strategy import MAX_CHANGES, StrategyCard, summary_line
+from .strategy import MAX_CHANGES, StrategyCard, summary_line, thresholds_line
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +38,20 @@ FORWARD_MIN_DAYS = 28       # forward test length before a challenger can be pro
 FORWARD_MIN_TRADES = 8
 ROLLBACK_MIN_TRADES = 30    # live trades under a champion before its profit factor is judged
 ROLLBACK_PROFIT_FACTOR = 0.7
+HOLDOUT_WINDOW = 90         # the threshold study never sees the most recent 90 days; its cards must win them
 
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def restore_decision_rules(saved: tuple) -> None:
+    """Undo StrategyCard.apply_decision_rules() after an exam (the live desk's rules must not change)."""
+    dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = saved[0], saved[1]
+    dmod.WEIGHTS.clear()
+    dmod.WEIGHTS.update(saved[2])
+    dmod.COIN_THRESHOLDS.clear()
+    dmod.COIN_THRESHOLDS.update(saved[3])
 
 
 class Lab:
@@ -52,6 +62,7 @@ class Lab:
         self.client = client or (None if s.offline else BinanceClient(PUBLIC_BASE_URL))
         self._fetch = fetch or fetch_history
         self._history: dict[tuple[str, str], list[dict]] = dict(history or {})  # (symbol, interval) -> candles
+        self._history_days: dict[tuple[str, str], int] = {k: 10_000 for k in self._history}  # how many days each holds
         self._analysis: dict[str, dict] = {}  # interval -> indicator cache shared by every window and card (see Backtest)
 
     # ---- state ----
@@ -102,20 +113,22 @@ class Lab:
         return entry
 
     # ---- data ----
-    def history(self, symbols: list[str], interval: str) -> dict[str, list[dict]]:
-        max_days = max(d + off for d, off in WINDOWS) + 1
+    def history(self, symbols: list[str], interval: str, days: int | None = None) -> dict[str, list[dict]]:
+        """Candles for the exam windows (or at least `days`, for the head trader's longer threshold study)."""
+        need = max(days or 0, max(d + off for d, off in WINDOWS) + 1)
         out = {}
         for sym in list(symbols) + ["BTCUSDT"]:
             key = (sym, interval)
-            if key not in self._history:
-                self._history[key] = self._fetch(self.client, sym, max_days, interval)
+            if key not in self._history or self._history_days.get(key, 0) < need:
+                self._history[key] = self._fetch(self.client, sym, need, interval)
+                self._history_days[key] = need
             out[sym] = self._history[key]
         return out
 
     # ---- exam ----
     def evaluate(self, card: StrategyCard, coin_sets: list[list[str]] | None = None) -> dict:
         coin_sets = coin_sets or [list(self.s.symbols), list(self.s.lab_alt_symbols)]
-        saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS))
+        saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS), dict(dmod.COIN_THRESHOLDS))
         tests = []
         try:
             card.apply_decision_rules()
@@ -134,21 +147,27 @@ class Lab:
                                   "profit_factor": r["profit_factor"], "max_drawdown_pct": r["max_drawdown_pct"],
                                   "basket_hold_pct": r["basket_hold_pct"]})
         finally:
-            dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = saved[0], saved[1]
-            dmod.WEIGHTS.clear()
-            dmod.WEIGHTS.update(saved[2])
+            restore_decision_rules(saved)
         returns = [t["return_pct"] for t in tests]
         pfs = [t["profit_factor"] for t in tests if t["profit_factor"] is not None]
         return {"tests": tests, "mean_return": round(sum(returns) / len(returns), 2), "worst_return": min(returns),
                 "total_trades": sum(t["trades"] for t in tests), "mean_profit_factor": round(sum(pfs) / len(pfs), 2) if pfs else None,
                 "max_drawdown_pct": max(t["max_drawdown_pct"] for t in tests), "evaluated_at": now_iso()}
 
-    def compare(self, challenger: dict, champion: dict) -> dict:
-        """Does the challenger earn promotion to the forward test?"""
+    def compare(self, challenger: dict, champion: dict, strict_holdout: bool = False) -> dict:
+        """Does the challenger earn promotion to the forward test? `strict_holdout` is for cards built from a
+        study of past prices (the threshold study): most exam windows overlap what the study saw, so such a
+        card must also win every window that the study never saw (the most recent HOLDOUT_WINDOW days)."""
         pairs = list(zip(challenger["tests"], champion["tests"]))
         wins = sum(1 for a, b in pairs if a["return_pct"] > b["return_pct"])
         worst_gap = max(b["return_pct"] - a["return_pct"] for a, b in pairs)
         reasons = []
+        if strict_holdout:
+            lost = [a["coins"] for a, b in pairs
+                    if a["ending_days_ago"] == 0 and a["days"] <= HOLDOUT_WINDOW and a["return_pct"] <= b["return_pct"]]
+            if lost:
+                reasons.append(f"a study card must beat the champion on every held-out window (last {HOLDOUT_WINDOW} days); "
+                               f"it lost on {', '.join(lost)}")
         if wins < math.ceil(MIN_PASS_SHARE * len(pairs)):
             reasons.append(f"beat the champion on only {wins} of {len(pairs)} tests")
         if worst_gap > MAX_WORSE_POINTS:
@@ -171,7 +190,7 @@ class Lab:
                     "reason": f"forward test needs {FORWARD_MIN_DAYS} days, has {days:.0f}"}
         results = {}
         for name, c in (("challenger", card), ("champion", champion)):
-            saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS))
+            saved = (dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD, dict(dmod.WEIGHTS), dict(dmod.COIN_THRESHOLDS))
             try:
                 c.apply_decision_rules()
                 hist = self.history(list(self.s.symbols), c.interval)
@@ -179,9 +198,7 @@ class Lab:
                 results[name] = Backtest(c.settings(self.s), data, days=int(days) + 1, btc_history=hist["BTCUSDT"],
                                          analysis_cache=self._analysis.setdefault(c.interval, {})).run()
             finally:
-                dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = saved[0], saved[1]
-                dmod.WEIGHTS.clear()
-                dmod.WEIGHTS.update(saved[2])
+                restore_decision_rules(saved)
         ch, cp = results["challenger"], results["champion"]
         reasons = []
         if ch["trades"] < FORWARD_MIN_TRADES:
@@ -205,7 +222,7 @@ class Lab:
             card = StrategyCard.from_dict(entry["card"])
             if entry["status"] == "proposed":
                 ev = self.evaluate(card)
-                verdict = self.compare(ev, champ_eval)
+                verdict = self.compare(ev, champ_eval, strict_holdout=(card.source or "").startswith("study"))
                 entry["lab"] = {**ev, "verdict": verdict}
                 entry["status"] = "lab_passed" if verdict["passed"] else "lab_failed"
                 entry["notes"] = verdict["reasons"]
@@ -296,7 +313,8 @@ class Lab:
 def status_text(lab: Lab) -> str:
     champ = lab.champion()
     state = lab.journal.get("strategy_champion") or {}
-    lines = [f"🏆 Champion since {state.get('since', '')[:10]} ({state.get('by', '')}):", summary_line(champ)]
+    lines = [f"🏆 Champion since {state.get('since', '')[:10]} ({state.get('by', '')}):", summary_line(champ),
+             f"Buy thresholds: {thresholds_line(champ)}"]
     ev = lab.journal.get("strategy_champion_eval")
     if ev:
         lines.append(f"Exam: mean {ev['mean_return']:+.2f}%, worst {ev['worst_return']:+.2f}%, "

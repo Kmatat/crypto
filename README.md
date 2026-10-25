@@ -213,6 +213,31 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   cost, and the hit rate of the news scores. The daily report shows it; after 50 divergent decisions it gives
   a verdict. The AI budget is capped at a percentage of the account (`AI_BUDGET_PCT_MONTH`, 0.25%).
 
+## The head trader, and thresholds that each coin has to earn
+
+One buy threshold for every coin treats Bitcoin's signals and a small alt-coin's signals as equally
+trustworthy. They are not. Since 1.4.0 a strategy card can carry a **threshold per coin** (sell is always the
+mirror image), and a **head trader** agent manages the other agents around it:
+
+- **The threshold study** (weekly, `trader/calibration.py`): each watched coin is replayed at every allowed
+  threshold over a year of history that stops 90 days ago. The best after-fee threshold is pulled back towards
+  the common one in proportion to how little evidence the coin produced (a handful of trades proves nothing),
+  and the result becomes a challenger for the laboratory. The exam's newest window is exactly the held-out 90
+  days, then the forward test, then your `/approve`. With too few trades the study changes nothing and says so;
+  on today's data that is the case for every coin, because the checklist kept the desk in cash for most of the year.
+- **Portfolio and news at decision time:** the head trader raises a coin's threshold by 0.05 for every coin
+  already held that moves with it (correlation above 0.7: the same bet twice), and tilts it for news only once
+  the scorecard shows news scores predict the next day at least 55% of the time over 30 judgements. Every
+  decision records the threshold it used and why (`TRADES.md`).
+- **The AI budget goes where it changes a decision:** at each check the head trader ranks the coins where the
+  rules would act (positions at risk first, then the strongest new signals) and spreads the day's budget over
+  the day's remaining checks instead of spending it by noon. `/playbook` shows the last plan.
+- **Knowledge passes to every agent:** the playbook (strategy, thresholds, lessons, the scorecard verdict, the
+  last review, the lineage) is included in every Claude prompt and in the research agent's brief.
+- **What it cannot do:** change the position caps, the loss brakes, the AI budget, the trading mode, or promote a
+  strategy. It has no revenue target, on purpose: an agent pushed for fast revenue takes more risk. Its job is
+  to make every dollar of AI budget change a decision and every threshold earn its evidence.
+
 ## The notebook: every strategy, trade and lesson as Markdown (for you, and for Claude)
 
 Everything the desk does is in its SQLite journal, which code can read but people cannot. The notebook
@@ -371,6 +396,8 @@ trader/
   lab.py            the laboratory: exam, forward test, promotion, rollback (python -m trader ... /lab)
   scorecard.py      Claude versus the rules, computed from real later prices
   notes.py          the Markdown notebook (data/notes): strategies, trades, diary, results (python -m trader notes)
+  calibration.py    the threshold study: what buy threshold each coin has earned (head trader, weekly)
+  agents/head.py    the head trader: AI budget pacing, per-check thresholds, the playbook, the weekly study
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer

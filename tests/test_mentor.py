@@ -132,7 +132,7 @@ def test_checklist_vetoes_a_buy_in_the_live_cycle():
     b = Orchestrator(s, Journal(":memory:", s.starting_balance))
     b.broker = FakeBroker(lambda sym: b.last_price[sym])
     b.execution = ExecutionAgent(b.broker)
-    b.decision.run = lambda sym, reports, holding, use_ai=True: {"action": "BUY", "confidence": 0.9, "reasoning": "r",
+    b.decision.run = lambda sym, reports, holding, use_ai=True, threshold=None: {"action": "BUY", "confidence": 0.9, "reasoning": "r",
                                                     "source": "rules", "combined_score": 0.5}
     out = b.run_cycle()
     assert out[0]["action"] == "BUY" and not out[0]["approved"] and "checklist: reward" in out[0]["risk"]

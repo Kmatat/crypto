@@ -212,7 +212,7 @@ def bot():
     b.broker = FakeBroker(lambda sym: b.last_price[sym])
     b.execution = ExecutionAgent(b.broker)
     b.decide = {"action": "HOLD"}
-    b.decision.run = lambda sym, reports, holding, use_ai=True: {**b.decide, "confidence": 0.9, "reasoning": "r",
+    b.decision.run = lambda sym, reports, holding, use_ai=True, threshold=None: {**b.decide, "confidence": 0.9, "reasoning": "r",
                                                     "source": "rules", "combined_score": 0.5}
     return b
 

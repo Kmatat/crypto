@@ -32,6 +32,7 @@ BOUNDS = {
     "max_open_positions": (1, 3),
     "interval": ("1h", "2h", "4h"),
     "weights": (0.0, 1.0),
+    "coin_thresholds": (0.15, 0.60),   # per-coin buy thresholds from the threshold study, same range as the common one
 }
 MAX_CHANGES = 2            # a challenger may differ from the champion in at most this many fields (anti-overfitting)
 INTERVALS = ("1h", "2h", "4h")
@@ -51,7 +52,8 @@ class StrategyCard:
     max_position_pct: float = 0.10
     max_open_positions: int = 3
     interval: str = "1h"
-    weights: dict = field(default_factory=lambda: {"technical": 0.35, "prediction": 0.25, "news": 0.25, "forex": 0.15})
+    weights: dict = field(default_factory=lambda: {"technical": 0.50, "prediction": 0.30, "news": 0.10, "forex": 0.10})
+    coin_thresholds: dict = field(default_factory=dict)   # symbol -> buy threshold (sell = its mirror); others use buy_threshold
     rationale: str = ""
     source: str = ""                 # who proposed it: "owner", "research:<url>", "neighbour"
     created_at: str = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
@@ -91,7 +93,7 @@ class StrategyCard:
                    cooldown_hours=s.cooldown_hours, min_reward_risk=s.min_reward_risk,
                    risk_per_trade_pct=s.risk_per_trade_pct, max_position_pct=s.max_position_pct,
                    max_open_positions=s.max_open_positions, interval=s.interval, weights=dict(dmod.WEIGHTS),
-                   source="owner")
+                   coin_thresholds=dict(dmod.COIN_THRESHOLDS), source="owner")
 
     # ---- validation ----
     def violations(self) -> list[str]:
@@ -105,6 +107,13 @@ class StrategyCard:
                     out.append("weights must name technical, prediction, news, forex")
                 elif any(not (0 <= v <= 1) for v in self.weights.values()) or abs(sum(self.weights.values()) - 1) > 1e-6:
                     out.append("weights must be between 0 and 1 and add up to 1")
+            elif key == "coin_thresholds":
+                lo, hi = bound
+                for sym, v in self.coin_thresholds.items():
+                    if not (isinstance(sym, str) and sym.endswith("USDT")):
+                        out.append(f"coin threshold for {sym!r}: not a USDT pair")
+                    elif not (lo <= float(v) <= hi):
+                        out.append(f"coin threshold {sym}={v} outside {lo}..{hi}")
             else:
                 lo, hi = bound
                 v = getattr(self, key)
@@ -124,7 +133,16 @@ class StrategyCard:
 
     def describe_diff(self, other: "StrategyCard") -> str:
         a, b = self.params(), other.params()
-        return ", ".join(f"{k}: {b[k]} → {a[k]}" for k in self.diff(other)) or "identical"
+        parts = []
+        for k in self.diff(other):
+            if k == "coin_thresholds":
+                coins = sorted(set(a[k]) | set(b[k]))
+                parts.append("coin thresholds: " + ", ".join(
+                    f"{c.removesuffix('USDT')} {b[k].get(c, other.buy_threshold):g} → {a[k].get(c, self.buy_threshold):g}"
+                    for c in coins))
+            else:
+                parts.append(f"{k}: {b[k]} → {a[k]}")
+        return ", ".join(parts) or "identical"
 
     # ---- apply ----
     def settings(self, base: Settings) -> Settings:
@@ -142,10 +160,21 @@ class StrategyCard:
         dmod.SELL_THRESHOLD = -self.buy_threshold
         dmod.WEIGHTS.clear()
         dmod.WEIGHTS.update(self.weights)
+        dmod.COIN_THRESHOLDS.clear()
+        dmod.COIN_THRESHOLDS.update({k: float(v) for k, v in self.coin_thresholds.items()})
 
 
 def summary_line(card: StrategyCard) -> str:
     return (f"{card.name} [{card.id}]: buy≥{card.buy_threshold:g}, stop {card.stop_loss_atr:g} ATR, "
             f"target {card.take_profit_atr:g} ATR, trail {card.trail_atr:g}, checks {','.join(card.checks) or 'none'}, "
             f"risk {card.risk_per_trade_pct * 100:g}%, cap {card.max_position_pct * 100:g}%, "
-            f"max {card.max_open_positions} pos, {card.interval} candles")
+            f"max {card.max_open_positions} pos, {card.interval} candles"
+            + (f", own thresholds for {len(card.coin_thresholds)} coin(s)" if card.coin_thresholds else ""))
+
+
+def thresholds_line(card: StrategyCard) -> str:
+    """'BTC 0.4, ETH 0.35 (others 0.35)' for messages and the notebook."""
+    if not card.coin_thresholds:
+        return f"all coins {card.buy_threshold:g}"
+    return ", ".join(f"{k.removesuffix('USDT')} {v:g}" for k, v in sorted(card.coin_thresholds.items())) \
+        + f" (others {card.buy_threshold:g})"

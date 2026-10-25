@@ -101,7 +101,7 @@ def test_claude_is_not_asked_when_the_checklist_or_slots_veto_anyway():
     bot.broker = FakeBroker(lambda sym: bot.last_price[sym])
     bot.execution = ExecutionAgent(bot.broker)
     calls = []
-    bot.decision.run = lambda sym, reports, holding, use_ai=True: calls.append(use_ai) or {
+    bot.decision.run = lambda sym, reports, holding, use_ai=True, threshold=None: calls.append(use_ai) or {
         "action": "HOLD", "confidence": 0.5, "reasoning": "r", "source": "rules", "combined_score": 0.0}
     bot.run_cycle()
     assert calls == [False]  # checklist already failed: no need to pay for an opinion

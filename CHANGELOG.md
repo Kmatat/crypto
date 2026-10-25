@@ -5,6 +5,26 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.0 - 2026-10-25
+
+- Buy and sell thresholds are no longer one fixed number for every coin. A strategy card can carry a
+  threshold per coin, within the same bounds, counted as one change for the laboratory's two-change rule.
+- The threshold study (`trader/calibration.py`): every week the head trader replays each watched coin at
+  every allowed threshold over a year of history that stops 90 days ago, picks the threshold with the best
+  after-fee result, pulls it towards the common threshold in proportion to how little evidence the coin
+  produced, and hands the result to the laboratory as a challenger. The exam's most recent window is exactly
+  the held-out period; the forward test and the owner's approval follow as for any change. With too few
+  trades the study changes nothing, and says so.
+- The Head Trader agent (`trader/agents/head.py`) manages the other agents: it decides which coins may consult
+  Claude at each check (positions at risk first, then the strongest signals) and spreads the day's AI budget
+  over the whole day; it raises a coin's threshold when the desk already holds a coin that moves with it (the
+  same bet twice); it tilts for news only once the scorecard shows news scores predict anything; and it hands
+  every AI prompt the desk's playbook (strategy, thresholds, lessons, scorecard verdict, last review, lineage).
+  It cannot change caps, brakes, the AI budget, the trading mode or promote a strategy.
+- `/playbook` on Telegram shows the playbook and how the AI budget was spent at the last check; the notebook
+  shows the threshold study and the threshold used for every trade; `python -m trader backtest --coin-buy
+  BTC=0.4,ETH=0.3` replicates cards with per-coin thresholds. `HEAD_TRADER=false` switches the agent off.
+
 ## 1.3.3 - 2026-10-25
 
 - Fix: two tests read the real `.env` of the machine they ran on, so the update check failed on any server

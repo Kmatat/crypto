@@ -44,6 +44,8 @@ class ClaudeJSON:
         self.store = store
         self._day: dt.date | None = None
         self._spent = 0.0
+        self.calls = 0            # calls made in this process, and their total cost: the running average
+        self.cost_sum = 0.0       # tells the head trader how many calls today's remaining budget buys
         saved = store.get("ai_spend") if store else None
         if saved and saved.get("date") == dt.datetime.now(dt.timezone.utc).date().isoformat():
             self._day, self._spent = dt.date.fromisoformat(saved["date"]), float(saved["usd"])
@@ -62,6 +64,13 @@ class ClaudeJSON:
     def spent_today(self) -> float:
         self._roll_day()
         return self._spent
+
+    def avg_call_cost(self) -> float:
+        """Average cost of one call so far today, or a price-table estimate (6,000 tokens in, 400 out) before any."""
+        if self.calls:
+            return self.cost_sum / self.calls
+        price_in, price_out = PRICES_PER_MTOK.get(self.model, PRICES_PER_MTOK["claude-opus-5-5"])
+        return 6000 / 1e6 * price_in + 400 / 1e6 * price_out
 
     def effective_daily_budget(self) -> float:
         """The flat daily cap, or the percentage-of-account cap, whichever is lower."""
@@ -88,6 +97,8 @@ class ClaudeJSON:
                     else getattr(stu, "web_search_requests", 0)) or 0
         self._roll_day()
         cost = tokens_in / 1e6 * price_in + (u.output_tokens or 0) / 1e6 * price_out + searches * WEB_SEARCH_USD
+        self.calls += 1
+        self.cost_sum += cost
         self._spent += cost
         self._save()
         if self.store:

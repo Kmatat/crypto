@@ -130,6 +130,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/approve <id>` / `/reject <id>` | Switch to a challenger that passed every test, or dismiss it |
 | `/lab` | Run the weekly strategy lab now (a few minutes; results arrive as a message) |
 | `/notes` | The desk's notebook as a zip: every strategy, trade, lesson and result as Markdown pages. Upload it to Claude and ask what to improve |
+| `/playbook` | What the head trader tells every agent (strategy, thresholds, lessons, verdicts) and how it spent the AI budget at the last check |
 | `/review` | Claude reads the notebook and sends a plain-language review: what works, what fails, what the lab should test next. Uses a little of the AI budget |
 | `/version` | Which code version is running, and whether a newer one is waiting |
 | `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |

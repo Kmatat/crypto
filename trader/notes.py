@@ -25,7 +25,7 @@ from pathlib import Path
 from .config import Settings
 from .journal import Journal
 from .report import goals, goals_text, performance, report_text
-from .strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line
+from .strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line, thresholds_line
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ PARAM_LABELS = [
     ("max_open_positions", "Positions at once"),
     ("interval", "Candle size"),
     ("weights", "Agent weights"),
+    ("coin_thresholds", "Per-coin buy thresholds (from the threshold study)"),
 ]
 STATUS_WORDS = {"proposed": "proposed, not yet examined", "lab_passed": "passed the exam, in forward test",
                 "lab_failed": "failed the exam", "ready": "passed exam and forward test: awaiting the owner",
@@ -135,7 +136,9 @@ def replicate_command(card: StrategyCard, s: Settings, days: int = 180) -> str:
             f"--stop {card.stop_loss_atr:g} --take {card.take_profit_atr:g} --trail {card.trail_atr:g} "
             f"--checks {','.join(card.checks) or 'none'} --rr {card.min_reward_risk:g} "
             f"--cooldown {card.cooldown_hours:g} --risk {card.risk_per_trade_pct * 100:g} "
-            f"--position {card.max_position_pct:g} --max-positions {card.max_open_positions}")
+            f"--position {card.max_position_pct:g} --max-positions {card.max_open_positions}"
+            + (" --coin-buy " + ",".join(f"{k.removesuffix('USDT')}={v:g}" for k, v in sorted(card.coin_thresholds.items()))
+               if card.coin_thresholds else ""))
 
 
 def params_table(card: StrategyCard) -> str:
@@ -146,6 +149,8 @@ def params_table(card: StrategyCard) -> str:
             shown = ", ".join(v) or "none"
         elif key == "weights":
             shown = ", ".join(f"{k} {w:g}" for k, w in v.items())
+        elif key == "coin_thresholds":
+            shown = thresholds_line(card) if v else "none: every coin uses the common threshold"
         elif key in ("risk_per_trade_pct", "max_position_pct"):
             shown = f"{v * 100:g}%"
         else:
@@ -409,6 +414,15 @@ class Notes:
                   "### Live record under this champion", "",
                   live_record_text(live_record(trades, card_periods(hist, champ.id) or [(state.get("since", ""), None)])),
                   "", f"Replicate the backtest: `{replicate_command(champ, self.s)}`", ""]
+        study = self.j.get("threshold_study")
+        if study:
+            lines += [f"### Threshold study ({_ts(study.get('studied_at'), '%Y-%m-%d')}, {study['study_days']} days per coin, "
+                      f"the last {study['holdout_days']} days held out)", "",
+                      _table(["Coin", "Chosen", "Best tested", "Trades at best", "Return at best", f"Return at common {study['base']:g}", "Why"],
+                             [[sym.removesuffix("USDT"), f"{c['threshold']:g}", c.get("best") if c.get("best") is not None else "-",
+                               c.get("trades"), _pct(c.get("return_pct")) if c.get("return_pct") is not None else "-",
+                               _pct(c.get("base_return_pct")) if c.get("base_return_pct") is not None else "-", c["why"]]
+                              for sym, c in study["coins"].items()]), ""]
         items = self.j.get("strategy_challengers") or []
         lines += ["## Challengers", ""]
         rows = []
@@ -547,6 +561,8 @@ class Notes:
                 out.append("- Agents at entry: " + " · ".join(parts))
             if rep.get("mentor"):
                 out.append(f"- Checklist at entry: {_esc(rep['mentor'].get('checklist'))}")
+            if rep.get("head"):
+                out.append(f"- Buy threshold for this check: {rep['head'].get('threshold')} ({_esc(rep['head'].get('why'))})")
             if rep.get("watchlist", {}).get("why_watched"):
                 out.append(f"- Why this coin was watched: {_esc(rep['watchlist']['why_watched'])[:160]}")
         else:

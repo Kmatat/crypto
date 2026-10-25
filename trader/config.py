@@ -56,6 +56,7 @@ class Settings:
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     # ---- strategy laboratory (trader/lab.py): the desk proposes, tests and promotes strategy cards ----
     lab_enabled: bool = True
+    head_trader: bool = True         # the head trader paces Claude's budget, tilts thresholds, runs the threshold study
     lab_weekday: int = 0             # 0 = Monday: weekly research + exam
     lab_alt_symbols: tuple = ("BNBUSDT", "XRPUSDT", "ADAUSDT")  # second coin set every challenger must survive
     research_candidates: int = 3     # new strategy proposals per week
@@ -122,6 +123,7 @@ class Settings:
             ai_budget_pct_month=_f("AI_BUDGET_PCT_MONTH", 0.25),
             auto_update=_b("AUTO_UPDATE", True),
             lab_enabled=_b("LAB_ENABLED", True),
+            head_trader=_b("HEAD_TRADER", True),
             lab_weekday=int(os.getenv("LAB_WEEKDAY", 0)),
             lab_alt_symbols=tuple(x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT")
                                   for x in os.getenv("LAB_ALT_SYMBOLS", "BNB,XRP,ADA").split(",") if x.strip()),

@@ -29,6 +29,7 @@ import time
 from .agents.decision import DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
+from .agents.head import HeadTraderAgent
 from .agents.market import MarketDataAgent
 from .agents.mentor import MentorAgent
 from .agents.news import NewsAgent
@@ -71,6 +72,7 @@ class Orchestrator:
         self.news = NewsAgent(self.llm, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
         self.forex = ForexAgent(offline=s.offline)
         self.decision = DecisionAgent(self.llm)
+        self.head = HeadTraderAgent(s, self.journal, self.llm) if s.head_trader else None
         self.risk = RiskManagerAgent(s)
         self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
         self.last_price: dict[str, float] = {}
@@ -235,8 +237,13 @@ class Orchestrator:
             log.exception("Forex agent failed - treating macro as neutral")
             forex = ForexAgent._neutral("forex agent error")
 
-        # 4. decisions; sells right away, buys collected and ranked
-        buys = []
+        # 4. decisions. First every coin's reports, its threshold for this check and whether a Claude call could
+        #    change anything; then the head trader decides who may consult Claude; then sells right away, buys
+        #    collected and ranked
+        if self.head:
+            self.decision.playbook = self.head.playbook()
+        closes = {sym: c["closes"] for sym, c in ctx.items()}
+        pending = []
         for sym, c in ctx.items():
             try:
                 coin = sym.removesuffix("USDT")
@@ -252,10 +259,27 @@ class Orchestrator:
                 if review:
                     reports["mentor"] = {"pass": review["pass"], "checklist": MentorAgent.summary(review)}
                     c["mentor"] = review
-                # Claude costs money: skip it when a buy is doomed anyway (checklist failed, no free slot, limits)
+                score = DecisionAgent.combined_score(reports)
+                base_thr = self.decision.threshold_for(sym)
+                news_score = float(reports["news"].get("score", 0) or 0)
+                thr, why = self.head.threshold(sym, base_thr, closes, positions, news_score) if self.head \
+                    else (base_thr, "coin threshold")
+                reports["head"] = {"threshold": thr, "why": why}
+                # Claude costs money: a buy the checklist or the position limit refuses anyway is not worth a call
                 slots_full = position is None and len(positions) >= self.s.max_open_positions
-                use_ai = not (position is None and ((review and not review["pass"]) or slots_full))
-                decision = self.decision.run(sym, reports, holding=position is not None, use_ai=use_ai)
+                eligible = position is not None or not ((review and not review["pass"]) or slots_full)
+                pending.append({"symbol": sym, "ctx": c, "reports": reports, "position": position, "score": score,
+                                "threshold": thr, "holding": position is not None, "eligible": eligible})
+            except Exception as e:
+                log.exception("Analysis failed for %s", sym)
+                summary.append({"symbol": sym, "error": str(e)})
+        allowed = self.head.plan_ai(pending) if self.head else {p["symbol"] for p in pending if p["eligible"]}
+        buys = []
+        for p in pending:
+            sym, c, reports, position = p["symbol"], p["ctx"], p["reports"], p["position"]
+            try:
+                decision = self.decision.run(sym, reports, holding=position is not None, use_ai=sym in allowed,
+                                             threshold=p["threshold"])
                 if decision["action"] == "BUY":
                     buys.append((sym, c, reports, decision))
                     continue

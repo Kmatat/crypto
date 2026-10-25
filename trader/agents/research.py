@@ -37,10 +37,15 @@ PROPOSAL_SCHEMA = {
                 "cooldown_hours": {"type": "number"}, "min_reward_risk": {"type": "number"},
                 "risk_per_trade_pct": {"type": "number"}, "max_position_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"}, "interval": {"type": "string", "enum": list(INTERVALS)},
+                "coin_thresholds": {"type": "array", "description": "per-coin buy thresholds that differ from "
+                                    "buy_threshold (empty to keep the champion's); symbols like BTCUSDT",
+                                    "items": {"type": "object", "properties": {"symbol": {"type": "string"},
+                                                                               "threshold": {"type": "number"}},
+                                              "required": ["symbol", "threshold"], "additionalProperties": False}},
             },
             "required": ["name", "rationale", "source", "buy_threshold", "stop_loss_atr", "take_profit_atr", "trail_atr",
                          "checks", "cooldown_hours", "min_reward_risk", "risk_per_trade_pct", "max_position_pct",
-                         "max_open_positions", "interval"],
+                         "max_open_positions", "interval", "coin_thresholds"],
             "additionalProperties": False,
         }},
         "ideas_needing_code": {"type": "array", "items": {"type": "string"},
@@ -200,7 +205,11 @@ class ResearchAgent:
                                     risk_per_trade_pct=float(p["risk_per_trade_pct"]),
                                     max_position_pct=float(p["max_position_pct"]),
                                     max_open_positions=int(p["max_open_positions"]), interval=p["interval"],
-                                    weights=dict(champion.weights), rationale=p["rationale"][:600],
+                                    weights=dict(champion.weights),
+                                    coin_thresholds={**champion.coin_thresholds,
+                                                     **{str(x["symbol"]).upper(): float(x["threshold"])
+                                                        for x in (p.get("coin_thresholds") or [])}},
+                                    rationale=p["rationale"][:600],
                                     source=f"research: {p['source'][:120]}")
             except (KeyError, TypeError, ValueError) as e:
                 log.warning("Skipping malformed proposal: %s", e)

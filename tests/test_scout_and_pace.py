@@ -151,7 +151,7 @@ def test_pace_follows_ai_within_limits_and_speeds_up_near_exits(bot):
 def test_limited_slots_go_to_the_strongest_buy_signals(bot):
     bot.s.max_open_positions = 1
     conf = {"BTCUSDT": 0.7, "ETHUSDT": 0.9}
-    bot.decision.run = lambda sym, reports, holding, use_ai=True: {"action": "BUY", "confidence": conf[sym], "reasoning": "r",
+    bot.decision.run = lambda sym, reports, holding, use_ai=True, threshold=None: {"action": "BUY", "confidence": conf[sym], "reasoning": "r",
                                                       "source": "rules", "combined_score": 0.5}
     out = {r["symbol"]: r for r in bot.run_cycle()}
     assert out["ETHUSDT"]["order"]["ok"] and "order" not in out["BTCUSDT"]

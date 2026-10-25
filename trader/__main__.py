@@ -25,7 +25,9 @@ from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
 from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
 from .lab import Lab, status_text as lab_status_text, week_report
+from .agents.head import HeadTraderAgent
 from .agents.research import ResearchAgent, review_text
+from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
@@ -41,6 +43,7 @@ HELP_TEXT = (
     "/strategies - the strategy in use, challengers under test, and what you can approve\n"
     "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
     "/lab - run the weekly strategy lab now (takes a few minutes)\n"
+    "/playbook - what the desk has learned, as the head trader passes it to every agent, and how it spends the AI budget\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
@@ -185,6 +188,7 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
         return ""
     text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0))
     j.set("scorecard_text", text)  # reused by the notebook between daily reports
+    j.set("news_scorecard", news)  # the head trader tilts thresholds on news only once this shows news predicts
     return text
 
 
@@ -261,10 +265,22 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         if lessons.get("notes"):
             bot.journal.event("lesson", "; ".join(lessons["notes"]))
         tried = {c["card"]["id"] for c in lab.challengers()}
-        proposals = research.propose(lab.champion(), lessons, bot.base.research_candidates, tried,
-                                     lineage=lineage_text(bot.journal))
+        study_result, study_card = None, None
+        if bot.head:
+            try:  # the head trader's threshold study becomes a challenger like any other proposal
+                coins = list(dict.fromkeys(list(bot.base.symbols) + bot.watchlist()["symbols"]))
+                study_result, study_card = bot.head.study(lab, coins)
+            except Exception as e:  # noqa: BLE001 - the lab must still run without the study
+                log.exception("Threshold study failed")
+                bot.journal.event("error", f"Threshold study failed: {e}")
+        knowledge = lineage_text(bot.journal) + ("\n" + bot.head.playbook() if bot.head else "")
+        proposals = research.propose(lab.champion(), lessons, bot.base.research_candidates, tried, lineage=knowledge)
+        if study_card:
+            proposals = [study_card] + proposals
         result = lab.run_week(proposals)
         text = week_report(result) + f"\n({reason})"
+        if study_result:
+            text += "\n" + study_text(study_result)
         if lessons.get("notes"):
             text += "\nLessons from the last 30 days: " + "; ".join(lessons["notes"])
         ideas = getattr(research, "ideas_needing_code", None)
@@ -288,6 +304,8 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         week = dt.datetime.now(dt.timezone.utc).strftime("%G-W%V")
         bot.notes.weekly_snapshot(week, [("Laboratory", text), ("Lessons (post-mortem of the last 30 days)",
                                           "\n".join(f"- {n}" for n in lessons.get("notes", [])) or "- nothing notable"),
+                                         ("Threshold study", study_text(study_result) if study_result else ""),
+                                         ("Playbook", bot.head.playbook() if bot.head else ""),
                                          ("Claude's review", review or "(Claude not configured, or unavailable this week)"),
                                          ("Performance", "```\n" + perf_text + "\n```"),
                                          ("Claude versus the rules", "```\n" + scorecard + "\n```" if scorecard else "")])
@@ -364,6 +382,18 @@ def cmd_run(s: Settings, args) -> None:
             threading.Thread(target=lambda: run_lab(bot, tg, trade_lock, "requested on Telegram"), daemon=True).start()
             return "🔬 Lab started: downloading history and testing challengers. Results arrive here in a few minutes."
 
+        def playbook_now() -> str:
+            if not bot.head:
+                return "The head trader is switched off (HEAD_TRADER=false)."
+            text = with_journal(s, lambda j: HeadTraderAgent(bot.base, j, bot.llm).playbook())
+            plan = bot.head.last_plan
+            budget = ""
+            if plan:
+                budget = (f"\n\nClaude budget at the last check: asked for {', '.join(plan['allowed']) or 'nobody'}"
+                          + (f"; skipped {', '.join(plan['skipped'])}" if plan.get("skipped") else "") + f". {plan['why']}.")
+            return "📒 Desk playbook (what every agent is told)\n" + (clean(text, 3000) or "Nothing learned yet: the first "
+                                                                      "lab run and the first trades fill this in.") + budget
+
         def notes_now() -> str:
             if not bot.notes.enabled:
                 return "The notebook is switched off for this journal."
@@ -408,6 +438,7 @@ def cmd_run(s: Settings, args) -> None:
             "/reject": reject,
             "/lab": lab_now,
             "/notes": notes_now,
+            "/playbook": playbook_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
