@@ -140,6 +140,11 @@ brackets):
 | + 200-day rule and Bitcoin regime only | -0.3% | -0.3% | -0.9% |
 | **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 10% cap, news weight 10%) | **+1.9%** | **+1.9%** | **+1.3%** |
 
+The laboratory's own exam is stricter than this table and worth knowing: across its 10 tests (the same
+three windows plus two that ended 3 and 6 months ago, each on BTC/ETH/SOL and on BNB/XRP/ADA) the current
+defaults average only **+0.05%** with a profit factor of 0.79. The recent windows on the major coins are the
+strongest; older periods and the second coin set are roughly break-even. Read the table as "best recent case".
+
 The original rules had no edge: they lost a little in rallies and more in the bear market, and exchange
 fees were the whole difference (with fees set to zero the same trades made +5.7% over 180 days; 11 trades a
 week on $10,000 costs about 11% of the account per year). The checklist keeps the desk out of downtrends,
