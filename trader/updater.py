@@ -202,7 +202,7 @@ class Updater:
         behind = int(git(root, "rev-list", "--count", f"HEAD..origin/{branch}") or 0)
         incoming = git(root, "log", "--format=%s", f"HEAD..origin/{branch}").replace("\n", " · ")
         new_version = self._remote_version(branch) if behind else None
-        new_label = f"version {new_version} ({remote[:7]})" if new_version else f"revision {remote[:7]}"
+        new_label = f"version {new_version} ({remote[:7]})" if new_version else f"version {remote[:7]}"
 
         if behind == 0:
             st = self._status(head=old[:7], remote=remote[:7], behind=0, incoming="", incoming_version=None,
