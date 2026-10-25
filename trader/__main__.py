@@ -300,10 +300,11 @@ def main() -> None:
     rst = sub.add_parser("reset")
     rst.add_argument("--force", action="store_true", help="reset even with open positions")
     sub.add_parser("version")
+    sub.add_parser("backtest", add_help=False)  # arguments handled by trader/backtest.py
     upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
     upd.add_argument("--check-only", action="store_true")
     upd.add_argument("--force", action="store_true")
-    args = ap.parse_args()
+    args, _ = ap.parse_known_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     if args.cmd == "setup":
@@ -314,6 +315,9 @@ def main() -> None:
         from .updater import version_text
         print(version_text())
         return
+    if args.cmd == "backtest":
+        from .backtest import main as backtest_main
+        sys.exit(backtest_main(sys.argv[2:]))
     if args.cmd == "update":
         from .updater import main as update_main
         sys.exit(update_main(sys.argv[2:]))

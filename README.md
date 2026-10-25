@@ -118,6 +118,17 @@ to be notified about new versions instead of installing them automatically. Anyo
 the GitHub repository can change what the server runs, so protect that account with two-factor
 authentication (see the security checklist in the server guide).
 
+## Measuring the strategy before trusting it
+
+`python -m trader backtest --days 180` replays the desk's rule-based decision logic (indicators,
+forecast, weighted score, risk limits, fees, exchange-side exits) over real hourly Binance history and
+prints return, trade count, win rate, profit factor and drawdown next to the buy-and-hold result for the
+same coins and period. `--sweep` tries a grid of thresholds and stop/take-profit distances; `--symbols`,
+`--position`, `--max-positions` test other coin sets and sizing. News, forex and Claude's judgement have no
+history and are left out, so the backtest measures the free rule core: the floor the AI layer has to beat.
+Any change to the strategy should show an improvement here on at least two different periods before it is
+trusted, and even then live results will differ.
+
 ## Reading the report
 
 | Metric | What it tells you |
@@ -202,6 +213,7 @@ trader/
   notify.py         Telegram alerts and /status, /report commands
   setup_wizard.py   the setup questions (python -m trader setup)
   updater.py        over-the-air updates: fetch, test, restart, roll back (python -m trader update)
+  backtest.py       replay the rule core on real history (python -m trader backtest)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer
