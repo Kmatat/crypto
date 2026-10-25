@@ -113,3 +113,25 @@ def test_single_instance_lock(tmp_path):
         single_instance(db)
     held.close()
     single_instance(db).close()
+
+
+def test_env_keys_list_every_variable_the_settings_loader_reads():
+    import re
+    from pathlib import Path
+    from trader import config
+    read = set(re.findall(r'(?:getenv|_f|_b)\("([A-Z_]+)"', Path(config.__file__).read_text()))
+    assert read and read <= set(config.ENV_KEYS)
+
+
+def test_update_job_runs_the_tests_without_the_servers_settings_or_keys(monkeypatch, tmp_path):
+    import sys
+    from trader.updater import Updater
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("STARTING_BALANCE_USDT", "120")
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+    u = Updater(Settings(), tg=SimpleNamespace(send=lambda t: True), root=tmp_path, status_path=tmp_path / "s.json",
+                request_path=tmp_path / "r", say=lambda *a: None)
+    probe = [sys.executable, "-c", "import os; print(os.environ.get('ANTHROPIC_API_KEY'), "
+                                   "os.environ.get('STARTING_BALANCE_USDT'), os.environ.get('SOME_UNRELATED_VAR'))"]
+    ok, out = u._run(probe, 30)
+    assert ok and out.split() == ["None", "None", "kept"]

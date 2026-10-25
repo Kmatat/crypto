@@ -16,6 +16,57 @@ TESTNET_BASE_URL = "https://testnet.binance.vision"
 PUBLIC_BASE_URL = "https://data-api.binance.vision"
 
 
+# Every environment variable the settings loader reads. The automated tests run with none of them set, and the
+# update job removes them (and with them the API keys) from the tests' environment: a test must never see the
+# server's real configuration. tests/test_hardening.py checks this list against Settings.load.
+ENV_KEYS = (
+    "AI_BUDGET_PCT_MONTH",
+    "AI_DAILY_BUDGET_USD",
+    "ANTHROPIC_API_KEY",
+    "AUTO_COINS",
+    "AUTO_PROMOTE",
+    "AUTO_UPDATE",
+    "BINANCE_TESTNET_API_KEY",
+    "BINANCE_TESTNET_API_SECRET",
+    "BRAKE_PAUSE_DAYS",
+    "CANDLE_INTERVAL",
+    "CLAUDE_MODEL",
+    "COOLDOWN_HOURS",
+    "CYCLE_MINUTES",
+    "DAILY_REPORT_HOUR_UTC",
+    "HEAD_TRADER",
+    "JOURNAL_DB",
+    "LAB_ALT_SYMBOLS",
+    "LAB_ENABLED",
+    "LAB_WEEKDAY",
+    "MAX_CHECK_MINUTES",
+    "MAX_COINS",
+    "MAX_DAILY_LOSS_PCT",
+    "MAX_DRAWDOWN_PCT",
+    "MAX_OPEN_POSITIONS",
+    "MAX_POSITION_PCT",
+    "MENTOR_CHECKS",
+    "MIN_CHECK_MINUTES",
+    "MIN_CONFIDENCE",
+    "MIN_REWARD_RISK",
+    "MIN_VOLUME_MUSD",
+    "NEWS_REFRESH_MINUTES",
+    "NOTES_DIR",
+    "PULSE_HOURS",
+    "RESEARCH_CANDIDATES",
+    "RISK_PER_TRADE_PCT",
+    "SCOUT_HOURS",
+    "SETTINGS_VERSION",
+    "STARTING_BALANCE_USDT",
+    "STOP_LOSS_ATR",
+    "SYMBOLS",
+    "TAKE_PROFIT_ATR",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TRADING_MODE",
+    "TRAIL_ATR",
+)
+
 SETTINGS_VERSION = "3"  # 2 = 15-minute checks + AI coin scout; 3 = take-profit default 4 ATR (checklist era)
 
 

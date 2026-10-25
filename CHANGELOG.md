@@ -5,6 +5,15 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.6 - 2026-10-25
+
+- Fix: the server rejected 1.4.4 and 1.4.5 because a test failed there and not elsewhere. The update job loads the
+  server's `.env` into its environment, and the tests inherited it, so a test saw the real small balance and the
+  new 1.4.5 warnings. The 1.3.3 fix had only hidden the file. Now every test runs with none of the settings
+  variables set, and the update job runs the library install and the tests without the server's settings and
+  API keys in their environment. Rehearsed with the 1.4.3 update job against a copy of a server with a small
+  balance: 1.4.5 fails exactly as reported, 1.4.6 passes.
+
 ## 1.4.5 - 2026-10-25
 
 - A small starting balance is now reported at start, in `/health` and in `/diagnose`, with its consequences:

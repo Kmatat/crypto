@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -196,8 +197,13 @@ class Updater:
         return subprocess.run(["systemctl", "is-active", "--quiet", SERVICE]).returncode == 0
 
     def _run(self, cmd: list[str], timeout: int) -> tuple[bool, str]:
+        # This job loaded the server's .env into its environment (Settings.load). Commands it runs - the library
+        # install and the tests - get neither those settings nor the API keys: the tests must not see the server's
+        # configuration, and nothing it runs needs the keys.
+        from .config import ENV_KEYS
+        env = {k: v for k, v in os.environ.items() if k not in ENV_KEYS}
         try:
-            p = subprocess.run(cmd, cwd=self.root, capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(cmd, cwd=self.root, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             return False, f"timed out after {timeout}s"
         return p.returncode == 0, (p.stdout + p.stderr)[-4000:]
