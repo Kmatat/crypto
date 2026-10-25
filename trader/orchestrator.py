@@ -80,9 +80,16 @@ class Orchestrator:
 
     def portfolio(self) -> dict:
         eq = self.equity()
+        start = float(self.journal.get("starting_balance") or eq)
+        tripped = self.journal.get("brake_tripped_at")
+        if tripped and eq >= start * (1 - self.s.max_drawdown_pct / 2):
+            self.journal.set("brake_tripped_at", None)  # recovered half the loss: back to normal
+            tripped = None
+        days = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(tripped)).total_seconds() / 86400 \
+            if tripped else None
         return {"cash": self.journal.cash, "equity": eq, "open_positions": len(self.journal.positions()),
-                "day_start_equity": self.journal.day_start_equity(eq),
-                "starting_balance": float(self.journal.get("starting_balance") or eq)}
+                "day_start_equity": self.journal.day_start_equity(eq), "starting_balance": start,
+                "brake_tripped_days": days}
 
     # ---- watchlist ----
     def watchlist(self) -> dict:
@@ -208,6 +215,8 @@ class Orchestrator:
         for sym, c, reports, decision in buys:
             try:
                 verdict = self.risk.review(decision, sym, c["price"], c["technical"]["atr"], self.portfolio())
+                if verdict.get("trip"):
+                    self.journal.set("brake_tripped_at", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
                 review = c.get("mentor")
                 if verdict["approved"] and review and not review["pass"]:
                     names = ", ".join(review["failed"])

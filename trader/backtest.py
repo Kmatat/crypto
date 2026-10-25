@@ -30,18 +30,21 @@ WARMUP = 200          # candles the indicators need before the first decision
 EXTRA_DAYS = 210      # history before the test window, so 200-day averages exist from day one
 
 
-def fetch_history(client: BinanceClient, symbol: str, days: int) -> list[dict]:
+INTERVAL_MS = {"1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000}
+
+
+def fetch_history(client: BinanceClient, symbol: str, days: int, interval: str = "1h") -> list[dict]:
     start = int((time.time() - (days + EXTRA_DAYS) * 24 * 3600) * 1000)
     out: list[dict] = []
     while True:
-        rows = client.klines(symbol, "1h", limit=1000, start_ms=start)
+        rows = client.klines(symbol, interval, limit=1000, start_ms=start)
         if not rows:
             break
         out += rows
         if len(rows) < 1000:
             break
-        start = rows[-1]["time"] + 3_600_000
-    return out[:-1]  # drop the still-forming current hour
+        start = rows[-1]["time"] + INTERVAL_MS[interval]
+    return out[:-1]  # drop the still-forming current candle
 
 
 class DailySeries:
@@ -83,6 +86,7 @@ class Backtest:
         by_time = {sym: {c["time"]: i for i, c in enumerate(h)} for sym, h in self.history.items()}
         if self.days:  # trade only the last `days`; earlier history feeds the long averages
             times = [t for t in times if t >= times[-1] - self.days * 86_400_000]
+        step_ms = times[1] - times[0] if len(times) > 1 else 3_600_000
         cash, positions, trades, curve = s.starting_balance, {}, [], []
         day, day_start = None, s.starting_balance
         decisions = {"BUY": 0, "SELL": 0, "HOLD": 0}
@@ -167,7 +171,8 @@ class Backtest:
         p = positions.pop(sym)
         proceeds = p["qty"] * px * (1 - PAPER_FEE)
         trades.append({"symbol": sym, "pnl": proceeds - p["cost"], "pnl_pct": (proceeds / p["cost"] - 1) * 100,
-                       "reason": reason, "hours": (t - p["opened"]) / 3_600_000})
+                       "reason": reason, "hours": (t - p["opened"]) / 3_600_000,
+                       "fees": p["cost"] * PAPER_FEE + p["qty"] * px * PAPER_FEE})
         return proceeds
 
     def _metrics(self, trades, curve, final, decisions, times) -> dict:
@@ -180,6 +185,7 @@ class Backtest:
             max_dd = max(max_dd, (peak - e) / peak)
         days = max(1, (times[-1] - times[0]) / 86_400_000) if times else 1
         gross_win, gross_loss = sum(x["pnl"] for x in wins), -sum(x["pnl"] for x in losses)
+        fees = sum(x["fees"] for x in trades)
         first = {sym: next(c["close"] for c in h if c["time"] == times[0]) for sym, h in self.history.items()} if times else {}
         last = {sym: h[-1]["close"] for sym, h in self.history.items()}
         hold = {sym: (last[sym] / first[sym] - 1) * 100 for sym in first}
@@ -189,6 +195,7 @@ class Backtest:
             "buy_and_hold_pct": {sym.removesuffix("USDT"): round(v, 1) for sym, v in hold.items()},
             "basket_hold_pct": round(sum(hold.values()) / len(hold), 1) if hold else None,
             "trades": len(trades), "trades_per_week": round(len(trades) / days * 7, 1),
+            "fees_paid": round(fees, 2), "fees_pct_of_start": round(fees / s.starting_balance * 100, 2),
             "win_rate_pct": round(len(wins) / len(trades) * 100, 1) if trades else None,
             "avg_win": round(gross_win / len(wins), 2) if wins else None,
             "avg_loss": round(-gross_loss / len(losses), 2) if losses else None,
@@ -207,6 +214,7 @@ def print_result(r: dict) -> None:
           "  ".join(f"{k} {v:+.1f}%" for k, v in r["buy_and_hold_pct"].items()))
     print(f"Trades              {r['trades']} ({r['trades_per_week']}/week), avg hold {r['avg_hold_hours']} h, "
           f"exits {r['exits']}")
+    print(f"Fees paid           ${r['fees_paid']:,.2f} ({r['fees_pct_of_start']}% of the starting balance)")
     print(f"Win rate            {r['win_rate_pct']}%   avg win ${r['avg_win']}  avg loss ${r['avg_loss']}  "
           f"profit factor {r['profit_factor']}")
     print(f"Max drawdown        {r['max_drawdown_pct']}%")
@@ -231,6 +239,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--cooldown", type=float, help="hours to wait after a stop-loss before re-buying (default 24)")
     ap.add_argument("--risk", type=float, help="risk per trade as %% of equity, Turtle sizing (e.g. 1); 0 = fixed size")
     ap.add_argument("--trail", type=float, help="trailing stop distance in ATR (e.g. 2); 0 = off")
+    ap.add_argument("--interval", default="1h", choices=sorted(INTERVAL_MS), help="candle size (live: CANDLE_INTERVAL)")
     args = ap.parse_args(argv)
 
     from .agents import decision as dmod
@@ -238,13 +247,13 @@ def main(argv: list[str]) -> int:
     client = BinanceClient(PUBLIC_BASE_URL)
     print(f"Downloading {args.days} (+{EXTRA_DAYS} for long averages) days of hourly prices for "
           f"{', '.join(symbols)} ...", file=sys.stderr)
-    history = {sym: fetch_history(client, sym, args.days) for sym in symbols}
-    btc = history.get("BTCUSDT") or fetch_history(client, "BTCUSDT", args.days)
+    history = {sym: fetch_history(client, sym, args.days, args.interval) for sym in symbols}
+    btc = history.get("BTCUSDT") or fetch_history(client, "BTCUSDT", args.days, args.interval)
     checks = tuple(ALL_CHECKS) if args.checks == "all" else () if args.checks in ("", "none") else \
         tuple(c.strip() for c in args.checks.split(","))
 
     def settings(stop=None, take=None):
-        return Settings(offline=True, symbols=symbols, starting_balance=args.balance,
+        return Settings(offline=True, symbols=symbols, starting_balance=args.balance, interval=args.interval,
                         stop_loss_atr=stop or args.stop or 2.0, take_profit_atr=take or args.take or 3.0,
                         max_position_pct=args.position or 0.10, max_open_positions=args.max_positions or 3,
                         mentor_checks=checks, min_reward_risk=args.rr or 2.0, cooldown_hours=args.cooldown or 24,

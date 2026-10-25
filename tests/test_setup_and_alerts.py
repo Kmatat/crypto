@@ -82,7 +82,7 @@ def test_wizard_first_run_writes_private_env(wiz):
     assert v["STARTING_BALANCE_USDT"] == "4500"
     assert v["CLAUDE_MODEL"] == "claude-sonnet-5-5" and v["ANTHROPIC_API_KEY"] == "sk-ant-good"
     assert v["TELEGRAM_CHAT_ID"] == "999" and v["DAILY_REPORT_HOUR_UTC"] == "7"
-    assert v["SYMBOLS"] == "BTCUSDT,ETHUSDT" and v["MAX_POSITION_PCT"] == "0.15" and v["MENTOR_CHECKS"] == "trend200,btc,cooldown,reward"
+    assert v["SYMBOLS"] == "BTCUSDT,ETHUSDT" and v["MAX_POSITION_PCT"] == "0.10" and v["MENTOR_CHECKS"] == "trend200,btc,cooldown,reward"
     assert stat.S_IMODE(os.stat(env).st_mode) == 0o600
     assert FakeTelegram.sent[-1][0] == "999"  # test message went to the detected chat
 

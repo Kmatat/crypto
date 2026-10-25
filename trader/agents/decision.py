@@ -57,6 +57,7 @@ class DecisionAgent:
 
     def run(self, symbol: str, reports: dict, holding: bool) -> dict:
         score = self.combined_score(reports)
+        rules_action = self._rules(score, holding)["action"]
         decision = None
         if self.llm and self.worth_asking(score, holding):
             decision = self._reuse(symbol, score, holding)
@@ -72,6 +73,7 @@ class DecisionAgent:
             decision = {**decision, "action": "HOLD",
                         "reasoning": decision["reasoning"] + " (Converted to HOLD: not valid for current position.)"}
         decision["combined_score"] = score
+        decision["rules_action"] = rules_action  # what the free rules would have done (for the Claude-vs-rules report)
         return decision
 
     @staticmethod

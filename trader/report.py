@@ -29,6 +29,9 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
     gross_win = sum(t["pnl"] for t in wins)
     gross_loss = -sum(t["pnl"] for t in losses)
     decisions = j.db.execute("SELECT action, COUNT(*) n FROM decisions GROUP BY action").fetchall()
+    overrides = j.db.execute("SELECT COUNT(*) FROM decisions WHERE source LIKE 'claude%' AND rules_action IS NOT NULL "
+                             "AND action != rules_action").fetchone()[0]
+    fees = j.db.execute("SELECT COALESCE(SUM(fee), 0) FROM orders WHERE ok=1").fetchone()[0]
     exchange_exits = sum(1 for t in trades if "(exchange)" in t["exit_reason"] or "(emulated)" in t["exit_reason"])
     return {
         "starting_balance": start,
@@ -49,6 +52,8 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
         "max_drawdown_pct": round(max_dd * 100, 2),
         "open_positions": list(positions),
         "decisions": {r["action"]: r["n"] for r in decisions},
+        "claude_overrode_rules": overrides,
+        "fees_paid": round(fees, 2),
     }
 
 
@@ -57,6 +62,8 @@ EXPLAIN = {
     "avg_price_gap_pct": "how far demo fill prices were from the real market (small = demo results are realistic)",
     "exits_by_exchange_orders": "trades closed by the stop-loss / take-profit orders sitting on the exchange",
     "win_rate_pct": "closed trades that made money",
+    "claude_overrode_rules": "decisions where Claude chose differently from the free rules (compare outcomes over time)",
+    "fees_paid": "exchange fees so far - the strategy's biggest fixed cost",
     "profit_factor": "money won / money lost; above 1.0 = profitable overall, 1.5+ is good",
     "max_drawdown_pct": "worst drop from a peak - how painful the bad stretch was",
 }

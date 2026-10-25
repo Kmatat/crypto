@@ -136,15 +136,26 @@ brackets):
 |---|---|---|---|
 | Plain indicator rules (the original) | -2.2% (+26%) | -3.1% (+10%) | -10.1% (-38%) |
 | + 200-day rule and Bitcoin regime only | -0.3% | -0.3% | -0.9% |
-| **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 15% cap) | **+2.4%** | **+2.4%** | **+1.3%** |
+| **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 10% cap) | **+1.6%** | **+1.6%** | **+0.9%** |
 
-The original rules had no edge: they lost a little in rallies and more in the bear market. The checklist
-keeps the desk out of downtrends, which is where most of the loss came from, and the exit discipline makes
-average winners about twice the size of average losers. The edge is modest, it lags buy-and-hold in strong
-rallies (the desk is mostly in cash), and it was negative on one of three alternative coin sets tested
-(BNB, XRP, DOGE). About 100 trades per year is too few to be statistically sure of anything: treat these
-numbers as "plausibly positive", not proven. Any change to the strategy should show an improvement here on
-at least two different periods and two coin sets before it is trusted, and even then live results will differ.
+The original rules had no edge: they lost a little in rallies and more in the bear market, and exchange
+fees were the whole difference (with fees set to zero the same trades made +5.7% over 180 days; 11 trades a
+week on $10,000 costs about 11% of the account per year). The checklist keeps the desk out of downtrends,
+which is where most of the loss came from, cuts the number of trades by two thirds, and the exit discipline
+makes average winners about twice the size of average losers. The edge is modest, it lags buy-and-hold in
+strong rallies (the desk is mostly in cash), and it was negative on one of three alternative coin sets
+tested (BNB, XRP, DOGE). About 100 trades per year is too few to be statistically sure of anything: treat
+these numbers as "plausibly positive", not proven. Independent reviews also found that 4-hour candles
+(`CANDLE_INTERVAL=4h`, `--interval 4h`) and holding at most one or two positions reduce fees further; with
+the checklist in place they changed results by less than a point either way, so the defaults stay at
+1-hour candles and 3 positions. Any change to the strategy should show an improvement here on at least two
+different periods and two coin sets before it is trusted, and even then live results will differ.
+
+**Known limits of the risk controls (from the same reviews):** at 10% per position with a 2 ATR stop, a
+losing trade costs about 0.15% of the account, so the 3% daily limit almost never triggers (it remains a
+backstop for flash crashes). The 10% overall brake is the control that matters: in the past year's prices it
+would have tripped and saved 6-16 points. When it trips, the desk now pauses new buys for 14 days
+(`BRAKE_PAUSE_DAYS`), then resumes at half size until the account has recovered half the loss.
 
 ## Reading the report
 

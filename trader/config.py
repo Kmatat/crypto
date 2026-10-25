@@ -54,10 +54,11 @@ class Settings:
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     starting_balance: float = 10_000.0
-    max_position_pct: float = 0.15   # ceiling per position; actual size comes from RISK_PER_TRADE_PCT
+    max_position_pct: float = 0.10   # ceiling per position; RISK_PER_TRADE_PCT can only make positions smaller
     max_open_positions: int = 3
     max_daily_loss_pct: float = 0.03
     max_drawdown_pct: float = 0.10   # overall brake: no new buys once equity is this far below the start
+    brake_pause_days: int = 14       # after the brake trips: pause this long, then resume at half size
     min_confidence: float = 0.60
     stop_loss_atr: float = 2.0
     take_profit_atr: float = 4.0     # 2:1 reward-to-risk with the 2 ATR stop
@@ -112,10 +113,11 @@ class Settings:
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
             auto_update=_b("AUTO_UPDATE", True),
             starting_balance=_f("STARTING_BALANCE_USDT", 10_000),
-            max_position_pct=_f("MAX_POSITION_PCT", 0.15),
+            max_position_pct=_f("MAX_POSITION_PCT", 0.10),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),
             max_daily_loss_pct=_f("MAX_DAILY_LOSS_PCT", 0.03),
             max_drawdown_pct=_f("MAX_DRAWDOWN_PCT", 0.10),
+            brake_pause_days=int(os.getenv("BRAKE_PAUSE_DAYS", 14)),
             min_confidence=_f("MIN_CONFIDENCE", 0.60),
             stop_loss_atr=_f("STOP_LOSS_ATR", 2.0),
             take_profit_atr=_f("TAKE_PROFIT_ATR", 4.0),

@@ -34,15 +34,25 @@ class RiskManagerAgent:
                     "reason": f"daily loss limit hit ({day_pnl:.2%}) - no new buys until tomorrow (UTC)"}
         start = portfolio.get("starting_balance") or portfolio["equity"]
         drawdown = portfolio["equity"] / start - 1
-        if self.s.max_drawdown_pct and drawdown <= -self.s.max_drawdown_pct:
-            return {"approved": False, "limit": "overall",
-                    "reason": f"overall loss limit hit ({drawdown:.2%} vs start) - no new buys; review the report"}
+        size_factor = 1.0
+        if self.s.max_drawdown_pct:
+            tripped_days = portfolio.get("brake_tripped_days")  # None = brake not active
+            if drawdown <= -self.s.max_drawdown_pct and tripped_days is None:
+                return {"approved": False, "limit": "overall", "trip": True,
+                        "reason": f"overall loss limit hit ({drawdown:.2%} vs start) - no new buys for "
+                                  f"{self.s.brake_pause_days} days, then half size until the account recovers"}
+            if tripped_days is not None:
+                if tripped_days < self.s.brake_pause_days:
+                    return {"approved": False, "limit": "overall",
+                            "reason": f"overall loss limit: paused, {self.s.brake_pause_days - tripped_days:.0f} days left"}
+                if drawdown <= -self.s.max_drawdown_pct / 2:
+                    size_factor = 0.5  # recovering: trade, but at half size
 
         stop = price - self.s.stop_loss_atr * atr
         take = price + self.s.take_profit_atr * atr
         if stop <= 0:
             return {"approved": False, "reason": "volatility too high for a sensible stop-loss"}
-        budget = min(portfolio["equity"] * self.s.max_position_pct, portfolio["cash"] * 0.98)
+        budget = min(portfolio["equity"] * self.s.max_position_pct * size_factor, portfolio["cash"] * 0.98)
         if self.s.risk_per_trade_pct:
             # Turtle-style sizing: a stop-loss should cost a fixed small share of equity, so calm coins get
             # bigger positions and wild coins smaller ones; MAX_POSITION_PCT stays as the ceiling.
@@ -52,7 +62,7 @@ class RiskManagerAgent:
             return {"approved": False, "reason": f"not enough free cash (${portfolio['cash']:.2f})"}
         return {
             "approved": True,
-            "reason": "within limits",
+            "reason": "within limits" if size_factor == 1 else "within limits (half size while recovering)",
             "quote_amount": round(budget, 2),
             "stop_loss": stop,
             "take_profit": take,
