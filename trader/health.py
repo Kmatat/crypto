@@ -376,3 +376,131 @@ def pulse_text(bot, j: Journal, hours: float, version: str) -> str:
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal: send /health")
     lines.append(f"Next check in about {(bot.pace or {}).get('minutes', bot.s.cycle_minutes)} min. /health for details.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- /diagnose: the live desk versus the rules' replay
+def coin_funnel(j: Journal, since: str) -> dict[str, dict]:
+    """Per coin: checks, buy signals, approved, refusals by reason, Claude and news vetoes, signals the head trader's
+    portfolio tilt removed (score cleared the strategy's threshold but not the tilted one)."""
+    out: dict[str, dict] = {}
+    rows = j.db.execute("SELECT symbol, action, rules_action, risk_approved, risk_reason, source, reasoning, "
+                        "combined_score, reports FROM decisions WHERE ts >= ?", (since,)).fetchall()
+    for r in rows:
+        c = out.setdefault(r["symbol"], {"decisions": 0, "buy_signals": 0, "approved": 0, "refused": {}, "claude": 0,
+                                         "news": 0, "tilted": 0, "best_score": None})
+        c["decisions"] += 1
+        score = r["combined_score"]
+        if score is not None:
+            c["best_score"] = score if c["best_score"] is None else max(c["best_score"], score)
+        if r["rules_action"] != "BUY":
+            try:
+                head = (json.loads(r["reports"] or "{}").get("head") or {})
+            except ValueError:
+                head = {}
+            if head.get("why", "").startswith("+") and score is not None and score < head.get("threshold", 9) \
+                    and score >= head.get("threshold", 9) - 0.05 * head["why"].count("+"):
+                c["tilted"] += 1
+            continue
+        c["buy_signals"] += 1
+        if r["action"] == "BUY":
+            if r["risk_approved"]:
+                c["approved"] += 1
+            else:
+                for label in _refusal(r["risk_reason"]):
+                    c["refused"][label] = c["refused"].get(label, 0) + 1
+        elif (r["reasoning"] or "").startswith("Clearly negative news"):
+            c["news"] += 1
+        elif str(r["source"] or "").startswith("claude"):
+            c["claude"] += 1
+    return out
+
+
+def check_gaps(j: Journal, since: str, pace_minutes: float) -> dict:
+    """When was the desk not checking the market? (one equity row is written per check)"""
+    ts = [dt.datetime.fromisoformat(r[0]) for r in j.db.execute("SELECT ts FROM equity WHERE ts >= ? ORDER BY rowid", (since,))]
+    limit = dt.timedelta(minutes=2 * max(pace_minutes, 15) + 15)
+    gaps = [(a, b) for a, b in zip(ts, ts[1:]) if b - a > limit]
+    longest = max(gaps, key=lambda g: g[1] - g[0], default=None)
+    return {"checks": len(ts), "gaps": len(gaps), "down_hours": round(sum((b - a).total_seconds() for a, b in gaps) / 3600, 1),
+            "longest": (longest[0].isoformat(timespec="minutes"), round((longest[1] - longest[0]).total_seconds() / 3600, 1))
+            if longest else None}
+
+
+def settings_lines(bot) -> list[str]:
+    s, base = bot.s, bot.base
+    card = getattr(bot, "card", None)
+    lines = [f"Strategy in force: stop {s.stop_loss_atr:g} ATR, target {s.take_profit_atr:g} ATR "
+             f"({s.take_profit_atr / s.stop_loss_atr:.1f}:1, rule minimum {s.min_reward_risk:g}:1), trailing {s.trail_atr:g} ATR, "
+             f"checks {', '.join(s.mentor_checks) or 'none'}, cooldown {s.cooldown_hours:g} h",
+             f"Size: {s.max_open_positions} positions, at most {s.max_position_pct:.0%} each, risk {s.risk_per_trade_pct:.1%} "
+             f"per trade, {s.interval} candles; coins: {', '.join(x.removesuffix('USDT') for x in base.symbols)}"
+             + (f" + up to {base.max_coins - len(base.symbols)} scout picks" if base.auto_coins else ""),
+             f"Decisions: buy threshold {thresholds_line(card) if card else 'common'}, minimum confidence "
+             f"{base.min_confidence:g}; Claude {'on (' + base.claude_model + ')' if bot.llm else 'off'}"
+             + (f", ${bot.llm.effective_daily_budget():.2f}/day cap" if bot.llm else "")]
+    return lines
+
+
+def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
+    """The owner's "check the logs": what the desk did versus what its own rules would have done on the same prices.
+    `replay(symbols, days)` returns a Backtest result for those coins over the period (None if unavailable)."""
+    since = since_iso(days * 24)
+    pace = (bot.pace or {}).get("minutes", bot.s.cycle_minutes)
+    coins = coin_funnel(j, since)
+    gaps = check_gaps(j, since, pace)
+    opened = j.db.execute("SELECT COUNT(*) FROM orders WHERE side='BUY' AND ok=1 AND ts >= ?", (since,)).fetchone()[0]
+    failed = j.db.execute("SELECT symbol, error, COUNT(*) n FROM orders WHERE ok=0 AND ts >= ? GROUP BY symbol, error "
+                          "ORDER BY n DESC LIMIT 3", (since,)).fetchall()
+    closed = j.db.execute("SELECT COUNT(*), COALESCE(SUM(pnl), 0), SUM(pnl > 0) FROM closed_trades WHERE closed_at >= ?",
+                          (since,)).fetchone()
+    lines = [f"🔎 Diagnosis, last {days:g} days", *settings_lines(bot)]
+    for p in bot.base.problems():
+        lines.append(f"🛑 Settings problem: {p}")
+    lines.append(f"\nDesk activity: {gaps['checks']} market checks"
+                 + (f"; not checking for {gaps['down_hours']} h in {gaps['gaps']} gap(s), longest {gaps['longest'][1]} h from "
+                    f"{gaps['longest'][0].replace('T', ' ')} UTC" if gaps["gaps"] else "; no gaps"))
+    lines.append(f"Live: {opened} buys filled, {closed[0]} trades closed ({closed[1]:+,.2f} USDT, {closed[2] or 0} winners)"
+                 + (" · order failures: " + "; ".join(f"{f['symbol']} x{f['n']}: {clean(f['error'], 80)}" for f in failed)
+                    if failed else ""))
+    totals = {"buy_signals": 0, "approved": 0, "claude": 0, "news": 0, "tilted": 0, "refused": {}}
+    lines.append("\nPer coin (buy signals → approved; what stopped the rest):")
+    for sym, c in sorted(coins.items(), key=lambda x: -x[1]["buy_signals"]):
+        stops = sorted(c["refused"].items(), key=lambda x: -x[1])
+        extra = [f"{k} {n}" for k, n in stops[:3]]
+        if c["claude"]:
+            extra.append(f"Claude veto {c['claude']}")
+        if c["news"]:
+            extra.append(f"bad news {c['news']}")
+        if c["tilted"]:
+            extra.append(f"portfolio tilt {c['tilted']}")
+        best = f", best score {c['best_score']:+.2f}" if c["best_score"] is not None else ""
+        lines.append(f"• {sym.removesuffix('USDT')}: {c['buy_signals']} → {c['approved']}"
+                     + (f" ({'; '.join(extra)})" if extra else "") + best)
+        for k in ("buy_signals", "approved", "claude", "news", "tilted"):
+            totals[k] += c[k]
+        for k, n in c["refused"].items():
+            totals["refused"][k] = totals["refused"].get(k, 0) + n
+    if not coins:
+        lines.append("• no decisions recorded in this period")
+    r = None
+    if replay is not None and coins:
+        try:
+            r = replay(sorted(coins), days)
+        except Exception as e:  # noqa: BLE001 - the replay needs the network; the rest of the report stands alone
+            lines.append(f"\n(The rules' replay could not run: {clean(e, 120)})")
+    if r is not None:
+        lines.append(f"\nThe rules alone on the same coins and prices (no news, no Claude, no head trader): {r['trades']} "
+                     f"trades, {r['return_pct']:+.2f}% (holding the coins: {r['basket_hold_pct']:+.1f}%)")
+        gap = r["trades"] - opened
+        if gap > max(2, r["trades"] * 0.3):
+            causes = sorted([("Claude vetoes", totals["claude"]), ("bad-news blocks", totals["news"]),
+                             ("the head trader's portfolio tilt", totals["tilted"])]
+                            + [(k, n) for k, n in totals["refused"].items()], key=lambda x: -x[1])
+            top = [f"{k} ({n})" for k, n in causes if n][:3]
+            lines.append(f"⚠️ The live desk opened {gap} fewer trades than its rules would have. "
+                         + (f"Largest live-only causes: {', '.join(top)}." if top else "")
+                         + (f" The desk was not checking for {gaps['down_hours']} h." if gaps["down_hours"] else ""))
+        else:
+            lines.append("✅ The live desk traded about as often as its rules: no hidden blocker. Fewer trades mean the "
+                         "market gave fewer signals that pass the rules.")
+    return "\n".join(lines)

@@ -5,6 +5,13 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.4 - 2026-10-25
+
+- `/diagnose [days]`: "check the logs" from the phone. The settings in force, every coin's buy signals and what
+  stopped each one (checklist rule, risk limit, Claude veto, bad news, the head trader's portfolio tilt), order
+  failures, hours the desk was not checking, and the number of trades its own rules would have made on the same
+  coins and real prices. When the live desk trades much less than its rules, the report names the largest causes.
+
 ## 1.4.3 - 2026-10-25
 
 Fixes from an independent review of 1.4.0 (22 confirmed findings).

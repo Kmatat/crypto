@@ -33,7 +33,7 @@ from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
-from .health import agents_text, funnel, health_text, judged_since, pulse_text, stuck_rule, write_json
+from .health import agents_text, diagnose_text, funnel, health_text, judged_since, pulse_text, stuck_rule, write_json
 
 log = logging.getLogger("trader")
 
@@ -48,6 +48,7 @@ HELP_TEXT = (
     "/playbook - what the desk has learned, as the head trader passes it to every agent, and how it spends the AI budget\n"
     "/health - is everything working? last check, errors, settings problems, updates, and why buys were refused\n"
     "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
+    "/diagnose [days] - the desk's records versus its own rules replayed on the same prices: what stopped each buy signal\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
@@ -344,6 +345,21 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
         tg.send_once("lab", f"⚠️ The weekly strategy lab failed: {e}. The champion strategy keeps trading.")
 
 
+def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict | None:
+    """The rule core over the same period and coins, with the strategy in force and real prices (for /diagnose).
+    Uses the card's own rules, so it never changes what the live desk decides meanwhile."""
+    from .agents.decision import DecisionAgent
+    from .backtest import Backtest, fetch_history
+    client = bot.market.client
+    if client is None:
+        return None
+    n = int(period + 1.5)
+    hist = {sym: fetch_history(client, sym, n, bot.s.interval) for sym in symbols}
+    btc = hist.get("BTCUSDT") or fetch_history(client, "BTCUSDT", n, bot.s.interval)
+    return Backtest(bot.s, hist, decision=DecisionAgent.for_card(bot.card) if bot.card else None,
+                    days=max(1, int(round(period))), btc_history=btc).run()
+
+
 def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     """Every PULSE_HOURS: what the desk did, so a silent phone always means something is wrong. And straight
     away, at most twice a day: one rule refusing every buy signal for a day (a sign of a broken setting)."""
@@ -507,6 +523,23 @@ def cmd_run(s: Settings, args) -> None:
                 days = 7.0
             return with_journal(s, lambda j: agents_text(bot, j, days))
 
+        def diagnose_now(arg: str = "") -> str:
+            try:
+                days = max(0.5, min(30.0, float(arg))) if arg.strip() else 7.0
+            except ValueError:
+                days = 7.0
+
+            def work() -> None:
+                try:
+                    tg.send_long(with_journal(s, lambda j: diagnose_text(
+                        bot, j, days, lambda symbols, period: rules_replay(bot, symbols, period))))
+                except Exception as e:  # noqa: BLE001 - a report must never take the desk down
+                    log.exception("Diagnosis failed")
+                    tg.send(f"⚠️ The diagnosis failed: {e}")
+            threading.Thread(target=work, daemon=True).start()
+            return (f"🔎 Reading the last {days:g} days of the desk's records and replaying its rules on the same prices. "
+                    "The report arrives here in a minute or two.")
+
         def notes_now() -> str:
             if not bot.notes.enabled:
                 return "The notebook is switched off for this journal."
@@ -554,6 +587,7 @@ def cmd_run(s: Settings, args) -> None:
             "/playbook": playbook_now,
             "/health": health_now,
             "/agents": agents_now,
+            "/diagnose": diagnose_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
