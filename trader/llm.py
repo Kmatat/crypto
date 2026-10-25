@@ -81,8 +81,11 @@ class ClaudeJSON:
         searches = (stu.get("web_search_requests") if isinstance(stu, dict)
                     else getattr(stu, "web_search_requests", 0)) or 0
         self._roll_day()
-        self._spent += tokens_in / 1e6 * price_in + (u.output_tokens or 0) / 1e6 * price_out + searches * WEB_SEARCH_USD
+        cost = tokens_in / 1e6 * price_in + (u.output_tokens or 0) / 1e6 * price_out + searches * WEB_SEARCH_USD
+        self._spent += cost
         self._save()
+        if self.store:
+            self.store.set("ai_spend_total", round((self.store.get("ai_spend_total") or 0) + cost, 6))
 
     def _create(self, timeout: float | None = None, **params):
         client = self.client.with_options(timeout=timeout) if timeout else self.client

@@ -165,6 +165,16 @@ class Orchestrator:
                 log.exception("Market data failed for %s", sym)
                 summary.append({"symbol": sym, "error": str(e)})
 
+        if ctx and not self.journal.get("benchmark_start"):  # first cycle: remember where the market was
+            prices = {sym: c["price"] for sym, c in ctx.items() if sym in self.s.symbols}
+            if "BTCUSDT" not in prices and self.market.client is not None:
+                try:
+                    prices["BTCUSDT"] = self.market.client.price("BTCUSDT")
+                except Exception as e:
+                    log.warning("Could not record the Bitcoin benchmark price: %s", e)
+            self.journal.set("benchmark_start", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                                                 "prices": prices})
+
         # 3. news (with a market snapshot, so the AI can set the pace) and forex
         positions = self.journal.positions()
         snapshot = {sym.removesuffix("USDT"): self._snapshot(c, sym in positions) for sym, c in ctx.items()}

@@ -1,6 +1,8 @@
 """Performance report: answers "how is the agent doing?" in business terms."""
 from __future__ import annotations
 
+import datetime as dt
+
 from .journal import Journal
 from .notify import clean
 
@@ -79,6 +81,101 @@ def print_report(p: dict) -> None:
 
 def _pct(v) -> str:
     return "n/a" if v is None else f"{v}%"
+
+
+# Demo-phase goals (Phase 1). Deliberately data, not an instruction to the AI: an AI told to "make X%"
+# takes more risk; the owner reads these lines and the code enforces the risk limits.
+GOALS = {
+    "weeks": 12,              # minimum evidence period
+    "closed_trades": 150,     # minimum sample before any verdict
+    "profit_factor": 1.3,     # after fees
+    "max_drawdown_pct": 10,   # worst drop from a peak
+    "execution_pct": 100,     # every order confirmed filled
+}
+
+
+def wilson(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% range the true win rate is likely in, given wins out of n trades."""
+    if n == 0:
+        return 0.0, 100.0
+    p, d = wins / n, 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / d
+    return round(max(0, centre - half) * 100, 1), round(min(1, centre + half) * 100, 1)
+
+
+def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
+    """Progress against the demo-phase goals, plus the benchmarks a fair judgement needs."""
+    prices = prices or {}
+    first = j.db.execute("SELECT ts FROM equity ORDER BY rowid LIMIT 1").fetchone()
+    weeks = 0.0
+    if first:
+        weeks = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(first[0])).total_seconds() / (7 * 86400)
+    trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades")]
+    wins = sum(1 for t in trades if t["pnl"] > 0)
+    lo, hi = wilson(wins, len(trades))
+    start = float(j.get("starting_balance"))
+
+    # exposure: share of the money that was actually in coins, averaged over the elapsed time
+    hours_total = max(weeks * 7 * 24, 1e-9)
+    exposure_hours = 0.0
+    for t in trades:
+        h = (dt.datetime.fromisoformat(t["closed_at"]) - dt.datetime.fromisoformat(t["opened_at"])).total_seconds() / 3600
+        exposure_hours += t["cost"] / start * h
+    now = dt.datetime.now(dt.timezone.utc)
+    for pos in j.positions().values():
+        h = (now - dt.datetime.fromisoformat(pos["opened_at"])).total_seconds() / 3600
+        exposure_hours += pos["cost"] / start * h
+    exposure_pct = min(100.0, exposure_hours / hours_total * 100)
+
+    bench = j.get("benchmark_start") or {}
+    moves = {sym: (prices[sym] / px - 1) * 100 for sym, px in bench.get("prices", {}).items() if prices.get(sym)}
+    btc = moves.get("BTCUSDT")
+    basket = sum(v for s, v in moves.items() if s != "BTCUSDT" or len(moves) == 1) / max(1, len([s for s in moves if s != "BTCUSDT" or len(moves) == 1])) if moves else None
+    blended = basket * exposure_pct / 100 if basket is not None else None
+    ai_cost_pct = float(j.get("ai_spend_total") or 0) / start * 100
+    net = p["return_pct"] - ai_cost_pct
+
+    checks = {
+        "weeks": (round(weeks, 1), GOALS["weeks"], weeks >= GOALS["weeks"]),
+        "closed_trades": (len(trades), GOALS["closed_trades"], len(trades) >= GOALS["closed_trades"]),
+        "profit_factor": (p["profit_factor"], GOALS["profit_factor"],
+                          p["profit_factor"] is not None and p["profit_factor"] >= GOALS["profit_factor"]),
+        "max_drawdown_pct": (p["max_drawdown_pct"], GOALS["max_drawdown_pct"], p["max_drawdown_pct"] <= GOALS["max_drawdown_pct"]),
+        "execution_pct": (p["execution_success_rate_pct"], GOALS["execution_pct"],
+                          p["execution_success_rate_pct"] in (None, 100.0)),
+        "net_return_positive": (round(net, 2), 0, net > 0),
+    }
+    evidence_ready = checks["weeks"][2] and checks["closed_trades"][2]
+    verdict = ("collecting evidence" if not evidence_ready else
+               "PASS - demo goals met" if all(c[2] for c in checks.values()) else "FAIL - demo goals not met")
+    return {"checks": checks, "verdict": verdict, "win_rate_range": (lo, hi), "exposure_pct": round(exposure_pct, 1),
+            "vs_btc_pct": None if btc is None else round(btc, 2), "vs_basket_pct": None if basket is None else round(basket, 2),
+            "vs_blended_pct": None if blended is None else round(blended, 2), "ai_cost_pct": round(ai_cost_pct, 2),
+            "net_return_pct": round(net, 2)}
+
+
+def goals_text(g: dict, p: dict) -> str:
+    c = g["checks"]
+    mark = lambda ok: "✓" if ok else "…"
+    lines = [f"🎯 Demo goals: {g['verdict']}",
+             f"{mark(c['weeks'][2])} {c['weeks'][0]} of {c['weeks'][1]} weeks · "
+             f"{mark(c['closed_trades'][2])} {c['closed_trades'][0]} of {c['closed_trades'][1]} trades needed",
+             f"{mark(c['profit_factor'][2])} profit factor {c['profit_factor'][0] or 'n/a'} (target ≥ {c['profit_factor'][1]}) · "
+             f"{mark(c['max_drawdown_pct'][2])} worst drop {c['max_drawdown_pct'][0]}% (limit {c['max_drawdown_pct'][1]}%) · "
+             f"{mark(c['execution_pct'][2])} orders filled {_pct(c['execution_pct'][0])}",
+             f"Win rate so far {_pct(p['win_rate_pct'])}, likely true range {g['win_rate_range'][0]}-{g['win_rate_range'][1]}%",
+             f"Return {p['return_pct']:+.2f}% · AI cost {g['ai_cost_pct']:.2f}% · net {g['net_return_pct']:+.2f}% (vs cash)"]
+    bench = []
+    if g["vs_btc_pct"] is not None:
+        bench.append(f"Bitcoin {g['vs_btc_pct']:+.1f}%")
+    if g["vs_basket_pct"] is not None:
+        bench.append(f"your coins {g['vs_basket_pct']:+.1f}%")
+    if g["vs_blended_pct"] is not None:
+        bench.append(f"fair blend at your {g['exposure_pct']}% exposure {g['vs_blended_pct']:+.1f}%")
+    if bench:
+        lines.append("Same period, just holding: " + " · ".join(bench))
+    return "\n".join(lines)
 
 
 def report_text(p: dict, title: str = "📊 Performance report") -> str:

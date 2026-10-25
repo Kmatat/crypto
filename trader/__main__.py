@@ -23,7 +23,7 @@ from .config import PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .notify import Telegram, pace_message, scout_message, trade_messages
 from .orchestrator import Orchestrator
-from .report import performance, print_report, report_text, status_text, watchlist_text
+from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
 
 log = logging.getLogger("trader")
 
@@ -116,11 +116,12 @@ def cmd_check(s: Settings) -> int:
 
 
 def live_prices(s: Settings, j: Journal) -> dict[str, float]:
-    """Current real prices for open positions, so the report values them correctly."""
+    """Current real prices for open positions and benchmarks, so the report values them correctly."""
     from .binance_client import BinanceClient
     prices = {}
     if not s.offline:
-        for sym in j.positions():
+        bench = (j.get("benchmark_start") or {}).get("prices", {})
+        for sym in set(j.positions()) | set(bench):
             try:
                 prices[sym] = BinanceClient(PUBLIC_BASE_URL).price(sym)
             except Exception:
@@ -142,8 +143,10 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     today = now.date().isoformat()
     if not tg.enabled or now.hour < s.daily_report_hour_utc or bot.journal.get("last_daily_report") == today:
         return
-    text = report_text(performance(bot.journal, bot.last_price), title=f"☀️ Daily report {today}")
+    perf = performance(bot.journal, bot.last_price)
+    text = report_text(perf, title=f"☀️ Daily report {today}")
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
+    text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
     if tg.send(text):
         bot.journal.set("last_daily_report", today)
 
@@ -228,7 +231,9 @@ def cmd_run(s: Settings, args) -> None:
         tg.listen({
             "/update": update_now,
             "/version": version_text,
-            "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price))),
+            "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
+                                            + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
+                                                         performance(j, bot.last_price))),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
                                                                      status_extra(bot, s))),
             "/watchlist": lambda: with_journal(s, lambda j: watchlist_text(j.get("watchlist") or default_watchlist(s))),
@@ -326,7 +331,12 @@ def main() -> None:
     if args.cmd == "check":
         sys.exit(1 if cmd_check(s) else 0)
     if args.cmd == "report":
-        print_report(with_journal(s, lambda j: performance(j, live_prices(s, j))))
+        def show(j):
+            px = live_prices(s, j)
+            perf = performance(j, px)
+            print_report(perf)
+            print(goals_text(goals(j, perf, px), perf))
+        with_journal(s, show)
         return
     if args.cmd == "reset":
         from .setup_wizard import archive_journal

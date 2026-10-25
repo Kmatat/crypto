@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import random
 import time
+import zlib
 
 from ..binance_client import BinanceClient
 
@@ -19,6 +20,7 @@ class MarketDataAgent:
         self.offline = offline
         self._synthetic: dict[str, list[dict]] = {}
         self._daily: dict[str, tuple[float, list[float]]] = {}
+        self._rng: dict[str, random.Random] = {}
 
     def candles(self, symbol: str, limit: int = 200) -> list[dict]:
         if self.offline or self.client is None:
@@ -53,7 +55,8 @@ class MarketDataAgent:
     def _synthetic_candles(self, symbol: str, limit: int) -> list[dict]:
         """Random-walk prices for offline testing. Each call advances one candle."""
         series = self._synthetic.get(symbol)
-        rng = random.Random(hash(symbol) & 0xFFFF)
+        # one deterministic generator per coin: offline runs and tests repeat exactly
+        rng = self._rng.setdefault(symbol, random.Random(zlib.crc32(symbol.encode())))
         if series is None:
             price, series = _SEED_PRICES.get(symbol, 100.0), []
             now = int(time.time() * 1000)
@@ -63,7 +66,7 @@ class MarketDataAgent:
             self._synthetic[symbol] = series
         else:
             last = series[-1]
-            series.append(self._next(last["close"], last["time"] + 3_600_000, random.Random(), len(series)))
+            series.append(self._next(last["close"], last["time"] + 3_600_000, rng, len(series)))
         return series[-limit:]
 
     @staticmethod

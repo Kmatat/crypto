@@ -207,7 +207,7 @@ class FakeBroker:
 
 @pytest.fixture
 def bot():
-    s = Settings(offline=True, symbols=["BTCUSDT"])
+    s = Settings(offline=True, symbols=["BTCUSDT"], trail_atr=0)  # these tests are about the order flow, not trailing
     b = Orchestrator(s, Journal(":memory:", s.starting_balance))
     b.broker = FakeBroker(lambda sym: b.last_price[sym])
     b.execution = ExecutionAgent(b.broker)
