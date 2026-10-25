@@ -74,11 +74,34 @@ def test_impossible_strategies_are_refused_and_the_owner_champion_follows_the_se
 
 
 # ---------------------------------------------------------------- the funnel, the roster, strategy changes
-def row(j, action, rules_action, approved, reason, source="rules", reasoning="r"):
+def row(j, action, rules_action, approved, reason, source="rules", reasoning="r", minutes_ago=0):
     j.db.execute("INSERT INTO decisions (ts, symbol, action, confidence, source, combined_score, reasoning, risk_approved,"
                  " risk_reason, reports, rules_action) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                 (iso(), "BTCUSDT", action, 0.9, source, 0.5, reasoning, approved, reason, "{}", rules_action))
+                 (iso(minutes_ago), "BTCUSDT", action, 0.9, source, 0.5, reasoning, approved, reason, "{}", rules_action))
     j.db.commit()
+
+
+def test_the_stuck_alarm_ignores_refusals_from_before_the_strategy_in_force():
+    from trader.__main__ import maybe_pulse
+    from trader.health import judged_since
+    s = Settings(offline=True, symbols=["BTCUSDT"], pulse_hours=0)
+    bot = Orchestrator(s, Journal(":memory:", s.starting_balance))
+    j = bot.journal
+    for _ in range(33):  # the old desk: every buy refused by the reward rule, then the correction at start
+        row(j, "BUY", "BUY", 0, "master traders' checklist: reward not met", minutes_ago=120)
+    j.set("strategy_champion", {"card": StrategyCard.from_settings(s).to_dict(), "since": iso(5), "by": "owner settings",
+                                "previous": None})
+    alerts = []
+    tg = SimpleNamespace(enabled=True, send=lambda t: True, send_once=lambda k, t, every_hours=6: alerts.append(t))
+    maybe_pulse(bot, tg, s)
+    assert alerts == [] and stuck_rule(funnel(j, judged_since(j))) is None
+    bot.journal.set("heartbeat", {"ts": iso(), "cycle": 1})
+    text = health_text(bot, j, "1.4.2", iso(10), {"checked_at": iso()}, "1.4.2")
+    assert "Since the strategy in force took effect" in text and "refused every buy signal" not in text
+    for _ in range(25):  # the same fault under the strategy now in force is still caught
+        row(j, "BUY", "BUY", 0, "master traders' checklist: reward not met")
+    maybe_pulse(bot, tg, s)
+    assert alerts and "made under the current strategy" in alerts[0]
 
 
 def test_funnel_explains_what_happened_to_each_buy_signal():

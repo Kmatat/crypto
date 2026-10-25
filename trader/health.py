@@ -138,6 +138,13 @@ def funnel_text(f: dict) -> str:
     return "\n".join(lines)
 
 
+def judged_since(j: Journal, hours: float = 24) -> str:
+    """The stuck-rule alarm judges only decisions made under the strategy and settings now in force: refusals from
+    before a correction (for example the old take-profit fixed at start) say nothing about the corrected desk."""
+    state = j.get("strategy_champion") or {}
+    return max(since_iso(hours), state.get("since") or "")
+
+
 def stuck_rule(f: dict) -> tuple[str, int] | None:
     """A single refusal reason that blocked every buy signal (with enough signals to mean something)."""
     if f["buy_signals"] < STUCK_MIN_SIGNALS or f["approved"]:
@@ -329,7 +336,13 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
         lines.append(f"🔧 Corrected at start: {m}")
     f = funnel(j, since_iso(24))
     lines.append("\nLast 24 hours:\n" + funnel_text(f))
-    if (stuck := stuck_rule(f)):
+    since = judged_since(j)
+    current = funnel(j, since) if since > since_iso(24) else f
+    if since > since_iso(24):
+        lines.append(f"Since the strategy in force took effect ({since[11:16]} UTC): {current['buy_signals']} buy signals, "
+                     f"{current['approved']} approved" + ("; refused: " + ", ".join(f"{k} {n}" for k, n in current["refused"].items())
+                                                         if current["refused"] else ""))
+    if (stuck := stuck_rule(current)):
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal ({stuck[1]} of {stuck[1]}): check the settings")
     errors = [e for e in j.events(since=since_iso(24)) if e["kind"] == "error"]
     lines.append(f"Errors: {len(errors)}" + (f", last {ago(errors[-1]['ts'])}: {clean(errors[-1]['text'], 200)}" if errors else ""))
@@ -348,7 +361,7 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
     bad = [r for r in roster_rows if r["status"] == "failing"]
     lines.append(f"Agents: {sum(r['status'] == 'working' for r in roster_rows)} of {len(roster_rows)} working"
                  + (" · failing: " + ", ".join(r["name"] for r in bad) if bad else "") + " (details: /agents)")
-    verdict = "🛑 Needs attention" if (problems or late or bad or stuck_rule(f)) else "✅ All systems working"
+    verdict = "🛑 Needs attention" if (problems or late or bad or stuck_rule(current)) else "✅ All systems working"
     return verdict + "\n" + "\n".join(lines)
 
 
@@ -359,7 +372,7 @@ def pulse_text(bot, j: Journal, hours: float, version: str) -> str:
     errors = sum(1 for e in j.events(since=since_iso(hours)) if e["kind"] == "error")
     lines = [f"💓 Desk pulse, last {hours:g} h · version {version}", funnel_text(f),
              f"Agents working: {working} of {len(rows)} · errors: {errors}"]
-    if (stuck := stuck_rule(f)):
+    if (stuck := stuck_rule(funnel(j, judged_since(j)))):
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal: send /health")
     lines.append(f"Next check in about {(bot.pace or {}).get('minutes', bot.s.cycle_minutes)} min. /health for details.")
     return "\n".join(lines)

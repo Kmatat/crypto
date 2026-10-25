@@ -33,7 +33,7 @@ from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
-from .health import agents_text, funnel, health_text, pulse_text, since_iso, stuck_rule, write_json
+from .health import agents_text, funnel, health_text, judged_since, pulse_text, stuck_rule, write_json
 
 log = logging.getLogger("trader")
 
@@ -337,10 +337,11 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
 def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     """Every PULSE_HOURS: what the desk did, so a silent phone always means something is wrong. And straight
     away, at most twice a day: one rule refusing every buy signal for a day (a sign of a broken setting)."""
-    f = funnel(bot.journal, since_iso(24))
+    f = funnel(bot.journal, judged_since(bot.journal))  # only decisions under the strategy now in force
     if (stuck := stuck_rule(f)):
-        tg.send_once("stuck-rule", f"🛑 '{stuck[0]}' refused every one of the {stuck[1]} buy signals in the last 24 hours. "
-                                   "That usually means a setting the rule can never accept. Send /health.", every_hours=12)
+        tg.send_once("stuck-rule", f"🛑 '{stuck[0]}' refused every one of the {stuck[1]} buy signals made under the current "
+                                   "strategy (last 24 hours at most). That usually means a setting the rule can never "
+                                   "accept. Send /health.", every_hours=12)
     if not tg.enabled or not s.pulse_hours:
         return
     last = bot.journal.get("last_pulse")

@@ -5,6 +5,12 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.2 - 2026-10-25
+
+- Fix: the "one rule refused every buy signal" alarm judged the last 24 hours, so right after 1.4.1 corrected the
+  old take-profit it reported the refusals made before the correction. It now judges only decisions made under
+  the strategy and settings in force; `/health` shows those separately ("Since the strategy in force took effect").
+
 ## 1.4.1 - 2026-10-25
 
 - Fix (the reason no trades happened): settings files written before 1.3.0 pinned `TAKE_PROFIT_ATR=3.0`, the
