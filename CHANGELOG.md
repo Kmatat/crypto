@@ -5,6 +5,12 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.3.3 - 2026-10-25
+
+- Fix: two tests read the real `.env` of the machine they ran on, so the update check failed on any server
+  whose settings were written by the current setup wizard (its `SETTINGS_VERSION=2` line changed what the
+  test expected). Every test now sees an empty settings file; the server's configuration is never read by tests.
+
 ## 1.3.2 - 2026-10-25
 
 - The automated tests that guard every update finish about four times faster, so they fit the small free
