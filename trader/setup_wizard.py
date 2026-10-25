@@ -14,7 +14,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from .binance_client import BinanceClient, BinanceError
-from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, SETTINGS_VERSION, TESTNET_BASE_URL, check_minutes
+from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, SETTINGS_VERSION, TESTNET_BASE_URL, check_minutes, legacy_take_profit
 from .llm import MODEL_CHOICES, ClaudeJSON
 from .notify import Telegram
 
@@ -101,6 +101,10 @@ class Wizard:
         self.v: dict[str, str] = dict(self.old)
         if self.v.get("CYCLE_MINUTES"):  # files from before 15-minute checks: move the old 60 default to 15
             self.v["CYCLE_MINUTES"] = str(check_minutes(self.v["CYCLE_MINUTES"], self.v.get("SETTINGS_VERSION")))
+        take, _ = legacy_take_profit(self.v.get("TAKE_PROFIT_ATR"), self.v.get("SETTINGS_VERSION"),
+                                     self.v.get("MIN_REWARD_RISK"))
+        if take is not None:  # old default that the checklist can never pass (see config.legacy_take_profit)
+            self.v["TAKE_PROFIT_ATR"] = f"{take:.1f}"
         self.v["SETTINGS_VERSION"] = SETTINGS_VERSION
 
     # ---- small input helpers ----

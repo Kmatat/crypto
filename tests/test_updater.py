@@ -53,7 +53,7 @@ def make(server, tg, *, auto=True, test_cmd=OK_CMD, active=True):
     u = Updater(Settings(auto_update=auto), tg=tg, root=server, status_path=server / "data" / "update-status.json",
                 request_path=server / "data" / "update-requested", install_cmd=OK_CMD, test_cmd=test_cmd,
                 restart=lambda: calls.append("restart"), is_active=lambda: active, settle_seconds=0,
-                say=lambda *a: None)
+                say=lambda *a: None, restart_wait=0)
     return u, calls
 
 

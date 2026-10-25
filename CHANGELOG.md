@@ -5,6 +5,30 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.4.1 - 2026-10-25
+
+- Fix (the reason no trades happened): settings files written before 1.3.0 pinned `TAKE_PROFIT_ATR=3.0`, the
+  default of the time. With the 2 ATR stop that is 1.5:1, and the checklist's 2:1 reward rule refused every
+  buy. Such a value is now treated as the old default and replaced by 4.0 at start (kept if you also set
+  `MIN_REWARD_RISK` to 1.5 or less, which means you chose it); the strategy in force follows; Telegram tells
+  you once; `desk setup` saves it to the file. The settings file format is now version 3.
+- Settings that make trading impossible (a target the reward rule can never accept, a position below the $10
+  minimum) are reported at start and in `/health`; the laboratory refuses strategy cards with such a target.
+- One refusal rule blocking every buy signal for a day now triggers its own alert, within hours.
+- `/health`: is everything working - running version, last market check, errors, settings problems, update
+  state, and what happened to every buy signal in the last 24 hours (the decision funnel).
+- `/agents [days]`: the 14 agents and what each did (working, idle, off, failing), the strategy in force, and the
+  strategies created, examined, promoted, rejected or rolled back, plus the coins added or removed.
+- A pulse every `PULSE_HOURS` (default 6): checks done, buy signals and what happened to them, errors. A silent
+  phone now always means something is wrong.
+- Watchdog: the update job (every 30 minutes, a separate process) alerts when the desk has stopped checking the
+  market, and restarts it if it stays stuck.
+- Update messages are reliable: the job reports every outcome, including a crash or the server's time limit
+  stopping it; an interrupted update is finished or undone by the next check; after a restart it waits until
+  the new desk confirms its version; and the desk itself confirms "Update confirmed: now running version X".
+- `/version` says when newer code is installed but the desk has not restarted onto it yet. Commands sent while
+  the desk was restarting are answered (if under 15 minutes old) instead of being dropped.
+
 ## 1.4.0 - 2026-10-25
 
 - Buy and sell thresholds are no longer one fixed number for every coin. A strategy card can carry a

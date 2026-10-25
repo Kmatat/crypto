@@ -18,6 +18,7 @@ import requests
 log = logging.getLogger(__name__)
 API = "https://api.telegram.org/bot{token}/{method}"
 MAX_LEN = 4000  # Telegram's limit is 4096 characters
+RECENT_SECONDS = 900  # a command sent while the desk restarted is still answered if it is this recent
 
 
 class Telegram:
@@ -118,13 +119,22 @@ class Telegram:
         t.start()
         return t
 
-    def _poll(self, handlers: dict[str, Callable[[], str]]) -> None:
+    def catch_up(self, handlers: dict[str, Callable[[], str]]) -> int | None:
+        """At start: commands sent while the desk was restarting are answered if recent; old ones are skipped
+        (a week-old /update or /lab should not run now). Returns the offset to continue from."""
         offset = None
-        try:  # skip commands sent while the desk was offline
-            pending = self.call("getUpdates", offset=-1, timeout=15)
+        try:
+            pending = self.call("getUpdates", timeout=0)
+            recent = [u for u in pending if time.time() - (u.get("message") or {}).get("date", 0) <= RECENT_SECONDS]
             offset = pending[-1]["update_id"] + 1 if pending else None
+            if recent:
+                self.handle(recent, handlers, offset)
         except Exception as e:
             log.warning("Telegram listener start failed: %s", self.redact(e))
+        return offset
+
+    def _poll(self, handlers: dict[str, Callable[[], str]]) -> None:
+        offset = self.catch_up(handlers)
         while True:
             try:
                 offset = self.handle(self._get_updates(offset), handlers, offset)

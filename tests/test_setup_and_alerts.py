@@ -77,7 +77,7 @@ def test_wizard_first_run_writes_private_env(wiz):
     assert not answers  # every question answered, none extra
     v = dotenv_values(env)
     assert v["AI_DAILY_BUDGET_USD"] == "5" and v["AUTO_COINS"] == "true" and v["MAX_COINS"] == "8"
-    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "2"
+    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "3"
     assert v["TRADING_MODE"] == "testnet" and v["BINANCE_TESTNET_API_KEY"] == "KEY"
     assert v["STARTING_BALANCE_USDT"] == "4500"
     assert v["CLAUDE_MODEL"] == "claude-sonnet-5-5" and v["ANTHROPIC_API_KEY"] == "sk-ant-good"
@@ -301,7 +301,7 @@ def test_wizard_moves_old_hourly_setting_to_15_minutes(wiz):
     env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nCYCLE_MINUTES=60\nSYMBOLS=BTCUSDT\n")
     make(["", "", "n", "n", "", "n", ""]).run()  # Enter on the interval question keeps the new default
     v = dotenv_values(env)
-    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "2"
+    assert v["CYCLE_MINUTES"] == "15" and v["SETTINGS_VERSION"] == "3"
 
 
 def test_wizard_max_coins_never_below_core_count(wiz):
@@ -340,3 +340,16 @@ def test_pairing_code_picks_the_right_chat(monkeypatch):
         {"update_id": 4, "message": {"chat": {"id": 8, "type": "private"}, "text": "my 482100 guess"}},  # not exact
     ])
     assert tg.latest_chat_id("482100") == "42" and tg.latest_chat_id("000000") is None
+
+
+def test_wizard_moves_the_old_take_profit_default_that_blocked_every_buy(wiz):
+    env, make = wiz
+    env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=2\nSTOP_LOSS_ATR=2.0\n"
+                   "TAKE_PROFIT_ATR=3.0\nSYMBOLS=BTCUSDT\n")
+    make(["", "", "n", "n", "", "n", ""]).run()
+    v = dotenv_values(env)
+    assert v["TAKE_PROFIT_ATR"] == "4.0" and v["SETTINGS_VERSION"] == "3"
+    env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=2\nTAKE_PROFIT_ATR=3.0\n"
+                   "MIN_REWARD_RISK=1.5\nSYMBOLS=BTCUSDT\n")
+    make(["", "", "n", "n", "", "n", ""]).run()
+    assert dotenv_values(env)["TAKE_PROFIT_ATR"] == "3.0"   # chosen on purpose together with a 1.5:1 minimum

@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import logging
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -31,7 +32,37 @@ STATUS = DATA / "update-status.json"
 REQUEST = DATA / "update-requested"
 RESTART = DATA / "restart-requested"   # consumed by the root-owned crypto-desk-restart service
 LOCKFILE = "requirements.lock"
-TEST_TIMEOUT = 1500   # seconds; the systemd unit allows 2700 for the whole job (pull, install, tests, restart)
+TEST_TIMEOUT = 1500   # seconds, at most; the job's time budget usually leaves less (see JOB_BUDGET)
+JOB_BUDGET = 1700     # servers installed before 1.3.2 stop the whole job after 1800 s: stay inside that
+RESTART_WAIT = 660    # the desk finishes its current market check before restarting (systemd allows 600 s)
+DESK_STARTED = DATA / "desk-started.json"   # written by the desk at start: its version and revision
+HEARTBEAT = DATA / "heartbeat.json"         # written by the desk after every market check (for the watchdog)
+
+
+class Interrupted(Exception):
+    """The system stopped the update job (SIGTERM), usually because it ran longer than allowed."""
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def revision(root: Path = ROOT) -> str | None:
+    try:
+        return git(root, "rev-parse", "HEAD")
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def installed_version(root: Path = ROOT) -> str | None:
+    """The release number of the code on disk (may be newer than the running desk until it restarts)."""
+    try:
+        return parse_version((Path(root) / "trader" / "__init__.py").read_text())
+    except OSError:
+        return None
 
 
 def now() -> str:
@@ -71,8 +102,11 @@ def updater_installed(status_path: Path = STATUS) -> bool:
 
 
 def git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True,
-                          timeout=120).stdout.strip()
+    try:
+        return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True,
+                              timeout=120).stdout.strip()
+    except subprocess.TimeoutExpired as e:  # a hung network call: report it like any other git failure
+        raise subprocess.CalledProcessError(1, e.cmd, stderr=f"git {args[0]} timed out after 120 s") from None
 
 
 def parse_version(source: str) -> str | None:
@@ -95,11 +129,18 @@ def version_text(root: Path = ROOT, status_path: Path = STATUS) -> str:
         lines = [f"🏷️ Running version {__version__} (revision {sha}, {date[:10]}): {subject}"]
     except (subprocess.SubprocessError, OSError, ValueError):
         lines = [f"🏷️ Running version {__version__} (not a git checkout, so the exact revision is unknown)"]
+    on_disk = installed_version(root)
+    if on_disk and on_disk != __version__:
+        lines.append(f"⚠️ Version {on_disk} is installed but the desk is still running {__version__}: it switches at "
+                     "the next restart.")
     st = read_status(status_path)
     if not st:
         lines.append("Automatic updates are not set up on this machine.")
         return "\n".join(lines)
     checked = st.get("checked_at", "")[:16].replace("T", " ")
+    if st.get("in_progress"):
+        lines.append(f"⏳ An update is in progress or was interrupted during the {st['in_progress'].get('step')} step "
+                     "(the next check finishes or undoes it).")
     if st.get("behind"):
         label = f"version {st['incoming_version']}" if st.get("incoming_version") else "a new version"
         lines.append(f"🆕 Update available: {label} ({st['behind']} new change{'s' if st['behind'] != 1 else ''}): "
@@ -118,8 +159,15 @@ def version_text(root: Path = ROOT, status_path: Path = STATUS) -> str:
 class Updater:
     def __init__(self, s: Settings, tg: Telegram | None = None, root: Path = ROOT, status_path: Path = STATUS,
                  request_path: Path = REQUEST, install_cmd: list[str] | None = None, test_cmd: list[str] | None = None,
-                 restart=None, is_active=None, settle_seconds: int = 20, say=print):
+                 restart=None, is_active=None, settle_seconds: int = 20, say=print, restart_wait: int = RESTART_WAIT,
+                 started_path: Path | None = None, heartbeat_path: Path | None = None, clock=time.time):
         self.s = s
+        self.restart_wait = restart_wait
+        self.started_path = Path(started_path) if started_path else Path(status_path).parent / DESK_STARTED.name
+        self.heartbeat_path = Path(heartbeat_path) if heartbeat_path else Path(status_path).parent / HEARTBEAT.name
+        self.clock = clock
+        self._t0 = clock()
+        self._step = ""
         self.tg = tg if tg is not None else Telegram(s.telegram_token, s.telegram_chat_id)
         self.root, self.status_path, self.request_path = Path(root), Path(status_path), Path(request_path)
         self.install_cmd = install_cmd or [sys.executable, "-m", "pip", "install", "-q", "-r", LOCKFILE]
@@ -180,15 +228,119 @@ class Updater:
 
     # ---- the job ----
     def run(self, force: bool = False, check_only: bool = False) -> dict:
+        """Every outcome of a requested update reaches the owner, including a crash or the system stopping the job."""
         requested = self.request_path.exists()
+        wanted = force or requested
+        self._t0 = self.clock()
         try:
-            return self._run_job(force or requested, check_only)
+            self._watchdog()
+            return self._run_job(wanted, check_only)
+        except Interrupted:
+            self._notify(f"⚠️ The update job was stopped by the server during the {self._step or 'check'} step, probably "
+                         f"because it ran longer than allowed. Trading continues on version {__version__}; the next "
+                         "check (within 30 minutes) finishes or undoes it and tells you.")
+            return self._status(result="failed", last_result=f"{now()[:16]} stopped by the server during {self._step}")
+        except Exception as e:  # noqa: BLE001 - never fail silently: the owner is waiting for an answer
+            msg = redact(str(e) or type(e).__name__)[-300:]
+            prev = read_status(self.status_path) or {}
+            if wanted or prev.get("notified_error") != msg:
+                self._notify(f"⚠️ The update job failed unexpectedly: {msg}\nTrading continues on version {__version__}. "
+                             "(Details: `desk logs-update` on the server.)")
+            return self._status(result="check_failed", last_check_error=msg, notified_error=msg)
         finally:
             if requested:
                 self.request_path.unlink(missing_ok=True)
 
+    def _progress(self, step: str, **fields) -> None:
+        """Remember how far an update got, so a job stopped half-way is finished or undone by the next one."""
+        self._step = step
+        st = read_status(self.status_path) or {}
+        self._status(in_progress={**(st.get("in_progress") or {}), **fields, "step": step, "since": now()})
+
+    def _recover(self, prev: dict) -> None:
+        """The previous job stopped half-way. If the new desk did start, the update succeeded: say so. Otherwise put
+        the code back to what the running desk was started from, so code and desk agree again."""
+        root = self.root
+        self._step = "recovery"
+        head = git(root, "rev-parse", "HEAD")
+        started = read_json(self.started_path) or {}
+        new, old = prev.get("new"), prev.get("old")
+        if new and head == new and started.get("revision") == new:
+            self._notify(f"🔄 Update to {prev.get('label', new[:7])} completed. (The job was stopped before it could "
+                         "report it; the new version is confirmed running.)")
+            self._status(in_progress=None, result="updated", behind=0, last_result=f"{now()[:16]} updated to "
+                         f"{prev.get('label', new[:7])} (confirmed late)")
+            return
+        if old and head != old:
+            git(root, "reset", "--hard", old)
+            self._run(self.install_cmd, 600)
+            if prev.get("step") in ("restart", "confirm"):
+                try:
+                    self.restart()
+                except (subprocess.SubprocessError, OSError):
+                    pass
+        tries = read_status(self.status_path) or {}
+        count = (tries.get("interrupted") or {}).get("count", 0) + 1 if (tries.get("interrupted") or {}).get("rev") == new else 1
+        self._notify(f"⚠️ The previous update attempt ({prev.get('label', '')}) was interrupted during the "
+                     f"{prev.get('step')} step and has been undone; the desk runs version {__version__}."
+                     + (" Trying again now." if count < 3 else " It was interrupted three times, so automatic installs of "
+                        "this version are paused; send /update to try again."))
+        self._status(in_progress=None, interrupted={"rev": new, "count": count},
+                     last_result=f"{now()[:16]} interrupted during {prev.get('step')}; undone")
+
+    def _watchdog(self) -> None:
+        """Runs with every update check (every 30 minutes): has the desk stopped checking the market?"""
+        beat = read_json(self.heartbeat_path)
+        if not beat or not beat.get("ts"):
+            return
+        try:
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(beat["ts"])).total_seconds() / 60
+        except ValueError:
+            return
+        limit = max(45.0, 3 * float(beat.get("next_minutes") or 15) + 15)
+        if str(beat.get("note", "")).startswith("weekly strategy lab"):
+            limit = max(limit, 120.0)
+        st = read_status(self.status_path) or {}
+        if age <= limit:
+            if st.get("stall_notified"):
+                self._notify("✅ Watchdog: the desk is checking the market again.")
+                self._status(stall_notified=None, stall_restarted=None)
+            return
+        if st.get("stall_notified") != beat["ts"]:
+            active = self.is_active()
+            self._notify(f"⚠️ Watchdog: the desk has not finished a market check for {age:.0f} minutes (last one at "
+                         f"{beat['ts'][11:16]} UTC). " + ("Its service is running, so it is probably stuck; it will be "
+                                                          "restarted if this continues." if active else
+                                                          "Its service is not running; the server normally restarts it "
+                                                          "within a minute. If not, run `desk start` on the server."))
+            self._status(stall_notified=beat["ts"])
+        elif age > 2 * limit and st.get("stall_restarted") != beat["ts"] and self.is_active():
+            self._notify(f"🔁 Watchdog: restarting the desk, stuck for {age:.0f} minutes. Open positions keep their "
+                         "stop-loss and take-profit on the exchange meanwhile.")
+            self._status(stall_restarted=beat["ts"])
+            try:
+                self.restart()
+            except (subprocess.SubprocessError, OSError) as e:
+                self._notify(f"⚠️ Watchdog: the restart did not work: {e}")
+
+    def _wait_for_desk(self, new_rev: str, since: str) -> tuple[bool, bool]:
+        """After a restart: (running, confirmed). Confirmed = the new desk wrote its start file with the new
+        revision. Desks before 1.4.1 do not write it, so then only the service state is checked."""
+        deadline = self.clock() + self.restart_wait
+        while self.clock() < deadline:
+            st = read_json(self.started_path) or {}
+            if st.get("revision") == new_rev and st.get("started_at", "") >= since:
+                time.sleep(self.settle_seconds)  # a crash right after start shows up as "not active"
+                return self.is_active(), True
+            time.sleep(self.poll_seconds)
+        time.sleep(self.settle_seconds)
+        return self.is_active(), False
+
     def _run_job(self, wanted: bool, check_only: bool) -> dict:
         root = self.root
+        prev = (read_status(self.status_path) or {}).get("in_progress")
+        if prev:
+            self._recover(prev)
         if git(root, "status", "--porcelain", "--untracked-files=no"):
             st = self._status(result="blocked", last_result="blocked: files were changed by hand on the server")
             if wanted:
@@ -235,39 +387,56 @@ class Updater:
                 self._status(notified=remote)
             return st
 
+        st = read_status(self.status_path) or {}
+        tried = st.get("interrupted") or {}
+        if not wanted and tried.get("rev") == remote and tried.get("count", 0) >= 3:
+            return self._status(result="paused", head=old[:7], remote=remote[:7], behind=behind, incoming=incoming,
+                                incoming_version=new_version)
+
         # ---- apply ----
         self.say(f"Updating {version_string(root)} -> {new_label}: {incoming}")
+        if wanted:
+            self._notify(f"⏳ Installing {new_label}: downloading, testing, then restarting the desk. This takes a few "
+                         "minutes on this server; you get the result here.")
+        self._progress("download", old=old, new=remote, label=new_label)
         try:
             git(root, "pull", "--ff-only", "--quiet", "origin", branch)
         except subprocess.CalledProcessError as e:
             msg = f"download failed: {(e.stderr or str(e)).strip()[-300:]}"
             self._notify(f"❌ Update failed, still running {old[:7]}. {msg}")
-            return self._status(result="failed", last_result=f"{now()[:16]} {msg}")
+            return self._status(result="failed", in_progress=None, last_result=f"{now()[:16]} {msg}")
 
+        self._progress("install")
         ok, out = self._run(self.install_cmd, 900)
         if not ok:
             why = self._rollback(old, f"library install failed: {out[-300:]}")
             self._notify(f"❌ Update failed and was undone. Still running {old[:7]}.\n{why}")
-            return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
+            return self._status(result="failed", in_progress=None, last_result=f"{now()[:16]} {why}", behind=behind)
 
-        # the free server is slow (a fraction of one processor core) and keeps trading while the tests run
-        ok, out = self._run(self.test_cmd, TEST_TIMEOUT)
+        # the free server is slow (a fraction of one processor core) and keeps trading while the tests run; the
+        # tests get what is left of the job's budget after keeping enough for the restart
+        self._progress("tests")
+        left = JOB_BUDGET - (self.clock() - self._t0) - self.restart_wait - 120
+        ok, out = self._run(self.test_cmd, int(max(300, min(TEST_TIMEOUT, left))))
         if not ok:
             summary = test_summary(out)
             why = self._rollback(old, f"the new version failed its tests: {summary}")
             self._notify(f"❌ Update rejected: the new version failed its automated tests, so the old version "
                          f"({version_string(root)}) stays.\nWhat failed: {summary}\n"
                          "(Full output: `desk logs-update` on the server.)")
-            return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
+            return self._status(result="failed", in_progress=None, last_result=f"{now()[:16]} {why}", behind=behind)
 
+        self._progress("restart")
+        restart_at = now()
         try:
             self.restart()
         except (subprocess.SubprocessError, OSError) as e:
             why = self._rollback(old, f"restart command failed: {e}")
             self._notify(f"❌ Update installed but the desk could not be restarted; undone. {why}")
-            return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
-        time.sleep(self.settle_seconds)
-        if not self.is_active():
+            return self._status(result="failed", in_progress=None, last_result=f"{now()[:16]} {why}", behind=behind)
+        self._progress("confirm")
+        running, confirmed = self._wait_for_desk(remote, restart_at)
+        if not running:
             why = self._rollback(old, "the new version did not start")
             try:
                 self.restart()
@@ -275,11 +444,13 @@ class Updater:
                 pass
             self._notify(f"❌ The new version crashed on start, so the previous version ({old[:7]}) was restored "
                          "and restarted. Details are in `desk logs` on the server.")
-            return self._status(result="failed", last_result=f"{now()[:16]} {why}", behind=behind)
+            return self._status(result="failed", in_progress=None, last_result=f"{now()[:16]} {why}", behind=behind)
 
-        self._notify(f"🔄 Updated to {new_label} and restarted.\nWhat changed: {incoming}")
+        self._notify(f"🔄 Updated to {new_label} and restarted" + ("" if confirmed else
+                     " (the service is running; send /health to confirm the new version)") + f".\nWhat changed: {incoming}")
         return self._status(head=remote[:7], remote=remote[:7], behind=0, incoming="", incoming_version=None,
                             result="updated", last_check_error=None, version=new_version or __version__,
+                            in_progress=None, interrupted=None,
                             last_result=f"{now()[:16]} updated {__version__} ({old[:7]}) -> {new_label}")
 
 
@@ -290,6 +461,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--force", action="store_true", help="install even when automatic updates are off")
     args = ap.parse_args(argv)
     s = Settings.load()
+
+    def stopped(*_):
+        raise Interrupted()
+    signal.signal(signal.SIGTERM, stopped)  # the system's time limit: report it instead of vanishing
     try:
         st = Updater(s).run(force=args.force, check_only=args.check_only)
     except Exception as e:  # never die with a bare traceback: the status file is what /version reads

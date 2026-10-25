@@ -124,6 +124,9 @@ class StrategyCard:
             out.append(f"unknown checks {sorted(bad)}")
         if self.take_profit_atr < self.stop_loss_atr:
             out.append("take-profit must be at least the stop distance")
+        elif "reward" in self.checks and self.take_profit_atr / self.stop_loss_atr < self.min_reward_risk - 1e-9:
+            out.append(f"target {self.take_profit_atr:g} ATR / stop {self.stop_loss_atr:g} ATR is below the reward rule's "
+                       f"{self.min_reward_risk:g}:1: no buy could ever pass the checklist")
         return out
 
     def diff(self, other: "StrategyCard") -> list[str]:

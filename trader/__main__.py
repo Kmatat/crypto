@@ -14,6 +14,7 @@ import argparse
 import datetime as dt
 import fcntl
 import logging
+import os
 import signal
 import sys
 import threading
@@ -31,7 +32,8 @@ from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
 from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
-from .updater import version_string
+from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
+from .health import agents_text, funnel, health_text, pulse_text, since_iso, stuck_rule, write_json
 
 log = logging.getLogger("trader")
 
@@ -44,13 +46,15 @@ HELP_TEXT = (
     "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
     "/lab - run the weekly strategy lab now (takes a few minutes)\n"
     "/playbook - what the desk has learned, as the head trader passes it to every agent, and how it spends the AI budget\n"
+    "/health - is everything working? last check, errors, settings problems, updates, and why buys were refused\n"
+    "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
     "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
     "/help - this list\n\n"
     "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
-    "changes, and a daily report."
+    "changes, a short pulse every few hours (PULSE_HOURS), and a daily report."
 )
 
 
@@ -258,6 +262,7 @@ def send_notebook(bot: Orchestrator, tg: Telegram, caption: str, notes: Notes | 
 def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason: str) -> str:
     """Weekly research + exam + forward tests. Holds the trade lock: never overlaps a trading decision."""
     with trade_lock:
+        heartbeat(bot, note="weekly strategy lab running (no market checks until it finishes)")
         lab = Lab(bot.base, bot.journal, client=bot.market.client)
         research = ResearchAgent(bot.llm)
         lessons = research.lessons(bot.journal)
@@ -325,7 +330,72 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
         run_lab(bot, tg, trade_lock, "scheduled weekly run")
     except Exception as e:
         log.exception("Weekly lab failed")
+        bot.journal.event("error", f"Weekly lab failed: {e}")
         tg.send_once("lab", f"⚠️ The weekly strategy lab failed: {e}. The champion strategy keeps trading.")
+
+
+def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
+    """Every PULSE_HOURS: what the desk did, so a silent phone always means something is wrong. And straight
+    away, at most twice a day: one rule refusing every buy signal for a day (a sign of a broken setting)."""
+    f = funnel(bot.journal, since_iso(24))
+    if (stuck := stuck_rule(f)):
+        tg.send_once("stuck-rule", f"🛑 '{stuck[0]}' refused every one of the {stuck[1]} buy signals in the last 24 hours. "
+                                   "That usually means a setting the rule can never accept. Send /health.", every_hours=12)
+    if not tg.enabled or not s.pulse_hours:
+        return
+    last = bot.journal.get("last_pulse")
+    now = dt.datetime.now(dt.timezone.utc)
+    if last and (now - dt.datetime.fromisoformat(last)).total_seconds() < s.pulse_hours * 3600:
+        return
+    if tg.send(pulse_text(bot, bot.journal, s.pulse_hours, version_string())):
+        bot.journal.set("last_pulse", now.isoformat(timespec="seconds"))
+
+
+def heartbeat(bot: Orchestrator, cycle: int = 0, note: str = "") -> None:
+    """After every check: the time, for /health, the pulse and the update job's watchdog (a separate process
+    that notices when the desk has stopped checking the market)."""
+    beat = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "cycle": cycle,
+            "next_minutes": bot.pace["minutes"], "version": version_string(), "note": note}
+    bot.journal.set("heartbeat", beat)
+    if not bot.s.offline and bot.s.db_path != ":memory:":
+        write_json(HEARTBEAT, beat)
+
+
+def record_errors(bot: Orchestrator, summary: list[dict], seen: dict) -> None:
+    """Errors in a check go to the diary (once per agent and coin per 6 hours), so /agents can say who is failing."""
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    for r in summary:
+        if "error" not in r:
+            continue
+        key = (r.get("stage", ""), r["symbol"])
+        text = f"{r.get('stage', 'check')} {r['symbol']}: {r['error']}"[:400]
+        last = seen.get(key)
+        if last and last[0] == text and now - last[1] < 6 * 3600:
+            continue
+        seen[key] = (text, now)
+        bot.journal.event("error", text[0].upper() + text[1:])
+
+
+def start_checks(bot: Orchestrator, s: Settings) -> list[str]:
+    """Messages for the owner at start: a corrected old setting, a strategy replaced, settings that cannot work,
+    and the version change since the last start."""
+    out = []
+    for m in s.migrations:
+        out.append(f"🔧 Settings corrected at start: {m}. Nothing for you to do; `desk setup` saves it to the file.")
+        bot.journal.event("strategy", f"Settings corrected at start: {m}")
+    bot.apply_champion()
+    if bot.champion_note:
+        out.append(f"🔧 Strategy in force updated because {bot.champion_note}.")
+    for p in s.problems():
+        out.append(f"🛑 Settings problem: {p}. Fix it with `desk setup` on the server.")
+        bot.journal.event("error", f"Settings problem: {p}")
+    current = {"version": version_string(), "revision": revision()}
+    prev = bot.journal.get("running_version")
+    if prev and prev.get("revision") != current["revision"]:
+        out.append(f"✅ Update confirmed: the desk now runs version {current['version']} (before: {prev.get('version')}).")
+        bot.journal.event("update", f"Now running version {current['version']} (before: {prev.get('version')})")
+    bot.journal.set("running_version", current)
+    return out
 
 
 def cmd_run(s: Settings, args) -> None:
@@ -341,12 +411,23 @@ def cmd_run(s: Settings, args) -> None:
     coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
     print(f"Version {version_string()}  Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
     bot.journal.event("start", f"Desk started: {mode}; AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    if not s.offline and s.db_path != ":memory:":  # the update job waits for this file to confirm a new version started
+        write_json(DESK_STARTED, {"version": version_string(), "revision": revision(), "pid": os.getpid(),
+                                  "started_at": started_at})
+    notices = start_checks(bot, s)
+    for line in notices:
+        print(line)
+    if bot.journal.get("last_pulse") is None:
+        bot.journal.set("last_pulse", started_at)
 
     if tg.enabled:
         if bot.journal.get("last_daily_report") is None:  # first start: first daily report tomorrow
             bot.journal.set("last_daily_report", dt.datetime.now(dt.timezone.utc).date().isoformat())
         tg.send(f"🚀 Trading desk started (version {version_string()})\nMode: {mode}\nAI: {ai}\nCoins: {coins}\n"
                 f"Budget: ${s.starting_balance:,.0f} · checks {pace}\n\n{HELP_TEXT}")
+        if notices:
+            tg.send("\n\n".join(notices))
 
         def watched(j: Journal) -> list[str]:
             return (j.get("watchlist") or default_watchlist(s))["symbols"]
@@ -394,6 +475,18 @@ def cmd_run(s: Settings, args) -> None:
             return "📒 Desk playbook (what every agent is told)\n" + (clean(text, 3000) or "Nothing learned yet: the first "
                                                                       "lab run and the first trades fill this in.") + budget
 
+        def health_now() -> str:
+            from .updater import installed_version
+            return with_journal(s, lambda j: health_text(bot, j, version_string(), started_at, read_status(),
+                                                         installed_version()))
+
+        def agents_now(arg: str = "") -> str:
+            try:
+                days = max(1.0, min(90.0, float(arg))) if arg.strip() else 7.0
+            except ValueError:
+                days = 7.0
+            return with_journal(s, lambda j: agents_text(bot, j, days))
+
         def notes_now() -> str:
             if not bot.notes.enabled:
                 return "The notebook is switched off for this journal."
@@ -439,6 +532,8 @@ def cmd_run(s: Settings, args) -> None:
             "/lab": lab_now,
             "/notes": notes_now,
             "/playbook": playbook_now,
+            "/health": health_now,
+            "/agents": agents_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
                                             + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
@@ -453,6 +548,7 @@ def cmd_run(s: Settings, args) -> None:
 
     limit = 1 if args.once else args.cycles
     n = 0
+    seen_errors: dict = {}
     last_minutes = s.cycle_minutes
     stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -472,6 +568,12 @@ def cmd_run(s: Settings, args) -> None:
                 except Exception:  # noqa: BLE001 - the journal itself may be the problem
                     pass
                 summary = []
+            heartbeat(bot, n)
+            try:
+                record_errors(bot, summary, seen_errors)
+                maybe_pulse(bot, tg, s)
+            except Exception:  # noqa: BLE001 - reporting must never stop trading
+                log.exception("Health reporting failed")
             if not args.quiet:
                 print_cycle(n, summary)
                 sys.stdout.flush()

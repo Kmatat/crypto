@@ -213,6 +213,20 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   cost, and the hit rate of the news scores. The daily report shows it; after 50 divergent decisions it gives
   a verdict. The AI budget is capped at a percentage of the account (`AI_BUDGET_PCT_MONTH`, 0.25%).
 
+## Is it working? Health, agents, pulse and watchdog
+
+`/health` answers "is everything working" in one message (version, last market check, errors, settings
+problems, update state, and the **decision funnel**: of the buy signals the rules produced in the last 24
+hours, how many were bought, refused by which rule, or vetoed by Claude). `/agents` lists the 14 agents with
+what each did and the strategies created, examined, promoted, rejected or rolled back. A pulse every
+`PULSE_HOURS` (6) says what the desk did, so a silent phone means a problem. A watchdog in the separate update
+job alerts when the desk stops checking the market and restarts it if it stays stuck.
+
+The funnel exists because of a real fault: settings files from before 1.3.0 pinned a 3 ATR take-profit, which
+the checklist's 2:1 reward rule refuses every time, so the desk could not buy at all. 1.4.1 corrects that value
+at start, refuses impossible settings and strategy cards, and raises an alert when one rule blocks every buy
+signal for a day.
+
 ## The head trader, and thresholds that each coin has to earn
 
 One buy threshold for every coin treats Bitcoin's signals and a small alt-coin's signals as equally
@@ -398,6 +412,7 @@ trader/
   notes.py          the Markdown notebook (data/notes): strategies, trades, diary, results (python -m trader notes)
   calibration.py    the threshold study: what buy threshold each coin has earned (head trader, weekly)
   agents/head.py    the head trader: AI budget pacing, per-check thresholds, the playbook, the weekly study
+  health.py         /health, /agents, the pulse, the decision funnel and the stuck-rule alert
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer

@@ -82,6 +82,7 @@ class Orchestrator:
         self.protect_errors: dict[str, str] = {}  # symbol -> last reason protection could not be placed
         self.pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         self.scout_update: dict | None = None  # set when the watchlist changed this cycle
+        self.champion_note: str | None = None    # set when the strategy in force was replaced at start (see apply_champion)
         self._scout_retry_at = 0.0
 
     # ---- portfolio helpers ----
@@ -134,7 +135,8 @@ class Orchestrator:
         if self.scout_update["added"] or self.scout_update["removed"]:
             self.journal.event("watchlist", "Coin list changed: added " + (", ".join(self.scout_update["added"]) or "none")
                                + "; removed " + (", ".join(self.scout_update["removed"]) or "none")
-                               + f". Now watching {', '.join(new['symbols'])}.")
+                               + f". Now watching {', '.join(new['symbols'])}.",
+                               {"added": self.scout_update["added"], "removed": self.scout_update["removed"]})
 
     # ---- strategy card ----
     def apply_champion(self) -> StrategyCard:
@@ -142,6 +144,15 @@ class Orchestrator:
         state = self.journal.get("strategy_champion")
         if state:
             card = StrategyCard.from_dict(state["card"])
+            owner = StrategyCard.from_settings(self.base)
+            if state.get("by") == "owner settings" and card.id != owner.id:
+                # the champion is simply "the owner's settings" and those changed (desk setup, or an old default
+                # corrected at load): follow them. Champions chosen by the lab or by /approve are left alone.
+                self._replace_champion(state, owner, "owner settings", f"the owner's settings changed: {owner.describe_diff(card)}")
+                card = owner
+            elif problems := card.violations():
+                self._replace_champion(state, owner, "owner settings", f"the strategy in force could not trade ({problems[0]})")
+                card = owner
         else:
             card = StrategyCard.from_settings(self.base)
             now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -166,6 +177,16 @@ class Orchestrator:
             self.card = card
         return card
 
+    def _replace_champion(self, state: dict, card: StrategyCard, by: str, why: str) -> None:
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        self.journal.set("strategy_champion", {"card": card.to_dict(), "since": now, "by": by,
+                                               "previous": state.get("card")})
+        hist = self.journal.get("strategy_history") or []
+        hist.append({"ts": now, "event": "promote", "id": card.id, "name": card.name, "by": by, "note": why})
+        self.journal.set("strategy_history", hist[-100:])
+        self.journal.event("strategy", f"Strategy in force is now {summary_line(card)} because {why}")
+        self.champion_note = why
+
     # ---- the cycle ----
     def run_cycle(self) -> list[dict]:
         summary: list[dict] = []
@@ -174,7 +195,7 @@ class Orchestrator:
             self.maybe_scout()
         except Exception as e:  # keep trading the current watchlist
             log.exception("Market scout failed")
-            summary.append({"symbol": "SCOUT", "error": f"could not refresh the coin list: {e}"})
+            summary.append({"symbol": "SCOUT", "stage": "scout", "error": f"could not refresh the coin list: {e}"})
         wl = self.watchlist()
         symbols = list(dict.fromkeys(wl["symbols"] + list(self.journal.positions())))
         summary += self.reconcile()
@@ -211,7 +232,7 @@ class Orchestrator:
                             "closes": [c["close"] for c in closed], "candles": closed}
             except Exception as e:  # one bad coin must not stop the others
                 log.exception("Market data failed for %s", sym)
-                summary.append({"symbol": sym, "error": str(e)})
+                summary.append({"symbol": sym, "stage": "market data", "error": str(e)})
 
         if ctx and not self.journal.get("benchmark_start"):  # first cycle: remember where the market was
             prices = {sym: c["price"] for sym, c in ctx.items() if sym in self.s.symbols}
@@ -272,7 +293,7 @@ class Orchestrator:
                                 "threshold": thr, "holding": position is not None, "eligible": eligible})
             except Exception as e:
                 log.exception("Analysis failed for %s", sym)
-                summary.append({"symbol": sym, "error": str(e)})
+                summary.append({"symbol": sym, "stage": "analysis", "error": str(e)})
         allowed = self.head.plan_ai(pending) if self.head else {p["symbol"] for p in pending if p["eligible"]}
         buys = []
         for p in pending:
@@ -291,7 +312,7 @@ class Orchestrator:
                 summary.append(result)
             except Exception as e:
                 log.exception("Decision failed for %s", sym)
-                summary.append({"symbol": sym, "error": str(e)})
+                summary.append({"symbol": sym, "stage": "decision", "error": str(e)})
 
         # 5-6. buys: strongest signals first, while position slots and cash last
         buys.sort(key=lambda b: (b[3]["confidence"], b[3]["combined_score"]), reverse=True)
@@ -333,7 +354,7 @@ class Orchestrator:
                 summary.append(result)
             except Exception as e:
                 log.exception("Buy failed for %s", sym)
-                summary.append({"symbol": sym, "error": str(e)})
+                summary.append({"symbol": sym, "stage": "buy", "error": str(e)})
 
         # 7. when to check again
         self.pace = self._next_pace(news.get("_pace"), ctx)
@@ -394,7 +415,7 @@ class Orchestrator:
                 continue
             have = held.get(sym.removesuffix("USDT"), 0.0)
             if have < p["qty"] * 0.99:
-                out.append({"symbol": sym, "error": f"the journal says we hold {p['qty']:.6g} but the exchange only "
+                out.append({"symbol": sym, "stage": "exchange", "error": f"the journal says we hold {p['qty']:.6g} but the exchange only "
                                                     f"has {have:.6g}. Binance probably reset the demo account. "
                                                     f"Run `desk reset --force` to start the demo fresh."})
         return out
