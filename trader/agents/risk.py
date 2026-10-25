@@ -38,13 +38,18 @@ class RiskManagerAgent:
             return {"approved": False, "limit": "overall",
                     "reason": f"overall loss limit hit ({drawdown:.2%} vs start) - no new buys; review the report"}
 
-        budget = min(portfolio["equity"] * self.s.max_position_pct, portfolio["cash"] * 0.98)
-        if budget < 10:
-            return {"approved": False, "reason": f"not enough free cash (${portfolio['cash']:.2f})"}
         stop = price - self.s.stop_loss_atr * atr
         take = price + self.s.take_profit_atr * atr
         if stop <= 0:
             return {"approved": False, "reason": "volatility too high for a sensible stop-loss"}
+        budget = min(portfolio["equity"] * self.s.max_position_pct, portfolio["cash"] * 0.98)
+        if self.s.risk_per_trade_pct:
+            # Turtle-style sizing: a stop-loss should cost a fixed small share of equity, so calm coins get
+            # bigger positions and wild coins smaller ones; MAX_POSITION_PCT stays as the ceiling.
+            risk_budget = portfolio["equity"] * self.s.risk_per_trade_pct / ((price - stop) / price)
+            budget = min(budget, risk_budget)
+        if budget < 10:
+            return {"approved": False, "reason": f"not enough free cash (${portfolio['cash']:.2f})"}
         return {
             "approved": True,
             "reason": "within limits",
@@ -53,6 +58,14 @@ class RiskManagerAgent:
             "take_profit": take,
             "risk_pct_of_equity": round(budget * (price - stop) / price / portfolio["equity"] * 100, 3),
         }
+
+    def trailing_stop(self, position: dict, high_water: float, atr: float) -> float | None:
+        """Seykota / Turtles: as the price makes new highs, the stop follows it up (never down).
+        Returns the new stop when it should move by at least a quarter ATR, else None."""
+        if not self.s.trail_atr or atr <= 0:
+            return None
+        new_stop = high_water - self.s.trail_atr * atr
+        return new_stop if new_stop >= position["stop_loss"] + 0.25 * atr else None
 
     @staticmethod
     def exit_signal(position: dict, price: float) -> str | None:

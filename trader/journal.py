@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS orders (
   avg_price REAL, quote REAL, fee REAL, reason TEXT, error TEXT, market_price REAL);
 CREATE TABLE IF NOT EXISTS positions (
   symbol TEXT PRIMARY KEY, qty REAL, entry_price REAL, cost REAL, stop_loss REAL, take_profit REAL, opened_at TEXT,
-  protected TEXT DEFAULT 'none', protection TEXT);
+  protected TEXT DEFAULT 'none', protection TEXT, high_water REAL);
 CREATE TABLE IF NOT EXISTS closed_trades (
   id INTEGER PRIMARY KEY, symbol TEXT, opened_at TEXT, closed_at TEXT, entry_price REAL, exit_price REAL,
   qty REAL, cost REAL, proceeds REAL, pnl REAL, pnl_pct REAL, exit_reason TEXT);
@@ -50,6 +50,8 @@ class Journal:
         if "protected" not in cols:  # exchange-side stop-loss / take-profit orders
             self.db.execute("ALTER TABLE positions ADD COLUMN protected TEXT DEFAULT 'none'")
             self.db.execute("ALTER TABLE positions ADD COLUMN protection TEXT")
+        if "high_water" not in cols:  # highest price since entry, for trailing stops
+            self.db.execute("ALTER TABLE positions ADD COLUMN high_water REAL")
         self.db.commit()
 
     # ---- key/value state ----
@@ -72,8 +74,22 @@ class Journal:
             p = dict(r)
             p["protected"] = p.get("protected") or "none"
             p["protection"] = json.loads(p["protection"]) if p.get("protection") else None
+            p["high_water"] = p.get("high_water") or p["entry_price"]
             out[p["symbol"]] = p
         return out
+
+    def update_stop(self, symbol: str, stop: float, high_water: float) -> None:
+        self.db.execute("UPDATE positions SET stop_loss=?, high_water=? WHERE symbol=?", (stop, high_water, symbol))
+        self.db.commit()
+
+    def set_high_water(self, symbol: str, high_water: float) -> None:
+        self.db.execute("UPDATE positions SET high_water=? WHERE symbol=?", (high_water, symbol))
+        self.db.commit()
+
+    def last_stop_loss_ms(self, symbol: str) -> int | None:
+        row = self.db.execute("SELECT closed_at FROM closed_trades WHERE symbol=? AND exit_reason LIKE 'stop-loss%' "
+                              "ORDER BY id DESC LIMIT 1", (symbol,)).fetchone()
+        return int(dt.datetime.fromisoformat(row[0]).timestamp() * 1000) if row else None
 
     def open_position(self, symbol: str, fill: dict, stop: float, take: float) -> None:
         self.db.execute("INSERT INTO positions (symbol, qty, entry_price, cost, stop_loss, take_profit, opened_at)"

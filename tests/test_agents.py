@@ -81,7 +81,8 @@ def test_risk_sizing_and_vetoes():
     r = RiskManagerAgent(Settings())
     buy = {"action": "BUY", "confidence": 0.8}
     v = r.review(buy, "BTCUSDT", 100, 2, PORT)
-    assert v["approved"] and v["quote_amount"] == 1000 and v["stop_loss"] == 96 and v["take_profit"] == 106
+    # stop 4% away, 1% of equity at risk -> $2,500 wanted, capped at 15% = $1,500; target 2:1 at 108
+    assert v["approved"] and v["quote_amount"] == 1500 and v["stop_loss"] == 96 and v["take_profit"] == 108
     assert not r.review({"action": "BUY", "confidence": 0.5}, "BTCUSDT", 100, 2, PORT)["approved"]
     assert not r.review(buy, "BTCUSDT", 100, 2, PORT | {"open_positions": 3})["approved"]
     assert not r.review(buy, "BTCUSDT", 100, 2, PORT | {"equity": 9_600})["approved"]  # -4% day

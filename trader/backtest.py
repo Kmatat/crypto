@@ -19,17 +19,19 @@ import time
 
 from .agents.decision import DecisionAgent
 from .agents.execution import PAPER_FEE, STOP_SLIPPAGE
+from .agents.mentor import ALL_CHECKS, MentorAgent
 from .agents.prediction import PredictionAgent
 from .agents.risk import RiskManagerAgent
 from .agents.technical import TechnicalAnalysisAgent
 from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, Settings
 
-WARMUP = 200  # candles the indicators need before the first decision
+WARMUP = 200          # candles the indicators need before the first decision
+EXTRA_DAYS = 210      # history before the test window, so 200-day averages exist from day one
 
 
 def fetch_history(client: BinanceClient, symbol: str, days: int) -> list[dict]:
-    start = int((time.time() - (days * 24 + WARMUP) * 3600) * 1000)
+    start = int((time.time() - (days + EXTRA_DAYS) * 24 * 3600) * 1000)
     out: list[dict] = []
     while True:
         rows = client.klines(symbol, "1h", limit=1000, start_ms=start)
@@ -42,26 +44,57 @@ def fetch_history(client: BinanceClient, symbol: str, days: int) -> list[dict]:
     return out[:-1]  # drop the still-forming current hour
 
 
+class DailySeries:
+    """Daily closes available at each hourly candle, precomputed so each step is O(1)."""
+
+    def __init__(self, hourly: list[dict]):
+        self.completed: list[float] = []   # closes of fully completed UTC days
+        self.before: list[int] = []        # for candle i: number of completed days before its day
+        last_day, last_close = None, None
+        for c in hourly:
+            day = dt.datetime.fromtimestamp(c["time"] / 1000, dt.timezone.utc).date()
+            if day != last_day and last_day is not None:
+                self.completed.append(last_close)
+            last_day, last_close = day, c["close"]
+            self.before.append(len(self.completed))
+
+    def at(self, i: int, close: float) -> list[float]:
+        return self.completed[: self.before[i]] + [close]
+
+
 class Backtest:
-    def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None):
+    def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None,
+                 days: int | None = None, btc_history: list[dict] | None = None):
         self.s = s
         self.history = history
+        self.days = days
         self.decision = decision or DecisionAgent()
         self.risk = RiskManagerAgent(s)
         self.technical, self.prediction = TechnicalAnalysisAgent(), PredictionAgent()
+        self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
+        self.daily = {sym: DailySeries(h) for sym, h in history.items()}
+        self.btc = btc_history if btc_history is not None else history.get("BTCUSDT")
+        self.btc_daily = DailySeries(self.btc) if self.btc else None
+        self.btc_index = {c["time"]: i for i, c in enumerate(self.btc)} if self.btc else {}
 
     def run(self) -> dict:
         s = self.s
         times = sorted(set.intersection(*(set(c["time"] for c in h) for h in self.history.values())))
         by_time = {sym: {c["time"]: i for i, c in enumerate(h)} for sym, h in self.history.items()}
+        if self.days:  # trade only the last `days`; earlier history feeds the long averages
+            times = [t for t in times if t >= times[-1] - self.days * 86_400_000]
         cash, positions, trades, curve = s.starting_balance, {}, [], []
         day, day_start = None, s.starting_balance
         decisions = {"BUY": 0, "SELL": 0, "HOLD": 0}
-        for t in times[WARMUP:]:
+        vetoes: dict[str, int] = {}
+        last_stop: dict[str, int] = {}
+        for t in times[WARMUP:] if not self.days else times:
             date = dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).date()
+            idx = {sym: by_time[sym][t] for sym in self.history}
+            if any(i < WARMUP - 1 for i in idx.values()):
+                continue
             # the live desk analyses the latest 200 candles: use exactly that window
-            candles = {sym: self.history[sym][max(0, by_time[sym][t] - WARMUP + 1): by_time[sym][t] + 1]
-                       for sym in self.history}
+            candles = {sym: self.history[sym][idx[sym] - WARMUP + 1: idx[sym] + 1] for sym in self.history}
             price = {sym: c[-1]["close"] for sym, c in candles.items()}
 
             # exchange-side exits during this hour (stop first: the conservative assumption)
@@ -69,8 +102,16 @@ class Backtest:
                 c = candles[sym][-1]
                 if c["low"] <= p["stop"]:
                     cash += self._close(positions, trades, sym, p["stop"] * (1 - STOP_SLIPPAGE), "stop-loss", t)
+                    last_stop[sym] = t
                 elif c["high"] >= p["take"]:
                     cash += self._close(positions, trades, sym, p["take"], "take-profit", t)
+            # trailing stops follow new highs (Seykota / Turtles)
+            for sym, p in positions.items():
+                p["high"] = max(p["high"], price[sym])
+                atr = self.technical.run(candles[sym])["atr"]
+                new_stop = self.risk.trailing_stop({"stop_loss": p["stop"]}, p["high"], atr)
+                if new_stop:
+                    p["stop"] = new_stop
 
             equity = cash + sum(p["qty"] * price[sym] for sym, p in positions.items())
             if date != day:
@@ -95,16 +136,31 @@ class Backtest:
                 portfolio.update(cash=cash, open_positions=len(positions),
                                  equity=cash + sum(p["qty"] * price[x] for x, p in positions.items()))
                 verdict = self.risk.review(d, sym, price[sym], atr, portfolio)
-                if verdict["approved"]:
-                    quote = verdict["quote_amount"]
-                    positions[sym] = {"qty": quote * (1 - PAPER_FEE) / price[sym], "cost": quote, "entry": price[sym],
-                                      "stop": verdict["stop_loss"], "take": verdict["take_profit"], "opened": t}
-                    cash -= quote
+                if not verdict["approved"]:
+                    continue
+                if self.mentor:
+                    btc_daily = (self.btc_daily.at(self.btc_index[t], self.btc[self.btc_index[t]]["close"])
+                                 if self.btc_daily and t in self.btc_index else None)
+                    review = self.mentor.review(sym, candles[sym], self.daily[sym].at(idx[sym], price[sym]), price[sym],
+                                                verdict["stop_loss"], verdict["take_profit"], atr, btc_daily,
+                                                last_stop.get(sym), t)
+                    if not review["pass"]:
+                        for name in review["failed"]:
+                            vetoes[name] = vetoes.get(name, 0) + 1
+                        continue
+                quote = verdict["quote_amount"]
+                positions[sym] = {"qty": quote * (1 - PAPER_FEE) / price[sym], "cost": quote, "entry": price[sym],
+                                  "stop": verdict["stop_loss"], "take": verdict["take_profit"], "opened": t,
+                                  "high": price[sym]}
+                cash -= quote
             curve.append((t, cash + sum(p["qty"] * price[sym] for sym, p in positions.items())))
 
         # value anything still open at the last price
         final = curve[-1][1] if curve else s.starting_balance
-        return self._metrics(trades, curve, final, decisions, times[WARMUP:])
+        traded = [t for t, _ in curve]
+        result = self._metrics(trades, curve, final, decisions, traded)
+        result["mentor_vetoes"] = vetoes
+        return result
 
     @staticmethod
     def _close(positions, trades, sym, px, reason, t) -> float:
@@ -169,29 +225,47 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--position", type=float, help="max position size as a fraction of equity (default 0.10)")
     ap.add_argument("--max-positions", type=int)
     ap.add_argument("--sweep", action="store_true", help="try a grid of thresholds and stop/take distances")
+    ap.add_argument("--checks", default="", help="master traders' checklist: 'all', 'none' or a comma list of "
+                                                   + ",".join(ALL_CHECKS))
+    ap.add_argument("--rr", type=float, help="minimum reward-to-risk for the 'reward' check (default 2)")
+    ap.add_argument("--cooldown", type=float, help="hours to wait after a stop-loss before re-buying (default 24)")
+    ap.add_argument("--risk", type=float, help="risk per trade as %% of equity, Turtle sizing (e.g. 1); 0 = fixed size")
+    ap.add_argument("--trail", type=float, help="trailing stop distance in ATR (e.g. 2); 0 = off")
     args = ap.parse_args(argv)
 
     from .agents import decision as dmod
     symbols = [x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT") for x in args.symbols.split(",")]
     client = BinanceClient(PUBLIC_BASE_URL)
-    print(f"Downloading {args.days} days of hourly prices for {', '.join(symbols)} ...", file=sys.stderr)
+    print(f"Downloading {args.days} (+{EXTRA_DAYS} for long averages) days of hourly prices for "
+          f"{', '.join(symbols)} ...", file=sys.stderr)
     history = {sym: fetch_history(client, sym, args.days) for sym in symbols}
+    btc = history.get("BTCUSDT") or fetch_history(client, "BTCUSDT", args.days)
+    checks = tuple(ALL_CHECKS) if args.checks == "all" else () if args.checks in ("", "none") else \
+        tuple(c.strip() for c in args.checks.split(","))
 
     def settings(stop=None, take=None):
         return Settings(offline=True, symbols=symbols, starting_balance=args.balance,
                         stop_loss_atr=stop or args.stop or 2.0, take_profit_atr=take or args.take or 3.0,
-                        max_position_pct=args.position or 0.10, max_open_positions=args.max_positions or 3)
+                        max_position_pct=args.position or 0.10, max_open_positions=args.max_positions or 3,
+                        mentor_checks=checks, min_reward_risk=args.rr or 2.0, cooldown_hours=args.cooldown or 24,
+                        risk_per_trade_pct=(args.risk or 0) / 100, trail_atr=args.trail or 0.0)
+
+    def run(s):
+        return Backtest(s, history, days=args.days, btc_history=btc).run()
 
     if not args.sweep:
         dmod.BUY_THRESHOLD = args.buy or dmod.BUY_THRESHOLD
         dmod.SELL_THRESHOLD = args.sell or dmod.SELL_THRESHOLD
-        print_result(Backtest(settings(), history).run())
+        r = run(settings())
+        print_result(r)
+        if r["mentor_vetoes"]:
+            print(f"Checklist vetoes      {r['mentor_vetoes']}")
         return 0
 
     print(f"{'buy':>5} {'sell':>6} {'stop':>5} {'take':>5} | {'return':>8} {'trades':>6} {'win%':>5} {'PF':>5} {'maxDD':>6}")
     for buy, (stop, take) in itertools.product([0.15, 0.25, 0.35, 0.45], [(1.5, 3.0), (2.0, 3.0), (2.0, 4.0), (3.0, 6.0)]):
         dmod.BUY_THRESHOLD, dmod.SELL_THRESHOLD = buy, -buy
-        r = Backtest(settings(stop, take), history).run()
+        r = run(settings(stop, take))
         print(f"{buy:>5.2f} {-buy:>6.2f} {stop:>5.1f} {take:>5.1f} | {r['return_pct']:>+7.2f}% {r['trades']:>6} "
               f"{r['win_rate_pct'] or 0:>5.1f} {r['profit_factor'] or 0:>5.2f} {r['max_drawdown_pct']:>6.2f}")
     print(f"basket buy-and-hold over the same window: {r['basket_hold_pct']:+.1f}%")

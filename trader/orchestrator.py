@@ -30,6 +30,7 @@ from .agents.decision import DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
 from .agents.market import MarketDataAgent
+from .agents.mentor import MentorAgent
 from .agents.news import NewsAgent
 from .agents.prediction import PredictionAgent
 from .agents.risk import RiskManagerAgent
@@ -62,6 +63,7 @@ class Orchestrator:
         self.forex = ForexAgent(offline=s.offline)
         self.decision = DecisionAgent(self.llm)
         self.risk = RiskManagerAgent(s)
+        self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
         self.last_price: dict[str, float] = {}
         broker = TestnetBroker(testnet) if testnet else \
             PaperBroker(lambda sym: self.last_price[sym], range_fn=self.market.range_since)
@@ -139,6 +141,11 @@ class Orchestrator:
                         summary.append(exit_result)
                     if position is None:
                         continue
+                    position, exit_result = self._trail(sym, position, price, technical["atr"])
+                    if exit_result:
+                        summary.append(exit_result)
+                    if position is None:
+                        continue
                     if not self._is_protected(position):
                         if why := self.risk.exit_signal(position, price):  # desk-side backup
                             summary.append(self._sell(sym, position, why))
@@ -146,7 +153,7 @@ class Orchestrator:
                         if err := self._protect(sym, position):
                             summary.append({"symbol": sym, "protect_error": err})
                 ctx[sym] = {"price": price, "technical": technical, "prediction": self.prediction.run(candles),
-                            "closes": [c["close"] for c in candles]}
+                            "closes": [c["close"] for c in candles], "candles": candles}
             except Exception as e:  # one bad coin must not stop the others
                 log.exception("Market data failed for %s", sym)
                 summary.append({"symbol": sym, "error": str(e)})
@@ -178,6 +185,10 @@ class Orchestrator:
                     "watchlist": {"why_watched": wl.get("reasons", {}).get(sym, "")},
                 }
                 position = positions.get(sym)
+                review = self._mentor_review(sym, c) if self.mentor and position is None else None
+                if review:
+                    reports["mentor"] = {"pass": review["pass"], "checklist": MentorAgent.summary(review)}
+                    c["mentor"] = review
                 decision = self.decision.run(sym, reports, holding=position is not None)
                 if decision["action"] == "BUY":
                     buys.append((sym, c, reports, decision))
@@ -197,8 +208,14 @@ class Orchestrator:
         for sym, c, reports, decision in buys:
             try:
                 verdict = self.risk.review(decision, sym, c["price"], c["technical"]["atr"], self.portfolio())
+                review = c.get("mentor")
+                if verdict["approved"] and review and not review["pass"]:
+                    names = ", ".join(review["failed"])
+                    verdict = {"approved": False, "reason": f"master traders' checklist: {names} not met"}
                 self.journal.log_decision(sym, decision, verdict, reports)
                 result = self._result(sym, c, decision, verdict)
+                if review:
+                    result["mentor"] = MentorAgent.summary(review)
                 if verdict["approved"]:
                     fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
                     fill["market_price"] = c["price"]
@@ -272,6 +289,41 @@ class Orchestrator:
                                                     f"has {have:.6g}. Binance probably reset the demo account. "
                                                     f"Run `desk reset --force` to start the demo fresh."})
         return out
+
+    # ---- master traders' checklist and trailing stops ----
+    def _mentor_review(self, sym: str, c: dict) -> dict | None:
+        try:
+            daily = self.market.daily_closes(sym)
+            btc_daily = daily if sym == "BTCUSDT" else self.market.daily_closes("BTCUSDT")
+        except Exception as e:
+            log.warning("Daily history unavailable for %s: %s", sym, e)
+            daily, btc_daily = [], None
+        atr = c["technical"]["atr"]
+        stop, take = c["price"] - self.s.stop_loss_atr * atr, c["price"] + self.s.take_profit_atr * atr
+        return self.mentor.review(sym, c["candles"], daily, c["price"], stop, take, atr, btc_daily,
+                                  self.journal.last_stop_loss_ms(sym), int(time.time() * 1000))
+
+    def _trail(self, sym: str, position: dict, price: float, atr: float) -> tuple[dict | None, dict | None]:
+        """Raise the stop-loss as the price makes new highs; re-place the exchange orders when it moves.
+        Returns (position or None if it turned out to be closed, exit summary entry or None)."""
+        high = max(position.get("high_water") or position["entry_price"], price)
+        new_stop = self.risk.trailing_stop(position, high, atr)
+        if new_stop is None:
+            if high != position.get("high_water"):
+                self.journal.set_high_water(sym, high)
+            return self.journal.positions()[sym], None
+        if position.get("protection"):
+            status = self.execution.unprotect(sym, position["protection"])
+            if status["state"] == "exited":  # it filled while we were about to move the stop
+                exit_result = self._record_exchange_exit(sym, status)
+                return self.journal.positions().get(sym), exit_result
+            if status["state"] == "error":
+                return position, None  # keep the old orders; try again next cycle
+            self.journal.set_protection(sym, None, "none")
+        self.journal.update_stop(sym, new_stop, high)
+        log.info("%s: trailing stop raised to %.6g (high %.6g)", sym, new_stop, high)
+        self._protect(sym, self.journal.positions()[sym])
+        return self.journal.positions()[sym], None
 
     # ---- protection (stop-loss / take-profit orders living on the exchange) ----
     @staticmethod

@@ -186,9 +186,10 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
         elif r["action"] == "BUY":
             shield = {"exchange": " · 🛡️ both placed on Binance", "emulated": " · 🛡️ simulated exchange orders"}.get(
                 r.get("protected"), "")
+            mentor = f"\nMaster traders' checklist:\n{r['mentor']}" if r.get("mentor") else ""
             out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}{shield}\n"
-                            f"Confidence {r['confidence']:.0%}. Why: {clean(r['reasoning'])}"))
+                            f"Confidence {r['confidence']:.0%}. Why: {clean(r['reasoning'])}{mentor}"))
         else:
             t = r.get("trade") or {}
             result = f"{'✅ Profit' if t.get('pnl', 0) > 0 else '🔻 Loss'} {t.get('pnl', 0):+,.2f} USDT " \

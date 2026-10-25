@@ -201,8 +201,9 @@ The server holds only demo keys and fake money, but it is connected to real acco
 
 What is already handled for you: your keys are stored on the server in a file only your user can read; they
 never appear in the logs or in Telegram messages; the code refuses to run in any real-money mode; links in
-AI-written text are stripped before anything reaches your phone; and the Risk Manager's limits (10% per
-trade, 3 positions, 3% daily loss stop, 10% overall loss stop) bound what a bad decision can cost.
+AI-written text are stripped before anything reaches your phone; and the Risk Manager's limits (1% of the
+account at risk per trade, at most 15% in one coin, 3 positions, 3% daily loss stop, 10% overall loss stop)
+bound what a bad decision can cost.
 
 ## Troubleshooting
 

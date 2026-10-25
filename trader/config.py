@@ -54,13 +54,21 @@ class Settings:
     ai_daily_budget_usd: float = 5.0  # Claude spending cap per day; 0 = no cap
     auto_update: bool = True         # install new code from GitHub automatically (else only notify)
     starting_balance: float = 10_000.0
-    max_position_pct: float = 0.10
+    max_position_pct: float = 0.15   # ceiling per position; actual size comes from RISK_PER_TRADE_PCT
     max_open_positions: int = 3
     max_daily_loss_pct: float = 0.03
     max_drawdown_pct: float = 0.10   # overall brake: no new buys once equity is this far below the start
     min_confidence: float = 0.60
     stop_loss_atr: float = 2.0
-    take_profit_atr: float = 3.0
+    take_profit_atr: float = 4.0     # 2:1 reward-to-risk with the 2 ATR stop
+    # ---- master traders' checklist (trader/agents/mentor.py) and related disciplines ----
+    # Defaults chosen from backtests on 90/180/365 days (see README "Measuring the strategy"):
+    # trend200 + btc + cooldown + reward with trailing stops and 1% risk sizing was the robust set.
+    mentor_checks: tuple = ("trend200", "btc", "cooldown", "reward")  # also available: alignment, overextended
+    min_reward_risk: float = 2.0     # PTJ: target distance must be >= this x stop distance
+    cooldown_hours: float = 24       # Livermore: no re-entry this soon after a stop-loss on the same coin
+    risk_per_trade_pct: float = 0.01  # Turtles: size so a stop-loss costs 1% of equity; 0 = fixed MAX_POSITION_PCT
+    trail_atr: float = 2.0           # Seykota: trailing stop 2 ATR below the highest price since entry; 0 = off
     db_path: str = str(ROOT / "data" / "journal.db")
     telegram_token: str = field(default="", repr=False)
     telegram_chat_id: str = ""
@@ -104,13 +112,19 @@ class Settings:
             ai_daily_budget_usd=_f("AI_DAILY_BUDGET_USD", 5),
             auto_update=_b("AUTO_UPDATE", True),
             starting_balance=_f("STARTING_BALANCE_USDT", 10_000),
-            max_position_pct=_f("MAX_POSITION_PCT", 0.10),
+            max_position_pct=_f("MAX_POSITION_PCT", 0.15),
             max_open_positions=int(os.getenv("MAX_OPEN_POSITIONS", 3)),
             max_daily_loss_pct=_f("MAX_DAILY_LOSS_PCT", 0.03),
             max_drawdown_pct=_f("MAX_DRAWDOWN_PCT", 0.10),
             min_confidence=_f("MIN_CONFIDENCE", 0.60),
             stop_loss_atr=_f("STOP_LOSS_ATR", 2.0),
-            take_profit_atr=_f("TAKE_PROFIT_ATR", 3.0),
+            take_profit_atr=_f("TAKE_PROFIT_ATR", 4.0),
+            mentor_checks=tuple(c.strip() for c in os.getenv("MENTOR_CHECKS", "trend200,btc,cooldown,reward").split(",")
+                                if c.strip() and c.strip() != "none"),
+            min_reward_risk=_f("MIN_REWARD_RISK", 2.0),
+            cooldown_hours=_f("COOLDOWN_HOURS", 24),
+            risk_per_trade_pct=_f("RISK_PER_TRADE_PCT", 0.01),
+            trail_atr=_f("TRAIL_ATR", 2.0),
             db_path=str(db_path),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),

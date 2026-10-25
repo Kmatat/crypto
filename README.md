@@ -26,7 +26,8 @@ Think of it as a small trading firm where each employee has one job:
 | **Technical Analyst** | Chart reader | Standard indicators: trend averages (EMA), momentum (MACD), overbought/oversold (RSI), Bollinger bands, volatility (ATR) |
 | **Forecaster** | Predicts the next move | Fits a trend line to the last 24 hours, compares it with the noise, and gives a probability that the price goes up |
 | **Portfolio Manager** | Makes the call | Weighs all reports and decides **BUY / SELL / HOLD**, with a confidence level and a plain-English reason. Uses Claude if a key is set, otherwise a weighted score |
-| **Risk Manager** | Safety officer, can veto anything | Sets trade size, stop-loss and take-profit. Blocks trades with low confidence, too many open positions, or after the daily loss limit is hit |
+| **Mentor** | The master traders' checklist | Every candidate buy must pass rules documented by well-known traders: above the 200-day average (Paul Tudor Jones), Bitcoin itself in an uptrend (don't fight the tape), no re-entry 24 h after a stop-loss (Livermore), at least 2:1 reward-to-risk (PTJ). Each line is shown with its source in the buy alert, and Claude is told to weigh it |
+| **Risk Manager** | Safety officer, can veto anything | Sizes each trade so a stop-loss costs 1% of equity (the Turtle Traders' method), capped at 15% per coin; sets the stop-loss and a 2:1 take-profit; **trails the stop upward** as the price rises (Seykota: cut losses, let profits run). Blocks trades with low confidence, too many open positions, or after the 3% daily / 10% overall loss limits |
 | **Execution Trader** | Places the order, then insures it | Sends the order to Binance, confirms it was **FILLED**, records the real quantity, price and fees, and immediately places the **stop-loss and take-profit on the exchange** as a pair (when one fills, Binance cancels the other) |
 
 Every 15 minutes (the AI may adjust this between 5 and 60), for each watched coin:
@@ -121,13 +122,29 @@ authentication (see the security checklist in the server guide).
 ## Measuring the strategy before trusting it
 
 `python -m trader backtest --days 180` replays the desk's rule-based decision logic (indicators,
-forecast, weighted score, risk limits, fees, exchange-side exits) over real hourly Binance history and
-prints return, trade count, win rate, profit factor and drawdown next to the buy-and-hold result for the
-same coins and period. `--sweep` tries a grid of thresholds and stop/take-profit distances; `--symbols`,
-`--position`, `--max-positions` test other coin sets and sizing. News, forex and Claude's judgement have no
-history and are left out, so the backtest measures the free rule core: the floor the AI layer has to beat.
-Any change to the strategy should show an improvement here on at least two different periods before it is
-trusted, and even then live results will differ.
+forecast, weighted score, the master traders' checklist, sizing, trailing stops, risk limits, fees,
+exchange-side exits) over real hourly Binance history and prints return, trade count, win rate, profit
+factor and drawdown next to the buy-and-hold result for the same coins and period. `--sweep` tries a grid
+of thresholds and stop/take-profit distances; `--checks`, `--trail`, `--risk`, `--position`, `--symbols`
+test the principles, sizing and coin sets. News, forex and Claude's judgement have no history and are left
+out, so the backtest measures the free rule core: the floor the AI layer has to beat.
+
+What the backtests showed when the defaults were chosen (BTC, ETH, SOL; buy-and-hold of the same coins in
+brackets):
+
+| Setting | 90 days | 180 days | 365 days |
+|---|---|---|---|
+| Plain indicator rules (the original) | -2.2% (+26%) | -3.1% (+10%) | -10.1% (-38%) |
+| + 200-day rule and Bitcoin regime only | -0.3% | -0.3% | -0.9% |
+| **Current defaults** (checklist, 2:1 target, trailing stop, 1% risk sizing, 15% cap) | **+2.4%** | **+2.4%** | **+1.3%** |
+
+The original rules had no edge: they lost a little in rallies and more in the bear market. The checklist
+keeps the desk out of downtrends, which is where most of the loss came from, and the exit discipline makes
+average winners about twice the size of average losers. The edge is modest, it lags buy-and-hold in strong
+rallies (the desk is mostly in cash), and it was negative on one of three alternative coin sets tested
+(BNB, XRP, DOGE). About 100 trades per year is too few to be statistically sure of anything: treat these
+numbers as "plausibly positive", not proven. Any change to the strategy should show an improvement here on
+at least two different periods and two coin sets before it is trusted, and even then live results will differ.
 
 ## Reading the report
 
@@ -204,7 +221,7 @@ There are two different kinds of success:
 
 ```
 trader/
-  agents/      scout, market, news, forex, technical, prediction, decision, risk, execution
+  agents/      scout, market, news, forex, technical, prediction, decision, mentor, risk, execution
   orchestrator.py   runs the cycle in order
   binance_client.py signed Binance REST calls
   llm.py            Claude calls with structured (JSON) answers

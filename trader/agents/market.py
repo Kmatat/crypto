@@ -18,11 +18,23 @@ class MarketDataAgent:
         self.interval = interval
         self.offline = offline
         self._synthetic: dict[str, list[dict]] = {}
+        self._daily: dict[str, tuple[float, list[float]]] = {}
 
     def candles(self, symbol: str, limit: int = 200) -> list[dict]:
         if self.offline or self.client is None:
             return self._synthetic_candles(symbol, limit)
         return self.client.klines(symbol, self.interval, limit)
+
+    def daily_closes(self, symbol: str, limit: int = 260) -> list[float]:
+        """Daily closing prices (for the 50- and 200-day averages). Cached for an hour; offline: none."""
+        if self.offline or self.client is None:
+            return []
+        cached = self._daily.get(symbol)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        closes = [c["close"] for c in self.client.klines(symbol, "1d", limit)]
+        self._daily[symbol] = (time.time(), closes)
+        return closes
 
     def range_since(self, symbol: str, since_ms: int) -> tuple[float, float, int] | None:
         """(lowest, highest, time of the last minute) traded since `since_ms` - the price path

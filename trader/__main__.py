@@ -48,12 +48,13 @@ def print_cycle(n: int, summary: list[dict]) -> None:
             continue
         line = f"{r['symbol']:9s} {r['action']:4s}{'*' if str(r.get('source', '')).startswith('claude') else ' '}"
         if "confidence" in r:
-            line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={r['price']:.2f}  risk: {r['risk']}"
+            px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
+            line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={px}  risk: {r['risk']}"
         if "reason" in r:
             line += f" ({r['reason']})"
         if o := r.get("order"):
             line += f"  -> {'FILLED' if o['ok'] else 'FAILED'} " + (
-                f"{o['qty']:.6f} @ {o['avg_price']:.2f}" if o["ok"] else o["error"])
+                f"{o['qty']:.6g} @ {o['avg_price']:,.6g}" if o["ok"] else o["error"])
         if t := r.get("trade"):
             line += f"  P&L {t['pnl']:+.2f} USDT ({t['pnl_pct']:+.2f}%)"
         print(line)

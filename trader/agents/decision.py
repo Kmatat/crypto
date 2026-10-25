@@ -37,6 +37,9 @@ SYSTEM = (
     "are given to you. Decide BUY (open a long position), SELL (close the position we hold), or HOLD. "
     "We cannot short: SELL is only valid when we hold the coin, BUY only when we do not. "
     "Capital preservation comes first: when signals conflict or are weak, HOLD. "
+    "When a 'mentor' report is present it is the desk's trading discipline, built from principles documented by "
+    "well-known traders (Paul Tudor Jones, Mark Minervini, the Turtle Traders, Ed Seykota, Jesse Livermore): "
+    "weigh each ✓/✗ line explicitly in your reasoning; a failed check is a strong reason to HOLD. "
     "A separate risk manager sets position size and stop-loss, so focus on direction and conviction."
 )
 

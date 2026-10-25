@@ -30,16 +30,20 @@ LAYOUT = [
     ("Timing: normal check interval, and the range the AI may choose from", [
         "CYCLE_MINUTES", "MIN_CHECK_MINUTES", "MAX_CHECK_MINUTES", "NEWS_REFRESH_MINUTES"]),
     ("Risk limits (the Risk Manager agent enforces these)", [
-        "MAX_POSITION_PCT", "MAX_OPEN_POSITIONS", "MAX_DAILY_LOSS_PCT", "MIN_CONFIDENCE",
-        "STOP_LOSS_ATR", "TAKE_PROFIT_ATR"]),
+        "RISK_PER_TRADE_PCT", "MAX_POSITION_PCT", "MAX_OPEN_POSITIONS", "MAX_DAILY_LOSS_PCT", "MAX_DRAWDOWN_PCT",
+        "MIN_CONFIDENCE", "STOP_LOSS_ATR", "TAKE_PROFIT_ATR", "TRAIL_ATR"]),
+    ("Master traders' checklist: trend200, btc, cooldown, reward, alignment, overextended ('none' = off)", [
+        "MENTOR_CHECKS", "MIN_REWARD_RISK", "COOLDOWN_HOURS"]),
 ]
 DEFAULTS = {
     "TRADING_MODE": "testnet", "STARTING_BALANCE_USDT": "10000", "CLAUDE_MODEL": "claude-opus-5-5",
     "DAILY_REPORT_HOUR_UTC": "6", "SYMBOLS": "BTCUSDT,ETHUSDT,SOLUSDT", "CANDLE_INTERVAL": "1h",
     "AI_DAILY_BUDGET_USD": "5", "AUTO_COINS": "true", "MAX_COINS": "8", "SCOUT_HOURS": "6", "MIN_VOLUME_MUSD": "10",
     "CYCLE_MINUTES": "15", "MIN_CHECK_MINUTES": "5", "MAX_CHECK_MINUTES": "60", "NEWS_REFRESH_MINUTES": "30",
-    "MAX_POSITION_PCT": "0.10", "MAX_OPEN_POSITIONS": "3", "MAX_DAILY_LOSS_PCT": "0.03",
-    "MIN_CONFIDENCE": "0.60", "STOP_LOSS_ATR": "2.0", "TAKE_PROFIT_ATR": "3.0",
+    "RISK_PER_TRADE_PCT": "0.01", "MAX_POSITION_PCT": "0.15", "MAX_OPEN_POSITIONS": "3", "MAX_DAILY_LOSS_PCT": "0.03",
+    "MAX_DRAWDOWN_PCT": "0.10", "MIN_CONFIDENCE": "0.60", "STOP_LOSS_ATR": "2.0", "TAKE_PROFIT_ATR": "4.0",
+    "TRAIL_ATR": "2.0", "MENTOR_CHECKS": "trend200,btc,cooldown,reward", "MIN_REWARD_RISK": "2.0",
+    "COOLDOWN_HOURS": "24",
 }
 
 
