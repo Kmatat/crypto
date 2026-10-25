@@ -56,7 +56,7 @@ FREE_AI_CHOICES = [
     ("groq", "Groq - no card, does not keep or train on what it reads; about 1,000 questions a day, smaller word limits"),
     ("mistral", "Mistral - no card; turn off 'Anonymous improvement data' in its settings"),
     ("cloudflare", "Cloudflare Workers AI - no card, does not train; about 180 questions a day; needs your Account ID"),
-    ("openrouter", "OpenRouter - 50 questions a day free (1,000 a day after a one-time $10 purchase)"),
+    ("openrouter", "OpenRouter - 50 questions a day free: too few for the desk until a one-time $10 purchase (1,000 a day)"),
     ("custom", "Another OpenAI-compatible service (address, key and model typed by hand)"),
 ]
 FREE_AI_HOWTO = {
@@ -64,7 +64,7 @@ FREE_AI_HOWTO = {
                "Click 'Get API key', then 'Create API key' (no card needed), and copy the key.",
                "Never click 'Set up billing' unless you mean to pay: the desk only needs the free tier.",
                "Note: on the free tier Google may use what it reads to improve its models. The desk sends only public",
-               "headlines and market numbers, never balances, keys or the notebook."],
+               "headlines, market numbers and its strategy rules, never balances, keys or the notebook."],
     "groq": ["Open https://console.groq.com, sign up (no card), click 'API Keys', then 'Create API Key', and copy it.",
              "Optional: Settings > Data Controls > turn on Zero Data Retention."],
     "mistral": ["Open https://console.mistral.ai, create an account (free mode, no card).",
@@ -72,7 +72,8 @@ FREE_AI_HOWTO = {
     "cloudflare": ["Open https://dash.cloudflare.com (free account), then Workers AI > 'Use REST API'.",
                    "Click 'Create a Workers AI API Token', copy it, and copy the 'Account ID' shown on the same page."],
     "openrouter": ["Open https://openrouter.ai, sign in, then Keys > Create key, and copy it.",
-                   "Free models allow 50 questions a day; buying $10 of credit once raises it to 1,000 a day."],
+                   "Free models allow 50 questions a day, fewer than the news alone needs (about 48). Buying $10 of",
+                   "credit once raises it to 1,000 a day; then set FREE_AI_DAILY_REQUESTS=900 here in the settings."],
     "custom": ["Any service with an OpenAI-compatible /chat/completions address (for example a local Ollama server)."],
 }
 
@@ -317,8 +318,12 @@ class Wizard:
                 base_url = PRESETS["cloudflare"].base_url.replace("{account_id}", account.strip())
             elif provider == "custom":
                 base_url = self.ask("   Service address (ends before /chat/completions)", base_url)
-                models = [m.strip() for m in self.ask("   Model name(s), comma separated", ",".join(models)).split(",")
-                          if m.strip()]
+            # providers retire models often: the names can be changed here (Enter keeps the recommended ones, which a
+            # desk update may refresh)
+            typed = self.ask("   Model name(s), comma separated", ",".join(models or PRESETS[provider].models))
+            models = [m.strip() for m in typed.split(",") if m.strip()]
+            if provider != "custom" and models == list(PRESETS[provider].models):
+                models = []
             key = self.ask_secret("   Free AI API key" + (" (Enter if the service needs none)" if provider == "custom" else ""),
                                   self.v.get("FREE_AI_API_KEY", "") if same else "")
             self.say(f"   Checking with {PRESETS[provider].label}...")
@@ -336,6 +341,13 @@ class Wizard:
                     self.v["AI_ORDER"] = "free-first" if pick == 1 else "claude-first"
                 return
             self.say(f"   ❌ The free AI did not answer: {why}")
+            saved = (provider == self.old.get("FREE_AI_PROVIDER") and key == self.old.get("FREE_AI_API_KEY", "")
+                     and base_url == self.old.get("FREE_AI_BASE_URL", "")
+                     and ",".join(models) == self.old.get("FREE_AI_MODELS", ""))
+            if saved and self.yes("   Keep the saved free AI settings anyway? (it may just be busy; the desk retries "
+                                  "by itself)", True):
+                self.say("   OK - keeping the saved free AI settings.")
+                return
             if not self.yes("   Try again?", True):
                 self.v["FREE_AI_PROVIDER"] = ""
                 self.say("   OK - no free AI.")

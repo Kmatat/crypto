@@ -22,6 +22,7 @@ import logging
 import zipfile
 from pathlib import Path
 
+from .ai_router import effective_order
 from .config import Settings
 from .journal import Journal
 from .report import goals, goals_text, performance, report_text
@@ -367,9 +368,11 @@ class Notes:
                               + (f" and at most {s.ai_pct_month():g}% of the account a month" if s.ai_pct_month()
                                  else " (no percentage cap on demo money; the owner's /aibudget changes it)")
                               + "; the free rules take over when it is spent"],
-                ["Free AI", (f"{s.free_ai_provider} ({', '.join(s.free_ai_models) or 'its recommended models'}), "
-                             f"{s.ai_order}: it costs nothing and is rationed by the provider's daily allowance; web "
-                             "research and the notebook review stay with Claude") if s.use_free_ai else "not configured"],
+                ["Free AI", (f"{s.free_ai_provider} ({', '.join(s.free_ai_models) or 'its recommended models'})"
+                             + (f", {effective_order(s, self.j)}" if s.use_claude else "")
+                             + ": it costs nothing and is rationed by the provider's daily allowance"
+                             + ("; web research, the lab's proposals and the notebook review stay with Claude"
+                                if s.use_claude else "")) if s.use_free_ai else "not configured"],
                 ["Strategy changes", f"at most {MAX_CHANGES} parameters at a time, inside the bounds, after the exam and "
                                      f"the forward test, " + ("promoted automatically" if s.auto_promote else
                                                              "and only with the owner's /approve")],

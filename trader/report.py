@@ -203,8 +203,9 @@ def report_text(p: dict, title: str = "📊 Performance report") -> str:
 def watchlist_text(wl: dict) -> str:
     """Which coins are watched, and why (Telegram /watchlist)."""
     if wl.get("ts"):
-        how = "AI scout with web research" if wl.get("source") == "claude" else \
-            "free AI scout (market data only)" if str(wl.get("source", "")).startswith("ai:") else "market scan"
+        how = "AI scout with web research" if wl.get("source") == "claude" and wl.get("web", True) else \
+            "free AI scout using Claude's web research" if str(wl.get("source", "")).startswith("ai:") and wl.get("web") else \
+            "AI scout (market data only)" if str(wl.get("source", "")).startswith(("ai:", "claude")) else "market scan"
         lines = [f"🔭 Watchlist (updated {wl['ts'][:16].replace('T', ' ')} UTC by {how})"]
     else:
         lines = ["🔭 Watchlist (core coins from your settings)"]

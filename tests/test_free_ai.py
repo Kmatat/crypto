@@ -209,7 +209,7 @@ def test_a_rejected_key_switches_the_provider_off_and_never_leaks_the_key(caplog
 def test_a_retired_model_is_switched_off_and_reported():
     ai, _ = make("groq", Resp(404, {"error": {"message": "The model `openai/gpt-oss-120b` does not exist"}}), ok(HOLD))
     assert ai.ask("s", "p", DECISION_SCHEMA) == HOLD
-    assert ai.take_problems()[0]["kind"] == "model" and "openai/gpt-oss-120b" in ai.disabled
+    assert ai.take_problems()[0]["kind"] == "model:openai/gpt-oss-120b" and "openai/gpt-oss-120b" in ai.disabled
     ai.ask("s", "p", DECISION_SCHEMA)
     assert [c["body"]["model"] for c in ai.session.calls][-1] == "openai/gpt-oss-20b"
 
@@ -219,8 +219,13 @@ def test_an_unreachable_service_is_quietly_skipped():
 
     def down(body):
         raise requests.ConnectionError("connection refused")
-    ai, _ = make("gemini", down)
-    assert ai.ask("s", "p", DECISION_SCHEMA) is None and len(ai.session.calls) == 2
+    ai, clock = make("gemini", down)
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None and len(ai.session.calls) == 1   # the provider is down, not a model
+    clock.t += 300
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None and len(ai.session.calls) == 1   # no timeout paid again this check
+    clock.t += 301
+    ai.session.script = [ok(HOLD)]
+    assert ai.ask("s", "p", DECISION_SCHEMA) == HOLD                                   # tried again after 10 minutes
 
 
 # ---- the router ----
@@ -394,18 +399,191 @@ def test_the_wizard_sets_up_a_free_ai(monkeypatch, tmp_path):
     from trader import setup_wizard as w
     asked = []
     monkeypatch.setattr(w, "check_free_ai", lambda p, k, m, b: (asked.append((p, k, m, b)) or True, ""))
-    answers = iter(["y", "4", "acc-123", "cf-token"])                 # yes, Cloudflare, account id, token
+    answers = iter(["y", "4", "acc-123", "", "cf-token"])             # yes, Cloudflare, account id, models (Enter), token
     wiz = w.Wizard(env_path=tmp_path / ".env", ask=lambda q: next(answers, ""), ask_secret=lambda q: next(answers, ""),
                    say=lambda *a: None)
     wiz.v["ANTHROPIC_API_KEY"] = ""
     wiz.step_free_ai()
     assert wiz.v["FREE_AI_PROVIDER"] == "cloudflare" and wiz.v["FREE_AI_API_KEY"] == "cf-token"
     assert wiz.v["FREE_AI_BASE_URL"] == "https://api.cloudflare.com/client/v4/accounts/acc-123/ai/v1"
-    answers = iter(["y", "1", "gem-key", "2"])                         # Gemini, key, then Claude first
+    answers = iter(["y", "1", "", "gem-key", "2"])                     # Gemini, models (Enter), key, then Claude first
     wiz = w.Wizard(env_path=tmp_path / ".env", ask=lambda q: next(answers, ""), ask_secret=lambda q: next(answers, ""),
                    say=lambda *a: None)
     wiz.v["ANTHROPIC_API_KEY"] = "sk-ant"
     wiz.step_free_ai()
-    assert wiz.v["FREE_AI_PROVIDER"] == "gemini" and wiz.v["AI_ORDER"] == "claude-first"
+    assert wiz.v["FREE_AI_PROVIDER"] == "gemini" and wiz.v["AI_ORDER"] == "claude-first" and wiz.v["FREE_AI_MODELS"] == ""
     w.write_env(tmp_path / ".env", wiz.v)
     assert dotenv_values(tmp_path / ".env")["FREE_AI_PROVIDER"] == "gemini"
+
+
+# ---- 1.6.1: fixes from the review ----
+GOOGLE_DAILY_429 = Resp(429, [{"error": {
+    "code": 429, "status": "RESOURCE_EXHAUSTED",
+    "message": "You exceeded your current quota, please check your plan and billing details. For more information on "
+               "this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, "
+               "head to: https://ai.dev/usage?tab=rate-limit. \\n* Quota exceeded for metric: "
+               "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 500, model: "
+               "gemini-3.5-flash-lite\\nPlease retry in 50.952792289s.",
+    "details": [{"@type": "type.googleapis.com/google.rpc.Help", "links": [
+                    {"description": "Learn more about Gemini API quotas",
+                     "url": "https://ai.google.dev/gemini-api/docs/rate-limits"}]},
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                    {"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                     "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                     "quotaDimensions": {"location": "global", "model": "gemini-3.5-flash-lite"}, "quotaValue": "500"}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "50s"}]}}])
+
+
+def test_googles_long_daily_quota_reply_is_read_to_the_end():
+    ai, _ = make("gemini", GOOGLE_DAILY_429)
+    assert len(json.dumps(GOOGLE_DAILY_429.json())) > 900          # the quota id comes after the first 800 characters
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None
+    assert ai.status()["usage"]["exhausted"] == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    assert [p["kind"] for p in ai.take_problems()] == ["daily"] and ai.requests_left() == 0
+
+
+def test_a_per_minute_refusal_is_not_mistaken_for_a_daily_one():
+    groq_tpm = Resp(429, {"error": {"message": "Rate limit reached for model `openai/gpt-oss-120b` in organization "
+                                               "`org_01jtpdx` service tier `on_demand` on tokens per minute (TPM): "
+                                               "Limit 8000, Used 6100, Requested 3036.", "type": "tokens"}},
+                    {"retry-after": "7"})
+    ai, _ = make("groq", groq_tpm, ok(HOLD))
+    assert ai.ask("s", "p", DECISION_SCHEMA) == HOLD
+    assert ai.status()["usage"]["exhausted"] == [] and not ai.take_problems()
+
+
+def test_groqs_daily_token_cap_limits_the_requests_left():
+    ai, clock = make("groq", ok(HOLD, tokens=2500))
+    assert ai.requests_left() == pytest.approx(2 * 180_000 * 0.9 / 2000)   # tokens, not 1,620 requests, are the limit
+    for _ in range(10):
+        ai.ask("s", "p", DECISION_SCHEMA)
+        clock.t += 61                                                       # one question a minute: no throttling
+    used = ai.status()["usage"]["models"]
+    assert used["openai/gpt-oss-120b"]["answers"] == 10
+    expected = 0.0
+    for m in ai.models:                          # each model: its tokens left at its own average (2,000 before 5 answers)
+        u = used.get(m, {"tokens": 0, "answers": 0})
+        avg = u["tokens"] / u["answers"] if u["answers"] >= 5 else 2000
+        expected += (180_000 * 0.9 - u["tokens"]) / avg
+    assert ai.requests_today() == 10 and ai.requests_left() == pytest.approx(expected)
+    assert expected == pytest.approx((162_000 - 25_000) / 2500 + 162_000 / 2000)   # 135.8, not 1,610
+
+
+def test_the_desks_own_cap_also_raises_one_daily_alert(tmp_path):
+    j = Journal(str(tmp_path / "j.db"), 100)
+    ai, clock = make("gemini", ok(HOLD), store=j, daily_requests=1)
+    ai.ask("s", "p", DECISION_SCHEMA)
+    ai.ask("s", "p", DECISION_SCHEMA)
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None
+    assert [p["kind"] for p in ai.take_problems()] == ["daily"]
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None and not ai.take_problems()          # once a day
+    again, _ = make("gemini", ok(HOLD), store=j, clock=clock, daily_requests=1)
+    assert again.ask("s", "p", DECISION_SCHEMA) is None and not again.take_problems()    # not again after a restart
+
+
+def test_repeated_400s_switch_a_model_off_and_json_object_is_not_resent():
+    odd = Resp(400, {"error": {"message": "Invalid schema for response_format: unexpected field"}})
+    cf, _ = make("cloudflare", odd, base_url="https://api.cloudflare.com/client/v4/accounts/abc/ai/v1")
+    for _ in range(3):
+        assert cf.ask("s", "p", DECISION_SCHEMA) is None
+    assert len(cf.session.calls) == 3                         # json_object already: no identical retry
+    assert cf.disabled == {"@cf/google/gemma-4-26b-a4b-it": "keeps refusing (HTTP 400)"}
+    assert cf.take_problems()[0]["kind"] == "model:@cf/google/gemma-4-26b-a4b-it"
+    gone = Resp(400, {"error": {"message": "model `openai/gpt-oss-120b` has been decommissioned"}})
+    groq, _ = make("groq", gone, ok(HOLD))
+    assert groq.ask("s", "p", DECISION_SCHEMA) == HOLD and "openai/gpt-oss-120b" in groq.disabled
+
+
+def test_a_key_with_a_curly_character_is_reported_clearly():
+    def bad_header(body):
+        raise UnicodeEncodeError("latin-1", "\u201ckey", 0, 1, "ordinal not in range(256)")
+    ai, _ = make("gemini", bad_header)
+    assert ai.ask("s", "p", DECISION_SCHEMA) is None and len(ai.session.calls) == 1
+    p = ai.take_problems()
+    assert p[0]["kind"] == "key" and "copy-paste" in p[0]["text"] and "*" in ai.disabled
+
+
+def test_a_request_across_googles_midnight_does_not_crash(tmp_path):
+    clock = Clock(dt.datetime(2026, 10, 26, 6, 59, 59, tzinfo=dt.timezone.utc).timestamp())   # 23:59:59 in California
+    ai, _ = make("gemini", ok(HOLD), clock=clock, store=Journal(str(tmp_path / "j.db"), 100))
+
+    def answer_after_midnight(body):
+        clock.t += 2
+        ai.status()               # the Telegram thread rolls the day over meanwhile
+        return ok(HOLD)
+    ai.session.script = [answer_after_midnight]
+    assert ai.ask("s", "p", DECISION_SCHEMA, caller="decision") == HOLD
+    assert ai.status()["usage"]["models"].get("gemini-3.5-flash-lite", {}).get("tokens", 0) == 0   # not today's
+
+
+def test_an_ai_that_raises_falls_through_to_the_next():
+    class Broken(FakeAI):
+        def ask(self, *a, **k):
+            raise RuntimeError("bug")
+    claude = FakeAI(HOLD)
+    assert AIRouter(claude, Broken(HOLD), "free-first").ask("s", "p", DECISION_SCHEMA, caller="decision")["_ai"] == "claude"
+
+
+class FakeClaude:
+    def __init__(self, budget=5.0, spent=0.0):
+        self.budget, self.spent_today = budget, spent
+
+    def effective_daily_budget(self):
+        return self.budget
+
+    def avg_call_cost(self, caller=None):
+        return 0.01
+
+    def ask(self, *a, **k):
+        return None
+
+
+def test_claude_keeps_the_news_reserve_the_free_ai_cannot_cover():
+    noon = dt.datetime(2026, 10, 25, 12, 0, tzinfo=dt.timezone.utc)
+    full, _, _ = AIRouter(FakeClaude(), FakeFree(700), "free-first").allowance(noon, 15, 30)
+    empty_free = AIRouter(FakeClaude(), FakeFree(0), "free-first")
+    rate, _, why = empty_free.allowance(noon, 15, 30)
+    assert "$0.24 kept for the news agent" in why                  # 24 refreshes left today x $0.01, all Claude's now
+    assert "kept for the news agent" not in AIRouter(FakeClaude(), FakeFree(700), "free-first").allowance(noon, 15, 30)[2]
+    assert full > rate
+
+
+def test_a_later_desk_setup_order_wins_over_an_earlier_ai_command(monkeypatch, tmp_path):
+    from trader.__main__ import ai_command
+    from trader.ai_router import effective_order
+    j = Journal(str(tmp_path / "j.db"), 10_000)
+    bot = free_bot(monkeypatch, j)
+    bot.llm = FakeClaude()
+    bot.llm.model = "claude-opus-5-5"
+    bot.ai.claude = bot.llm
+    ai_command(bot, j, "claude-first")
+    assert effective_order(Settings(ai_order="free-first"), j) == "claude-first"
+    assert effective_order(Settings(ai_order="claude-first"), j) == "claude-first"   # setup changed AI_ORDER: it wins
+    j.set("ai_order_override", {"order": "free-first", "settings": "claude-first"})
+    assert effective_order(Settings(ai_order="free-first"), j) == "free-first"       # the override no longer applies
+    assert ai_command(bot, j, "default").startswith("✅") and j.get("ai_order_override") is None
+
+
+def test_a_new_readers_news_does_not_borrow_claudes_hit_rate():
+    j = Journal(":memory:", 10_000)
+    j.set("news_scorecard", {"judged": 80, "hit_rate_pct": 62.0,
+                             "by_source": {"claude": {"judged": 80, "hit_rate_pct": 62.0},
+                                           "ai:gemini": {"judged": 4, "hit_rate_pct": 75.0}}})
+    head = HeadTraderAgent(Settings(), j)
+    assert head.threshold("ETHUSDT", 0.35, {}, {}, 0.8, news_source="claude")[0] < 0.35
+    assert head.threshold("ETHUSDT", 0.35, {}, {}, 0.8, news_source="ai:gemini")[0] == 0.35
+
+
+def test_free_ai_prompts_never_carry_claudes_review_of_the_notebook(monkeypatch):
+    bot = free_bot(monkeypatch)
+    bot.journal.set("last_review", {"review": {"summary": "Equity 9,812 USDT, down 1.9%", "failing": ["fees"]}})
+    bot.run_cycle()
+    assert "9,812" not in bot.decision.playbook
+    assert "9,812" in bot.head.playbook(private=True)
+
+
+def test_scout_labels_say_when_claudes_web_research_was_used():
+    from trader.notify import scout_message
+    text = scout_message({"symbols": ["BTCUSDT"], "reasons": {"BTCUSDT": "core"}, "added": [], "removed": [],
+                          "source": "ai:gemini", "web": True})
+    assert "free AI scout using Claude's web research" in text

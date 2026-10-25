@@ -232,7 +232,7 @@ service with an OpenAI-compatible chat API; presets cover the free tiers checked
 | `groq` | `openai/gpt-oss-120b` and `-20b`, about 900 a day each, but only 8,000 tokens a minute and 200,000 a day (a token is about three quarters of a word) | No card; does not keep or train on prompts |
 | `mistral` | `mistral-small-latest`, `ministral-8b-latest` | Free mode; turn off "Anonymous improvement data" |
 | `cloudflare` | Gemma 4 on Workers AI, about 180 a day (10,000 "neurons") | Needs the account id in `FREE_AI_BASE_URL`; does not train |
-| `openrouter` | `openrouter/free`, 50 a day (1,000 after a one-time $10 purchase) | |
+| `openrouter` | `openrouter/free`, 50 a day: fewer than the news alone needs; 1,000 after a one-time $10 purchase (then set `FREE_AI_DAILY_REQUESTS=900`) | |
 | `custom` | any OpenAI-compatible address (`FREE_AI_BASE_URL`, `FREE_AI_MODELS`) | e.g. a local Ollama server |
 
 The desk needs about 90 questions on a normal day (measured: news every 30 minutes, about 35 buy/sell checks, the
@@ -242,17 +242,25 @@ How it behaves:
 - **Order** (`AI_ORDER`, or `/ai` on Telegram): `free-first` (default) asks the free AI and pays Claude only when the
   free AI cannot answer; `claude-first` uses Claude while its daily budget lasts, then the free AI. The free rules
   come after both.
-- **Always Claude:** web research (the scout's and the weekly lab's) and `/review` of the private notebook.
+- **Always Claude:** web research (the scout's and the weekly lab's), the lab's strategy proposals (built from the
+  notebook's lessons and strategy history) and `/review` of the private notebook. A free AI sees public headlines,
+  market numbers and the desk's strategy rules, never balances, keys or the notebook (Claude's review of it is left
+  out of the playbook it reads).
 - **Rationed by requests, not dollars:** the desk counts every request (failed ones too, as Google does), keeps 10%
-  of each daily allowance in reserve, waits briefly for a per-minute slot or moves to the next model, and never
-  retries in a loop. The head trader spreads the remaining questions over the checks left before the provider's
-  daily reset, after keeping what the news agent and the scout will need.
+  of each daily allowance in reserve (requests, and tokens where the provider also caps tokens a day), waits briefly
+  for a per-minute slot or moves to the next model, and never retries in a loop. After a timeout or an outage the
+  provider rests 10 minutes, so a market check pays at most one timeout per model. The head trader spreads the
+  remaining questions over the checks left before the provider's daily reset, after keeping what the news agent and
+  the scout will need.
 - **Checked answers:** every answer must match the question's form (JSON schema) before an agent sees it; a wrong one
   goes to the next model, then Claude, then the rules.
 - **Measured separately:** decisions carry their source (`claude`, `ai:gemini`, `rules`); the scorecard judges each AI
   against the rules on real later prices, and the news hit rate is shown per reader. A free model may slow the
   check pace down but not speed it up.
-- **Problems are reported once on Telegram:** a rejected key, a retired model, the daily allowance used up.
+- **Problems are reported once on Telegram:** a rejected key, a model the provider no longer accepts, the daily
+  allowance used up (by the provider's count or the desk's own).
+- **News tilt per reader:** the head trader lowers a threshold on strong news only for a reader whose own news scores
+  have a measured hit rate (a new free AI does not inherit Claude's record).
 - **The key** stays in `.env`, travels only in the request header and is never logged.
 
 Free tiers change without notice (in 2026 several were cut or closed), so every model name and the daily

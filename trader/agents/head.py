@@ -55,7 +55,7 @@ class HeadTraderAgent:
 
     def __init__(self, s: Settings, journal: Journal, llm=None):
         self.s, self.journal, self.llm = s, journal, llm
-        self._playbook: tuple[float, str] | None = None
+        self._playbook: tuple[float, str, bool] | None = None
         self._next_call_at: dt.datetime | None = None
         self.last_plan: dict = {}
 
@@ -131,7 +131,7 @@ class HeadTraderAgent:
 
     # ---- thresholds for this check ----
     def threshold(self, symbol: str, base: float, closes: dict[str, list[float]], positions: dict,
-                  news_score: float = 0.0) -> tuple[float, str]:
+                  news_score: float = 0.0, news_source: str | None = None) -> tuple[float, str]:
         """The coin's threshold for this check and the reason. Only a coin not yet held is tilted: raised by TILT for
         every held coin that moves with it (buying it would be the same bet twice), and tilted by news only once news
         has proven itself. A held coin keeps the card's sell bar, which is what the laboratory measured: raising it
@@ -148,6 +148,9 @@ class HeadTraderAgent:
                 tilt += TILT
                 reasons.append(f"+{TILT:g} already holding {held.removesuffix('USDT')} (correlation {c:.2f})")
         ns = self.journal.get("news_scorecard") or {}
+        src = str(news_source or "").removesuffix("-reused")
+        if src:   # each reader is judged on its own record: a new free AI does not inherit Claude's hit rate
+            ns = (ns.get("by_source") or {}).get(src) or {}
         if (ns.get("judged") or 0) >= NEWS_MIN_JUDGED and (ns.get("hit_rate_pct") or 0) >= NEWS_MIN_HIT_PCT:
             if news_score >= 0.5:
                 tilt -= TILT
@@ -160,10 +163,12 @@ class HeadTraderAgent:
         return final, ("; ".join(reasons) if reasons else "coin threshold")
 
     # ---- the desk's knowledge, for every AI prompt ----
-    def playbook(self, max_chars: int = 1500, now: float | None = None) -> str:
+    def playbook(self, max_chars: int = 1500, now: float | None = None, private: bool = False) -> str:
+        """`private`: also quote Claude's last review of the notebook (it can mention balances and results). Only for
+        the owner and Claude: a free AI, which may train on what it reads, gets the playbook without it."""
         import time
         now = now or time.time()
-        if self._playbook and now - self._playbook[0] < PLAYBOOK_SECONDS:
+        if self._playbook and now - self._playbook[0] < PLAYBOOK_SECONDS and self._playbook[2] == private:
             return self._playbook[1]
         j = self.journal
         lines = []
@@ -197,7 +202,7 @@ class HeadTraderAgent:
             if verdicts:
                 lines.append("The AI versus the rules so far: " + "; ".join(verdicts))
         review = (j.get("last_review") or {}).get("review") or {}
-        if review.get("summary"):
+        if private and review.get("summary"):
             lines.append("Last review: " + str(review["summary"])[:300])
             if review.get("failing"):
                 lines.append("Failing: " + "; ".join(str(x) for x in review["failing"][:2]))
@@ -205,7 +210,7 @@ class HeadTraderAgent:
         if len(hist) > 1:
             lines.append("Strategy changes: " + "; ".join(f"{h['ts'][:10]} {h['event']} {h.get('name')}" for h in hist[-3:]))
         text = "\n".join(lines)[:max_chars]
-        self._playbook = (now, text)
+        self._playbook = (now, text, private)
         return text
 
     # ---- weekly: the threshold study, handed to the laboratory ----

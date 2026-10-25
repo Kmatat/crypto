@@ -188,9 +188,11 @@ def test_playbook_carries_the_desk_knowledge():
                               "coins": {"XRPUSDT": {"threshold": 0.45, "why": "best 0.5 (+2% on 30 trades)"}}})
     j.set("last_review", {"review": {"summary": "Too early to tell.", "failing": ["fees"]}})
     head._playbook = None
-    text = head.playbook()
+    text = head.playbook(private=True)      # for the owner and Claude: with Claude's review of the private notebook
     assert "Strategy in force" in text and "XRP 0.45" in text and "two hours" in text and "Too early" in text
-    assert len(text) <= 1500 and head.playbook() == text   # cached
+    assert len(text) <= 1500 and head.playbook(private=True) == text   # cached
+    shared = head.playbook()                # what a free AI may read: no review of the notebook
+    assert "Strategy in force" in shared and "two hours" in shared and "Too early" not in shared
 
 
 def test_desk_records_the_head_threshold_and_can_run_without_the_head():

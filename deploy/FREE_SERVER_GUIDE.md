@@ -88,8 +88,8 @@ Get one at **https://console.anthropic.com**, under **API Keys**. The account ne
    model; the desk needs about 90 on a normal day).
 
 Good to know: on the free tier Google may use what it reads to improve its models (not in the EU, the UK or
-Switzerland). The desk sends it only public news headlines and market numbers, never your balances, keys or
-notebook. If you prefer a provider that never keeps what it reads, choose **Groq** in the setup instead
+Switzerland). The desk sends it only public news headlines, market numbers and its strategy rules, never your
+balances, keys or notebook. If you prefer a provider that never keeps what it reads, choose **Groq** in the setup instead
 (**https://console.groq.com** → *API Keys* → *Create API Key*, no card).
 
 ## Part 4: Install the desk on the server (10 minutes)
@@ -219,9 +219,13 @@ questions (reading the news, double-checking each buy or sell, choosing coins) a
    cannot answer) or **2) Claude** (Claude's judgement while its daily budget lasts, then the free AI).
 4. The desk restarts by itself. Send `/ai` on Telegram: it shows the free AI and its questions used today.
 
-What stays with Claude whatever you choose: web research (the coin scout's news search and the weekly lab's) and
-`/review`, because free tiers cannot search the web and the notebook holds your private records. Without Claude,
-the scout and the lab work from market data only.
+What stays with Claude whatever you choose: web research (the coin scout's news search and the weekly lab's), the
+lab's strategy proposals and `/review`, because free tiers cannot search the web and the notebook holds your private
+records. Without Claude, the scout works from market data only and the lab tests rule-based variations of the
+strategy.
+
+If the free AI's test question fails when you re-run `desk setup` (it may just be busy), answer **y** to *Keep the
+saved free AI settings anyway?*: the desk retries by itself and tells you on Telegram if the key is wrong.
 
 What to expect: the free model is smaller than Claude. The scorecard (daily report, `/report`) judges it
 separately from Claude, so after a few weeks you can see which one's vetoes saved money. When the free allowance is

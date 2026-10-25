@@ -38,7 +38,7 @@ from .agents.prediction import PredictionAgent
 from .agents.risk import RiskManagerAgent
 from .agents.scout import MarketScoutAgent
 from .agents.technical import TechnicalAnalysisAgent
-from .ai_router import AIRouter
+from .ai_router import AIRouter, effective_order
 from .binance_client import BinanceClient
 from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
@@ -70,8 +70,7 @@ class Orchestrator:
         # the free AI answers the everyday questions within its daily allowance; the router sends each question to
         # the free AI or Claude in the owner's order (AI_ORDER, or /ai on Telegram), the free rules after both
         self.free_ai = free_ai.from_settings(s, store=self.journal)
-        order = self.journal.get("ai_order_override") or s.ai_order
-        self.ai = AIRouter(self.llm, self.free_ai, order) if self.free_ai else self.llm
+        self.ai = AIRouter(self.llm, self.free_ai, effective_order(s, self.journal)) if self.free_ai else self.llm
 
         public = None if s.offline else BinanceClient(PUBLIC_BASE_URL)
         testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) \
@@ -277,7 +276,8 @@ class Orchestrator:
         #    change anything; then the head trader decides who may consult Claude; then sells right away, buys
         #    collected and ranked
         if self.head:
-            self.decision.playbook = self.head.playbook()
+            # Claude's review of the private notebook stays out of what a free AI reads
+            self.decision.playbook = self.head.playbook(private=self.free_ai is None)
         closes = {sym: c["closes"] for sym, c in ctx.items()}
         pending = []
         for sym, c in ctx.items():
@@ -298,7 +298,8 @@ class Orchestrator:
                 score = self.decision.score(reports)
                 base_thr = self.decision.threshold_for(sym)
                 news_score = float(reports["news"].get("score", 0) or 0)
-                thr, why = self.head.threshold(sym, base_thr, closes, positions, news_score) if self.head \
+                thr, why = self.head.threshold(sym, base_thr, closes, positions, news_score,
+                                               news_source=reports["news"].get("source")) if self.head \
                     else (base_thr, "coin threshold")
                 reports["head"] = {"threshold": thr, "why": why}
                 # Claude costs money: a buy the checklist or the position limit refuses anyway is not worth a call

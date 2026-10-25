@@ -71,7 +71,15 @@ PRESETS: dict[str, Preset] = {
 }
 
 MAX_WAIT_SECONDS = 20     # the longest the desk waits for a per-minute slot before moving on
-COOLDOWN_SECONDS = 60     # after a "too many requests a minute" or a server error
+COOLDOWN_SECONDS = 60     # after a "too many requests a minute" or a quick server error
+OUTAGE_COOLDOWN_SECONDS = 600   # after a timeout, a lost connection or a gateway timeout: longer than one market
+                                # check, so each model costs at most one timeout per check instead of one per question
+BAD_REQUESTS_TO_SWITCH_OFF = 3  # the same model refusing this many questions in a row (HTTP 400) is switched off
+# a 429 that means "come back tomorrow", not "slow down": Google's quota id ...PerDay..., Groq's (RPD)/(TPD), Cloudflare's
+# error 3036, OpenRouter's free-models-per-day. Word boundaries keep identifiers like an org id from matching.
+DAILY_LIMIT = re.compile(r'perday|per day|quota_exceeded|\bdaily\b|\b[rt]pd\b|free-models-per-day|"code": 3036\b')
+GONE_MODEL = re.compile(r"no such model|model_not_found|does not exist|decommissioned|invalid model|unknown model|"
+                        r"is not a valid model|\b5007\b")
 TIMEOUT = (10, 60)        # connect, read
 SAFETY_MARGIN = 0.9       # plan with 90% of each daily allowance
 
@@ -197,10 +205,11 @@ class FreeAI:
         self.store, self.clock, self.sleep = store, clock, sleep
         self.session = session or requests.Session()
         self._lock = threading.Lock()   # the Telegram thread reads the counters while a check asks
-        self._recent: dict[str, list[list[float]]] = {}   # model -> [time, tokens] of the last minute's calls
+        self._recent: dict[str, list[list]] = {}          # model -> [time, tokens, quota day] of the last minute's calls
         self._cool: dict[str, float] = {}                 # model -> time it may be asked again
         self._json_in_prompt: set[str] = set()            # models that refused the json_schema format
         self.disabled: dict[str, str] = {}                # model (or "*" for all) -> why, until the desk restarts
+        self._bad400: dict[str, int] = {}                 # model -> HTTP 400 refusals in a row
         self.problems: list[dict] = []                    # for one Telegram alert each
         self.usage = self._load()
 
@@ -212,7 +221,8 @@ class FreeAI:
         return reset_day(self.preset.reset_tz, self.clock())
 
     def _fresh(self) -> dict:
-        return {"provider": self.provider, "day": self._today(), "models": {}, "exhausted": [], "by_caller": {}}
+        return {"provider": self.provider, "day": self._today(), "models": {}, "exhausted": [], "by_caller": {},
+                "alerted": False}
 
     def _load(self) -> dict:
         saved = self.store.get("free_ai_usage") if self.store else None
@@ -247,8 +257,19 @@ class FreeAI:
             self._roll()
             return sum(m.get("requests", 0) for m in self.usage["models"].values())
 
+    def _token_requests_left(self, model: str) -> float:
+        """Requests the model's remaining daily tokens still pay for (unlimited when the provider has no token cap),
+        at the model's own average size today (2,000 tokens a request before it has answered five)."""
+        if not self.preset.tpd:
+            return math.inf
+        u = self._m(model)
+        done = u.get("answers", 0) + u.get("bad", 0)
+        avg = u["tokens"] / done if done >= 5 and u["tokens"] else 2000
+        return max(0.0, self.preset.tpd * SAFETY_MARGIN - u["tokens"]) / max(1.0, avg)
+
     def requests_left(self) -> float:
-        """Requests the desk may still make today, keeping 10% of each allowance in reserve."""
+        """Requests the desk may still make today, keeping 10% of each allowance (requests, and tokens where the
+        provider also caps tokens a day) in reserve."""
         with self._lock:
             self._roll()
             models = [m for m in self.models if self.usable(m)]
@@ -257,7 +278,7 @@ class FreeAI:
             cap = self.daily * SAFETY_MARGIN
             if self.preset.shared_daily:
                 return max(0.0, cap - self._used(models[0]))
-            return sum(max(0.0, cap - self._used(m)) for m in models)
+            return sum(max(0.0, min(cap - self._used(m), self._token_requests_left(m))) for m in models)
 
     def minutes_to_reset(self) -> float:
         return minutes_to_reset(self.preset.reset_tz, self.clock())
@@ -290,7 +311,22 @@ class FreeAI:
                 return answer
             if stop:
                 break
+        self._note_used_up()
         return None
+
+    def _note_used_up(self) -> None:
+        """One 'daily' alert per quota day once no model can answer any more, whether the provider said so (429) or
+        the desk's own counters ran out first (the usual case: the presets stay below the providers' limits).
+        Models switched off for another reason (a wrong key, a retired model) have their own alert."""
+        with self._lock:
+            self._roll()
+            capped = [m for m in self.models if m not in self.disabled]
+            if "*" in self.disabled or not capped or any(self.usable(m) for m in capped) or self.usage.get("alerted"):
+                return
+            self.usage["alerted"] = True
+            self._save()
+            self._problem("daily", f"the free daily allowance of {self.label} is used up; Claude (if it has budget) or "
+                                   f"the free rules answer until it restarts in about {self.minutes_to_reset() / 60:.0f} h")
 
     def _wait(self, model: str, tokens: int) -> float:
         """Seconds until this call fits the model's per-minute request and token limits."""
@@ -302,11 +338,11 @@ class FreeAI:
             wait = recent[len(recent) - self.preset.rpm][0] + 60 - now
         if self.preset.tpm:
             total = sum(r[1] for r in recent) + tokens
-            for t, n in recent:   # oldest first: wait until enough of the last minute's tokens have expired
+            for r in recent:   # oldest first: wait until enough of the last minute's tokens have expired
                 if total <= self.preset.tpm:
                     break
-                total -= n
-                wait = max(wait, t + 60 - now)
+                total -= r[1]
+                wait = max(wait, r[0] + 60 - now)
         return max(0.0, wait)
 
     def _body(self, model: str, system: str, prompt: str, schema: dict) -> dict:
@@ -348,19 +384,31 @@ class FreeAI:
             m["requests"] += 1        # counted before sending: a refused request still counts against the quota
             c = self.usage["by_caller"].setdefault(caller, {"calls": 0, "tokens": 0})
             c["calls"] += 1
-            entry = [self.clock(), tokens]
+            entry = [self.clock(), tokens, self.usage["day"]]   # the quota day this request was counted in
             self._recent.setdefault(model, []).append(entry)
             self._save()
         try:
             r = self.session.post(f"{self.base_url}/chat/completions", json=body, timeout=TIMEOUT,
                                   headers={"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"})
-        except requests.RequestException as e:
-            self._cool[model] = self.clock() + COOLDOWN_SECONDS
+        except Exception as e:  # noqa: BLE001 - network errors, and a key with a character no HTTP header can carry
+            with self._lock:
+                if isinstance(e, UnicodeError):
+                    self.disabled["*"] = "the key has a character that is not plain text"
+                    self._problem("key", f"FREE_AI_API_KEY for {self.label} contains a character that is not a plain "
+                                         "letter or digit (often an invisible character or a curly quote from a "
+                                         "copy-paste); paste it again with desk setup. Until then Claude or the free "
+                                         "rules answer.")
+                    return None, True
+                # the whole provider is unreachable, not just this model: rest them all
+                rest = self.models if isinstance(e, (requests.ConnectionError, requests.ConnectTimeout)) else [model]
+                for m in rest:
+                    self._cool[m] = self.clock() + OUTAGE_COOLDOWN_SECONDS
             log.warning("Free AI (%s) unreachable: %s", self.provider, self._scrub(type(e).__name__ + " " + str(e))[:200])
             return None, False
         if r.status_code == 200:
+            self._bad400.pop(model, None)
             return self._answer(model, r, schema, caller, entry), False
-        return self._refused(model, r, system, prompt, schema, caller, retry_format)
+        return self._refused(model, r, system, prompt, schema, caller, retry_format, entry)
 
     def _answer(self, model, r, schema, caller, entry) -> dict | None:
         try:
@@ -374,9 +422,12 @@ class FreeAI:
             content, used = "", entry[1]
         with self._lock:
             entry[1] = used
-            m = self._m(model)
+            same_day = self.usage.get("day") == entry[2]
+            # a request counted before the provider's midnight is not charged to the new day
+            m = self._m(model) if same_day else {"tokens": 0, "answers": 0, "bad": 0}
             m["tokens"] += used
-            self.usage["by_caller"][caller]["tokens"] += used
+            if same_day:
+                self.usage["by_caller"].setdefault(caller, {"calls": 0, "tokens": 0})["tokens"] += used
             try:
                 answer = conform(schema, parse_json(content))
             except (ValueError, TypeError) as e:
@@ -395,7 +446,7 @@ class FreeAI:
         try:
             data = r.json()
         except ValueError:
-            return self._scrub((r.text or "")[:500])
+            return self._scrub(r.text or "")[:2000]
         if isinstance(data, list) and data:   # Google's OpenAI-compatible errors come wrapped in a list
             data = data[0]
         err = data.get("error", data) if isinstance(data, dict) else data
@@ -407,24 +458,20 @@ class FreeAI:
             text = str(err)
         if isinstance(data, dict) and data.get("errors"):   # Cloudflare: {"errors": [{"code": 3036, ...}]}
             text += " " + json.dumps(data["errors"])
-        return self._scrub(text[:800])
+        return self._scrub(text)   # whole: Google puts the deciding quota id after a long help text
 
-    def _refused(self, model, r, system, prompt, schema, caller, retry_format) -> tuple[dict | None, bool]:
+    def _refused(self, model, r, system, prompt, schema, caller, retry_format, entry) -> tuple[dict | None, bool]:
         status, text = r.status_code, self._error_text(r)
         low = text.lower()
         now = self.clock()
         retry = False
         with self._lock:
             if status == 429:
-                if any(k in low for k in ("perday", "per day", "quota_exceeded", "daily", "rpd", "tpd", "3036",
-                                          "free-models-per-day")):
-                    if model not in self.usage["exhausted"]:
+                if DAILY_LIMIT.search(low):
+                    # yesterday's refusal (the provider's midnight passed meanwhile) says nothing about today
+                    if self.usage.get("day") == entry[2] and model not in self.usage["exhausted"]:
                         self.usage["exhausted"].append(model)
                         self._save()
-                    if not [m for m in self.models if self.usable(m)]:
-                        self._problem("daily", f"the free daily allowance of {self.label} is used up; Claude (if it "
-                                               f"has budget) or the free rules answer until it restarts in about "
-                                               f"{self.minutes_to_reset() / 60:.0f} h")
                     return None, False
                 try:
                     pause = float(r.headers.get("retry-after") or COOLDOWN_SECONDS)
@@ -433,7 +480,8 @@ class FreeAI:
                 self._cool[model] = now + max(5.0, min(600.0, pause))
                 log.info("Free AI (%s/%s) busy for %.0f s", self.provider, model, pause)
                 return None, False
-            if status == 400 and retry_format and model not in self._json_in_prompt and any(
+            sent_schema = self.preset.json_mode == "json_schema" and model not in self._json_in_prompt
+            if status == 400 and retry_format and sent_schema and any(
                     k in low for k in ("response_format", "json_schema", "schema", "structured")):
                 self._json_in_prompt.add(model)   # the form goes into the instructions from now on
                 retry = True
@@ -447,15 +495,24 @@ class FreeAI:
                 self._problem("key", f"{self.label} refused the key (HTTP {status}: {text[:160]}). Check "
                                      f"FREE_AI_API_KEY with desk setup; until then Claude or the free rules answer.")
                 return None, True
-            elif status in (404, 410):
+            elif status in (404, 410) or (status == 400 and GONE_MODEL.search(low)):
                 self.disabled[model] = "unknown model"
-                self._problem("model", f"{self.label} no longer offers {model} (HTTP {status}); set a current model in "
-                                       "FREE_AI_MODELS (desk setup)")
+                self._problem(f"model:{model}", f"{self.label} does not accept the model {model} (HTTP {status}: "
+                                                f"{text[:120]}); the desk uses its other models. Choose current model "
+                                                "names with desk setup (FREE_AI_MODELS).")
                 return None, False
             elif status == 413:
                 return None, False   # too large for this model's limits: the next model, or Claude
+            elif status == 400:
+                n = self._bad400[model] = self._bad400.get(model, 0) + 1
+                log.warning("Free AI (%s/%s) refused the question (HTTP 400): %s", self.provider, model, text[:200])
+                if n >= BAD_REQUESTS_TO_SWITCH_OFF:
+                    self.disabled[model] = "keeps refusing (HTTP 400)"
+                    self._problem(f"model:{model}", f"{self.label} refused {n} questions in a row for {model} (HTTP 400: "
+                                                    f"{text[:120]}); the desk uses its other models until it restarts.")
+                return None, False
             else:
-                self._cool[model] = now + COOLDOWN_SECONDS
+                self._cool[model] = now + (OUTAGE_COOLDOWN_SECONDS if status in (502, 503, 504) else COOLDOWN_SECONDS)
                 log.warning("Free AI (%s/%s) error %s: %s", self.provider, model, status, text[:200])
                 return None, False
         if retry:

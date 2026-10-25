@@ -5,6 +5,30 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.1 - 2026-10-25
+
+Fixes from an independent review of 1.6.0 (26 confirmed findings, none affecting a desk without a free AI key):
+- Google's "daily quota used up" reply was read as "slow down for a minute", because the deciding part comes after a
+  long help text and the desk read only the first 800 characters. The whole reply is now read; "come back tomorrow"
+  is recognised by whole words only, so a per-minute refusal is no longer mistaken for a daily one.
+- Groq's daily token cap now counts in the plan, so the free AI is not spent by mid-morning.
+- A "daily allowance used up" alert also when the desk's own counters run out first (the usual case), once a day.
+- After a timeout or an outage the provider rests 10 minutes instead of 1, so a check pays at most one timeout per
+  model; a lost connection rests all its models.
+- A model that keeps refusing questions (HTTP 400) is switched off with an alert; a model the provider no longer
+  accepts is reported once per model with the provider's own words; the JSON-form retry happens only when it can help.
+- A key with an invisible or curly character from a copy-paste is reported clearly instead of failing silently.
+- A request in flight across the provider's midnight no longer crashes a question; any AI error falls through to the
+  next AI and then the rules.
+- Privacy: Claude's review of the private notebook is left out of the playbook a free AI reads, and the lab's
+  strategy proposals (built from the notebook's lessons and history) stay with Claude.
+- The head trader lowers a threshold on strong news only for a reader with its own measured hit rate, and keeps
+  Claude's news reserve for the refreshes the free AI cannot cover.
+- `/ai default`; a later AI_ORDER change in desk setup wins over an earlier `/ai` choice; the notebook shows the order
+  in force. Re-running desk setup keeps a saved free AI when its test question fails, and asks for model names.
+- Texts: "no daily cap" instead of "$0.00"; the Claude-budget alert says the free AI takes over; scout picks made from
+  Claude's web research are no longer labelled "market data only"; `.env.example` comments no longer read as values.
+
 ## 1.6.0 - 2026-10-25
 
 - A free AI next to Claude, for small budgets. `desk setup` has a new step (STEP 3) to add one: Google Gemini

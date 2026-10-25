@@ -122,12 +122,13 @@ class MarketScoutAgent:
     def run(self, core: list[str], held: list[str]) -> dict:
         cands = self.candidates()
         slots = max(0, self.s.max_coins - len(core))
-        picks, avoid, summary, sources, source = None, {}, "", [], "rules"
+        picks, avoid, summary, sources, source, web = None, {}, "", [], "rules", False
         if self.llm and slots and cands:
             ai = self._ai_pick(cands, core, held, slots)
             if ai is not None:
                 picks, avoid, summary, sources, source = (ai["picks"], ai["avoid"], ai["summary"], ai["sources"],
                                                           ai.get("by", "claude"))
+                web = ai.get("web", True)
         if picks is None:
             picks = self._rule_pick(cands, core, slots)
         reasons = {c: "core coin (always watched)" for c in core} | picks
@@ -137,7 +138,7 @@ class MarketScoutAgent:
                 symbols.append(h)
                 reasons[h] = "we hold it - watched until it is sold"
         return {"symbols": symbols, "reasons": {s: reasons[s] for s in symbols}, "avoid": avoid, "summary": summary,
-                "sources": sources, "source": source, "candidates": len(cands),
+                "sources": sources, "source": source, "web": web, "candidates": len(cands),
                 "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
 
     @staticmethod
@@ -190,4 +191,4 @@ class MarketScoutAgent:
             return None
         return {"picks": picks, "avoid": {normalize(a["symbol"]): a["reason"] for a in data["avoid"]},
                 "summary": data["summary"], "sources": research["sources"] if research else [],
-                "by": data.get("_ai", "claude")}
+                "by": data.get("_ai", "claude"), "web": research is not None}

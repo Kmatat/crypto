@@ -243,8 +243,11 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
     wl = j.get("watchlist") or {}
     rows.append(row("Market scout", "finds liquid coins worth watching", "working" if bot.scout else "off",
                     (f"{len(wl.get('symbols', []))} coins, refreshed {ago(wl.get('ts'))} by "
-                     + ("AI research" if wl.get("source") == "claude" else
-                        "the free AI (market data only)" if str(wl.get("source", "")).startswith("ai:") else "market scan"))
+                     + ("AI research" if wl.get("source") == "claude" and wl.get("web", True) else
+                        "the free AI with Claude's web research" if str(wl.get("source", "")).startswith("ai:")
+                        and wl.get("web") else
+                        "AI (market data only)" if str(wl.get("source", "")).startswith(("ai:", "claude")) else
+                        "market scan"))
                     if bot.scout and wl.get("ts")
                     else ("waiting for its first run" if bot.scout else "AUTO_COINS=false"), err("scout")))
     cache = getattr(bot.news, "_cache", None)
@@ -475,7 +478,8 @@ def settings_lines(bot) -> list[str]:
               + f"; positions about ${(equity or base.starting_balance) * s.max_position_pct:,.2f} each (minimum order $10)"]
     if bot.llm:
         pct = base.ai_pct_month()
-        budget.append(f"Claude cap ${bot.llm.effective_daily_budget():.2f}/day ("
+        budget.append(f"Claude cap " + (f"${bot.llm.effective_daily_budget():.2f}/day" if bot.llm.effective_daily_budget()
+                                        else "none") + " ("
                       + ("set with /aibudget" if bot.journal.get("ai_budget_override") else
                          f"the lower of ${base.ai_daily_budget_usd:g}/day and {pct:g}% a month of the balance" if pct else
                          f"AI_DAILY_BUDGET_USD; no percentage cap on demo money")
