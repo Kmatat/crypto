@@ -479,6 +479,9 @@ def ai_command(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     return "\n".join(lines)
 
 
+WARMUP_DAYS = 230   # history before a replayed period: the 200-day average plus a margin
+
+
 def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict | None:
     """The rule core over the same period and coins, with the strategy in force and real prices (for /diagnose).
     Uses the card's own rules, so it never changes what the live desk decides meanwhile."""
@@ -487,11 +490,13 @@ def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict |
     client = bot.market.client
     if client is None:
         return None
-    n = int(period + 1.5)
+    # the checklist's 200-day average and the indicators need history before the period: without it the replay's
+    # rules are looser than the live desk's (a check without enough history is "unknown" and does not block)
+    n = int(period) + WARMUP_DAYS
     hist = {sym: fetch_history(client, sym, n, bot.s.interval) for sym in symbols}
     btc = hist.get("BTCUSDT") or fetch_history(client, "BTCUSDT", n, bot.s.interval)
     return Backtest(bot.s, hist, decision=DecisionAgent.for_card(bot.card) if bot.card else None,
-                    days=max(1, int(round(period))), btc_history=btc).run()
+                    days=period, btc_history=btc).run()
 
 
 def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:

@@ -67,3 +67,59 @@ def test_the_start_messages_include_the_budget_change(tmp_path):
     s = Settings(offline=True, symbols=["BTCUSDT"], starting_balance=5000)
     lines = start_checks(Orchestrator(s, j), s)
     assert any(line.startswith("💰 Budget changed") for line in lines)
+
+
+# ---- 1.6.3: what /diagnose and the price gap measure ----
+def test_diagnose_compares_the_same_span_as_the_record(tmp_path):
+    import datetime as dt
+    from trader.health import diagnose_text
+    j = Journal(str(tmp_path / "j.db"), 5000)
+    began = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=20)).isoformat(timespec="seconds")
+    j.db.execute("INSERT INTO equity VALUES (?,?,?)", (began, 5000, 5000))
+    j.log_decision("TRXUSDT", {"action": "BUY", "confidence": 0.7, "source": "rules", "reasoning": "r",
+                               "rules_action": "BUY", "combined_score": 0.4}, {"approved": True, "reason": "ok"}, {})
+    bot = Orchestrator(Settings(offline=True, symbols=["BTCUSDT"], starting_balance=5000), j)
+    asked = []
+    text = diagnose_text(bot, j, 7, lambda symbols, period: asked.append(period) or None)
+    assert asked and abs(asked[0] - 20 / 24) < 0.01                      # 20 hours, not 7 days
+    assert "since the desk's record began 20 h ago (asked: 7 days)" in text
+
+
+def test_the_rules_replay_gets_200_days_of_history_before_the_period(monkeypatch):
+    from trader import __main__ as main, backtest
+    bot = Orchestrator(Settings(offline=True, symbols=["BTCUSDT"]), Journal(":memory:", 10_000))
+    bot.market.client = object()
+    asked, ran = [], {}
+    monkeypatch.setattr(backtest, "fetch_history", lambda client, sym, days, interval="1h": asked.append(days) or [])
+
+    class FakeBacktest:
+        def __init__(self, s, hist, decision=None, days=None, btc_history=None, **kw):
+            ran["days"] = days
+
+        def run(self):
+            return {"trades": 0}
+    monkeypatch.setattr(backtest, "Backtest", FakeBacktest)
+    main.rules_replay(bot, ["ETHUSDT"], 0.8)
+    assert min(asked) >= 200 and ran["days"] == 0.8
+
+
+def test_an_exchange_exit_is_judged_against_its_stop_price():
+    j = Journal(":memory:", 5000)
+    bot = Orchestrator(Settings(offline=True, symbols=["ENAUSDT"], starting_balance=5000), j)
+    j.open_position("ENAUSDT", {"qty": 1000.0, "avg_price": 0.50, "quote": 500.0}, 0.48, 0.54)
+    bot.last_price["ENAUSDT"] = 0.46                         # the price had fallen further by the next check
+    bot._record_exchange_exit("ENAUSDT", {"state": "exited", "reason": "stop-loss",
+                                          "fill": {"qty": 1000.0, "avg_price": 0.4795, "quote": 479.5, "fee": 0.48},
+                                          "protection": {"kind": "exchange", "stop": 0.48, "take": 0.54}})
+    row = j.db.execute("SELECT avg_price, market_price FROM orders WHERE side='SELL'").fetchone()
+    assert row["market_price"] == 0.48 and abs(row["avg_price"] / row["market_price"] - 1) < 0.002
+    assert performance(j, {})["avg_price_gap_pct"] < 0.2      # 0.1% slippage, not the 4% later fall
+
+
+def test_no_claude_cap_is_called_no_cap():
+    from trader.health import settings_lines
+    from trader.llm import ClaudeJSON
+    bot = Orchestrator(Settings(offline=True, symbols=["BTCUSDT"], ai_daily_budget_usd=0), Journal(":memory:", 10_000))
+    bot.llm = ClaudeJSON("claude-haiku-5-5", "k", 0)
+    text = "\n".join(settings_lines(bot))
+    assert "no daily limit on real-money spend" in text and "no daily cap" in text and "$0.00/day" not in text

@@ -406,8 +406,9 @@ class Orchestrator:
                 if review:
                     result["mentor"] = MentorAgent.summary(review)
                 if verdict["approved"]:
+                    real = self._real_price(sym, c["price"])   # the real market just before the order
                     fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
-                    fill["market_price"] = c["price"]
+                    fill["market_price"] = real
                     self.journal.log_order(sym, "BUY", fill, "signal")
                     if not fill["ok"]:
                         self.journal.event("order", f"BUY {sym} failed: {fill.get('error')}")
@@ -591,8 +592,23 @@ class Orchestrator:
         # "unknown" (network problem): keep the record, try again next cycle
         return self.journal.positions()[sym], None
 
+    def _real_price(self, sym: str, fallback: float) -> float:
+        """The real market price now (Binance's public data), to judge a demo fill against; the last known price when
+        it cannot be read."""
+        client = self.market.client
+        if client is None:
+            return fallback
+        try:
+            return float(client.price(sym))
+        except Exception:  # noqa: BLE001 - a measurement, never a reason to skip an order
+            return fallback
+
     def _record_exchange_exit(self, sym: str, status: dict) -> dict:
-        fill = {"ok": True, **status["fill"], "market_price": self.last_price.get(sym)}
+        # the exchange filled a stop-loss or a take-profit at some moment since the last check: judge the fill against
+        # the price the order was set at, not against the price now (that would count the market's later moves)
+        prot = status.get("protection") or {}
+        intended = prot.get("stop") if status.get("reason") == "stop-loss" else prot.get("take")
+        fill = {"ok": True, **status["fill"], "market_price": intended or self.last_price.get(sym)}
         kind = "exchange" if status["protection"]["kind"] == "exchange" else "emulated"
         reason = f"{status['reason']} ({kind})"
         self.journal.log_order(sym, "SELL", fill, reason)
@@ -621,8 +637,9 @@ class Orchestrator:
                 return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
             self.journal.set_protection(sym, None, "none")
             position = self.journal.positions()[sym]
+        real = self._real_price(sym, self.last_price[sym])
         fill = self.execution.execute("SELL", sym, qty=position["qty"])
-        fill["market_price"] = self.last_price[sym]
+        fill["market_price"] = real
         self.journal.log_order(sym, "SELL", fill, reason)
         out = {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
         if fill["ok"]:

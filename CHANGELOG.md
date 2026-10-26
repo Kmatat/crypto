@@ -5,6 +5,21 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.3 - 2026-10-26
+
+Fixes found while reading the owner's first day of real records at $5,000:
+- `/diagnose` compared the desk's record with a replay of the full period asked (7 days by default) even when the
+  record was one day old, and reported "missing" trades that were simply never recorded. The period is now never
+  longer than the record, and the title says so.
+- The rules' replay in `/diagnose` downloaded only the period itself, so the checklist's 200-day average could not be
+  computed and counted as "unknown" (which does not block): the replay used looser rules than the live desk and
+  overstated the trades its rules "would have made". It now downloads 230 days before the period.
+- "Demo vs real price gap" judged a stop-loss or take-profit filled by the exchange against the price at the desk's
+  next check, up to 30 minutes later, so ordinary market moves counted as a bad fill. Exchange exits are now judged
+  against the price the order was set at, and the desk's own orders against the real price read just before sending.
+- Wording: a Claude budget with no daily cap reads "no daily cap" (not "$0.00/day cap") and says how to set one; the
+  head trader says "no coin needed an AI opinion" instead of "up to 0 question(s)".
+
 ## 1.6.2 - 2026-10-26
 
 - Fix: a budget changed after the desk's record began (STARTING_BALANCE_USDT) never took effect. The record keeps the

@@ -112,7 +112,9 @@ class HeadTraderAgent:
         and Claude's dollars, as questions per check, never more than the free tier's per-minute limits allow."""
         pace = pace_minutes or self.s.cycle_minutes
         rate, cap, detail = self.llm.allowance(now, pace, self.s.news_refresh_minutes, self.s.scout_hours)
-        if rate >= 1:
+        if not worth:
+            n, why = 0, f"no coin needed an AI opinion this check ({detail})"
+        elif rate >= 1:
             n = min(cap, int(rate)) if math.isfinite(rate) else len(worth)
             why = f"up to {n} question(s) this check ({detail})"
         elif rate > 0:

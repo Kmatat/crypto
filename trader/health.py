@@ -484,7 +484,7 @@ def settings_lines(bot) -> list[str]:
     if bot.llm:
         pct = base.ai_pct_month()
         budget.append(f"Claude cap " + (f"${bot.llm.effective_daily_budget():.2f}/day" if bot.llm.effective_daily_budget()
-                                        else "none") + " ("
+                                        else "none: no daily limit on real-money spend, /aibudget 1 sets $1 a day") + " ("
                       + ("set with /aibudget" if bot.journal.get("ai_budget_override") else
                          f"the lower of ${base.ai_daily_budget_usd:g}/day and {pct:g}% a month of the balance" if pct else
                          f"AI_DAILY_BUDGET_USD; no percentage cap on demo money")
@@ -499,7 +499,8 @@ def settings_lines(bot) -> list[str]:
              + (f" + up to {base.max_coins - len(base.symbols)} scout picks" if base.auto_coins else ""),
              f"Decisions: buy threshold {thresholds_line(card) if card else 'common'}, minimum confidence "
              f"{base.min_confidence:g}; Claude {'on (' + base.claude_model + ')' if bot.llm else 'off'}"
-             + (f", ${bot.llm.effective_daily_budget():.2f}/day cap" if bot.llm else "")
+             + ((f", ${bot.llm.effective_daily_budget():.2f}/day cap" if bot.llm.effective_daily_budget() else ", no daily cap")
+                if bot.llm else "")
              + (f"; free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)}), {getattr(bot.ai, 'order', 'free-first')}"
                 if getattr(bot, "free_ai", None) else "; free AI off")]
     return lines
@@ -521,7 +522,14 @@ def free_ai_line(free) -> str:
 
 def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
     """The owner's "check the logs": what the desk did versus what its own rules would have done on the same prices.
-    `replay(symbols, days)` returns a Backtest result for those coins over the period (None if unavailable)."""
+    `replay(symbols, days)` returns a Backtest result for those coins over the period (None if unavailable).
+    The period is never longer than the desk's record: comparing one day of records with seven days of replay would
+    show "missing" trades that were simply never recorded."""
+    asked = days
+    first = j.db.execute("SELECT ts FROM equity ORDER BY rowid LIMIT 1").fetchone()
+    if first:
+        age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(first[0])).total_seconds() / 86400
+        days = max(1 / 24, min(days, age))
     since = since_iso(days * 24)
     pace = (bot.pace or {}).get("minutes", bot.s.cycle_minutes)
     coins = coin_funnel(j, since)
@@ -531,7 +539,9 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
                           "ORDER BY n DESC LIMIT 3", (since,)).fetchall()
     closed = j.db.execute("SELECT COUNT(*), COALESCE(SUM(pnl), 0), SUM(pnl > 0) FROM closed_trades WHERE closed_at >= ?",
                           (since,)).fetchone()
-    lines = [f"🔎 Diagnosis, last {days:g} days", *settings_lines(bot)]
+    title = (f"🔎 Diagnosis, last {days:g} days" if days >= asked - 1e-9 else
+             f"🔎 Diagnosis since the desk's record began {days * 24:.0f} h ago (asked: {asked:g} days)")
+    lines = [title, *settings_lines(bot)]
     for p in bot.base.problems():
         lines.append(f"🛑 Settings problem: {p}")
     lines.append(f"\nDesk activity: {gaps['checks']} market checks"
