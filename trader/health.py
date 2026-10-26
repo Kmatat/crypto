@@ -361,6 +361,8 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
                                                          if current["refused"] else ""))
     if (stuck := stuck_rule(current)):
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal ({stuck[1]} of {stuck[1]}): check the settings")
+    if (bp := j.get("budget_problem")):
+        lines.append(f"🛑 Budget: {clean(bp, 400)}")
     errors = [e for e in j.events(since=since_iso(24)) if e["kind"] == "error"]
     lines.append(f"Errors: {len(errors)}" + (f", last {ago(errors[-1]['ts'])}: {clean(errors[-1]['text'], 200)}" if errors else ""))
     if bot.llm:
@@ -473,7 +475,10 @@ def settings_lines(bot) -> list[str]:
         equity, cash = bot.equity(), bot.journal.cash
     except Exception:  # noqa: BLE001
         equity, cash = None, None
-    budget = [f"Budget: starting balance ${base.starting_balance:,.0f}"
+    record = float(bot.journal.get("starting_balance") or base.starting_balance)
+    budget = [f"Budget: starting balance ${record:,.0f}"
+              + (f" (the settings say ${base.starting_balance:,.0f}: not applied, see /health)"
+                 if abs(record - base.starting_balance) >= 0.005 else "")
               + (f", equity now ${equity:,.2f} (cash ${cash:,.2f})" if equity is not None else "")
               + f"; positions about ${(equity or base.starting_balance) * s.max_position_pct:,.2f} each (minimum order $10)"]
     if bot.llm:

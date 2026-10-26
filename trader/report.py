@@ -22,7 +22,9 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
     start = float(j.get("starting_balance"))
     equity = j.cash + sum(prices.get(s, p["entry_price"]) * p["qty"] for s, p in positions.items())
 
-    curve = [r["equity"] for r in j.db.execute("SELECT equity FROM equity ORDER BY rowid")] + [equity]
+    since = ((j.get("budget_changes") or [{}])[-1]).get("ts", "")   # a budget change is not a gain or a loss
+    curve = [r["equity"] for r in j.db.execute("SELECT equity FROM equity WHERE ts >= ? ORDER BY rowid", (since,))] \
+        + [equity]
     peak, max_dd = curve[0], 0.0
     for e in curve:
         peak = max(peak, e)

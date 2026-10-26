@@ -5,6 +5,20 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.2 - 2026-10-26
+
+- Fix: a budget changed after the desk's record began (STARTING_BALANCE_USDT) never took effect. The record keeps the
+  budget it started with, and position sizes, loss brakes and every report read it, while a few messages read the
+  settings: Telegram kept showing the old ~$99 although the settings said $5,000, and positions stayed under the $10
+  minimum order. Now the desk applies the new budget at its next start like a deposit or a withdrawal: the
+  difference goes to the cash, the trades, the result so far and the strategy history are kept, the day's loss limit
+  moves with it, and Telegram confirms it (💰 Budget changed from ... to ...). The drawdown is measured from the
+  change, so a withdrawal is not reported as a loss.
+- On the Binance demo account the new budget is applied only if the demo wallet holds enough USDT (Binance refuses
+  orders the wallet cannot pay for). Otherwise Telegram and `/health` say so and how to get the budget: paper
+  trading, or a budget the wallet can cover. `/health` shows the budget the desk really trades with.
+- The setup's "Start a fresh journal?" question explains what "n" does.
+
 ## 1.6.1 - 2026-10-25
 
 Fixes from an independent review of 1.6.0 (26 confirmed findings, none affecting a desk without a free AI key):

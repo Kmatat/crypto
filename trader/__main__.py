@@ -544,6 +544,7 @@ def start_checks(bot: Orchestrator, s: Settings) -> list[str]:
     for m in s.migrations:
         out.append(f"🔧 Settings corrected at start: {m}. Nothing for you to do; `desk setup` saves it to the file.")
         bot.journal.event("strategy", f"Settings corrected at start: {m}")
+    out += bot.apply_budget_change()
     bot.apply_champion()
     if bot.champion_note:
         out.append(f"🔧 Strategy in force updated because {bot.champion_note}.")

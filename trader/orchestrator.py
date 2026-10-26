@@ -101,6 +101,60 @@ class Orchestrator:
         pos = self.journal.positions()
         return self.journal.cash + sum(p["qty"] * self.last_price.get(sym, p["entry_price"]) for sym, p in pos.items())
 
+    def apply_budget_change(self) -> list[str]:
+        """The owner changed STARTING_BALANCE_USDT after the record began. The record keeps the budget it started with
+        (sizes, loss brakes and reports all read it), so a new value would otherwise never take effect. It is applied
+        like a deposit or a withdrawal: the difference goes to the cash, the trades and the result so far are kept.
+        On the Binance demo account it is applied only if the demo wallet can pay for it, because Binance refuses
+        orders the wallet cannot cover."""
+        j, new = self.journal, float(self.base.starting_balance)
+        old = float(j.get("starting_balance") or new)
+        if abs(new - old) < 0.005:
+            j.set("budget_problem", None)
+            return []
+        cash, delta = j.cash, new - old
+        new_cash = cash + delta
+        result = self.equity() - old   # what the desk made or lost so far, kept as it is
+        if new_cash < 0:
+            invested = sum(p["cost"] for p in j.positions().values())
+            text = (f"STARTING_BALANCE_USDT is ${new:,.2f}, less than what the record has already used "
+                    f"(${old - cash:,.2f}: ${invested:,.2f} in open positions, the rest losses so far): the desk keeps "
+                    f"trading with ${old:,.2f}. Choose a larger budget, or start a fresh record with "
+                    f"`desk reset --force`.")
+            j.set("budget_problem", text)
+            return [f"🛑 {text}"]
+        if self.testnet is not None:
+            try:
+                usdt = float(self.testnet.balances().get("USDT", 0.0))
+            except Exception as e:  # noqa: BLE001 - no wallet reading: do not apply what cannot be checked
+                log.warning("Budget change: could not read the demo wallet: %s", e)
+                return [f"⚠️ STARTING_BALANCE_USDT changed to ${new:,.0f}, but the Binance demo wallet could not be read to "
+                        f"check it; the desk keeps ${old:,.0f} and tries again at the next start."]
+            if new_cash > usdt + 1:
+                text = (f"you set STARTING_BALANCE_USDT to ${new:,.0f}, but the Binance demo wallet holds only "
+                        f"{usdt:,.2f} USDT, and Binance refuses orders the wallet cannot pay for. The desk keeps trading "
+                        f"with its record of ${old:,.2f} (cash ${cash:,.2f}). For a ${new:,.0f} budget, switch to paper "
+                        f"trading (real prices, simulated orders): run `desk setup`, choose 2) Paper trading and type "
+                        f"{new:.0f}. Or keep the demo account with a budget of at most {max(0.0, usdt - (cash - old) - 1):,.0f}.")
+                j.set("budget_problem", text)
+                j.event("error", "Budget not changed: " + text)
+                return [f"🛑 Budget not changed: {text}"]
+        j.set("cash", round(new_cash, 8))
+        j.set("starting_balance", new)
+        day = j.get("day_start")
+        if day:   # the day's loss limit compares with the day's first equity: move it by the same amount
+            j.set("day_start", {**day, "equity": day["equity"] + delta})
+        when = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        j.set("budget_changes", (j.get("budget_changes") or []) + [
+            {"ts": when, "from": old, "to": new, "cash_before": round(cash, 2), "cash_after": round(new_cash, 2)}])
+        j.set("budget_problem", None)
+        j.event("owner", f"Budget changed from ${old:,.2f} to ${new:,.2f} (STARTING_BALANCE_USDT): cash ${cash:,.2f} -> "
+                         f"${new_cash:,.2f}; the result so far ({result:+,.2f} USDT) and every trade are kept")
+        return [f"💰 Budget changed from ${old:,.2f} to ${new:,.2f} as set in the settings. The desk's cash is now "
+                f"${new_cash:,.2f}; the trades and the result so far ({result:+,.2f} USDT) are kept, and position sizes, "
+                f"loss brakes and reports use ${new:,.0f} from now on. (For a completely fresh record instead: "
+                f"`desk reset --force` on the server.)"]
+
     def portfolio(self) -> dict:
         eq = self.equity()
         start = float(self.journal.get("starting_balance") or eq)

@@ -441,6 +441,8 @@ class Wizard:
         if not journal.exists() or not changed:
             return
         self.say("\n   You changed the trading mode or budget. Results so far were recorded under the old settings.")
+        self.say("   'n' keeps the record and its strategy history; a new budget is then added to (or taken from) its cash")
+        self.say("   when the desk starts, as long as the Binance demo wallet can pay for it.")
         if self.yes("   Start a fresh journal? (the old one is kept as a backup file)", True):
             backup = archive_journal(journal)
             self.say(f"   Old journal saved as {backup.name}")

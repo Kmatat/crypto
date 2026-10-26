@@ -201,11 +201,14 @@ after a small loss. (Since 1.5.0 a small balance no longer shrinks Claude's budg
 flat $5 a day, which `/aibudget` changes.) The money is fake, so give the demo a realistic budget:
 
 1. On the server, run `desk setup`. At the first question choose **2) Paper trading** (real prices, simulated
-   orders, no wallet limit) and type **10000** as the budget. Keep your other answers with Enter.
-   (Or stay with **1) Demo account** if your demo wallet holds at least 10,000 USDT.)
-2. Then run `desk reset --force` so the desk starts a fresh record with the new budget (the old one is kept as a
-   backup file).
-3. Send `/health`: the settings problem is gone.
+   orders, no wallet limit) and type **10000** (or 5000) as the budget. Keep your other answers with Enter.
+   (A bigger budget on **1) Demo account** works only if the Binance demo wallet holds that much USDT: Binance
+   refuses orders the wallet cannot pay for, and the desk will tell you so instead of applying the budget.)
+2. At the end the setup asks *Start a fresh journal?*. **y** starts a clean record with the new budget (the old one
+   is kept as a backup file). **n** keeps the record and its history: when the desk starts, it adds the difference
+   to its cash, like a deposit, and Telegram confirms it with *💰 Budget changed from ... to ...*.
+3. Send `/health`: its first line shows the budget the desk really trades with. If it still shows the old amount,
+   the 🛑 *Budget* line under it says why (usually: the demo wallet holds too little; choose paper trading).
 
 ## Add a free AI (no cost) to a running desk
 
@@ -322,6 +325,7 @@ bound what a bad decision can cost.
 
 | Problem | Solution |
 |---|---|
+| Telegram still shows the old budget after you changed it | Since 1.6.2 the desk applies a new STARTING_BALANCE_USDT at its next start and confirms it (💰). If it says 🛑 *Budget not changed*, the Binance demo wallet holds less than the new budget: run `desk setup` and choose **2) Paper trading** with the budget you want |
 | Card rejected at Oracle signup | Use a regular credit or debit card whose name and address match what you entered |
 | `Out of capacity` when creating the server | Choose a different Availability domain, or try later |
 | `ssh: connect ... timed out` | Check the server shows *Running*, and that you used the **Public** IP |
