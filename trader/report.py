@@ -151,9 +151,14 @@ def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
         "net_return_positive": (round(net, 2), 0, net > 0),
     }
     evidence_ready = checks["weeks"][2] and checks["closed_trades"][2]
+    # when the 150-trade sample will be complete at the pace so far (only once a week of trading gives a pace)
+    pace = len(trades) / weeks if weeks >= 1 else None
+    weeks_to_sample = (round(weeks + (GOALS["closed_trades"] - len(trades)) / pace) if pace and len(trades) < GOALS["closed_trades"]
+                       else None)
     verdict = ("collecting evidence" if not evidence_ready else
                "PASS - demo goals met" if all(c[2] for c in checks.values()) else "FAIL - demo goals not met")
     return {"checks": checks, "verdict": verdict, "win_rate_range": (lo, hi), "exposure_pct": round(exposure_pct, 1),
+            "trades_per_week": round(pace, 1) if pace else None, "weeks_to_sample": weeks_to_sample,
             "vs_btc_pct": None if btc is None else round(btc, 2), "vs_basket_pct": None if basket is None else round(basket, 2),
             "vs_blended_pct": None if blended is None else round(blended, 2), "ai_cost_pct": round(ai_cost_pct, 2),
             "net_return_pct": round(net, 2)}
@@ -164,7 +169,9 @@ def goals_text(g: dict, p: dict) -> str:
     mark = lambda ok: "✓" if ok else "…"
     lines = [f"🎯 Demo goals: {g['verdict']}",
              f"{mark(c['weeks'][2])} {c['weeks'][0]} of {c['weeks'][1]} weeks · "
-             f"{mark(c['closed_trades'][2])} {c['closed_trades'][0]} of {c['closed_trades'][1]} trades needed",
+             f"{mark(c['closed_trades'][2])} {c['closed_trades'][0]} of {c['closed_trades'][1]} trades needed"
+             + (f" (at {g['trades_per_week']:g} a week, complete in about week {g['weeks_to_sample']})"
+                if g.get("weeks_to_sample") else ""),
              f"{mark(c['profit_factor'][2])} profit factor {c['profit_factor'][0] or 'n/a'} (target ≥ {c['profit_factor'][1]}) · "
              f"{mark(c['max_drawdown_pct'][2])} worst drop {c['max_drawdown_pct'][0]}% (limit {c['max_drawdown_pct'][1]}%) · "
              f"{mark(c['execution_pct'][2])} orders filled {_pct(c['execution_pct'][0])}",

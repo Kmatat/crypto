@@ -123,3 +123,19 @@ def test_no_claude_cap_is_called_no_cap():
     bot.llm = ClaudeJSON("claude-haiku-5-5", "k", 0)
     text = "\n".join(settings_lines(bot))
     assert "no daily limit on real-money spend" in text and "no daily cap" in text and "$0.00/day" not in text
+
+
+def test_the_goals_say_when_the_trade_sample_will_be_complete(tmp_path):
+    import datetime as dt
+    from trader.report import goals, goals_text
+    j = Journal(str(tmp_path / "j.db"), 5000)
+    began = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(weeks=2)).isoformat(timespec="seconds")
+    j.db.execute("INSERT INTO equity VALUES (?,?,?)", (began, 5000, 5000))
+    for i in range(20):   # 20 trades in 2 weeks: 10 a week, 130 to go -> about week 15
+        j.db.execute("INSERT INTO closed_trades (symbol, opened_at, closed_at, entry_price, exit_price, qty, cost, pnl, "
+                     "pnl_pct, exit_reason) VALUES ('BTCUSDT', ?, ?, 1, 1, 1, 100, ?, 0, 'stop-loss')",
+                     (began, began, 1.0 if i % 3 == 0 else -1.0))
+    j.db.commit()
+    p = performance(j, {})
+    text = goals_text(goals(j, p), p)
+    assert "20 of 150 trades needed (at 10 a week, complete in about week 15)" in text

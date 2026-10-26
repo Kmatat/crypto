@@ -5,6 +5,13 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.4 - 2026-10-26
+
+- The demo goals say when the 150-trade sample will be complete at the pace so far ("20 of 150 trades needed (at 10 a
+  week, complete in about week 15)"). A replay of three years of real prices showed that this strategy closes 4 to 11
+  trades a week, so the sample takes about 4 to 7 months, not 12 weeks; the goals stay as they are, and the line now
+  says so instead of looking like a failure in the first weeks.
+
 ## 1.6.3 - 2026-10-26
 
 Fixes found while reading the owner's first day of real records at $5,000:
