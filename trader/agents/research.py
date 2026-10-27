@@ -118,12 +118,13 @@ class ResearchAgent:
 
     # ---- lessons from the recent trades ----
     @staticmethod
-    def lessons(journal, days: int = 30, since: str | None = None) -> dict:
-        """What the last `days` of trades teach; `since` (an ISO time) leaves out trades opened before it, e.g. those
-        of the daily trend rule before a switch back to the hourly agents."""
+    def lessons(journal, days: int = 30, exclude: list[tuple[str, str | None]] | None = None) -> dict:
+        """What the last `days` of trades teach. `exclude`: periods (start, end or None) whose trades are left out, the
+        daily trend rule's periods after a switch back to the hourly agents (its own sales are left out too)."""
         start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
-        rows = [dict(r) for r in journal.db.execute("SELECT * FROM closed_trades WHERE closed_at >= ? AND opened_at >= ?",
-                                                    (start, since or ""))]
+        rows = [dict(r) for r in journal.db.execute("SELECT * FROM closed_trades WHERE closed_at >= ?", (start,))]
+        rows = [r for r in rows if not str(r["exit_reason"]).startswith("trend:")
+                and not any(a <= r["opened_at"] and (b is None or r["opened_at"] < b) for a, b in exclude or [])]
         losers = [r for r in rows if r["pnl"] <= 0]
         quick = 0
         for r in losers:

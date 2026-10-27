@@ -92,10 +92,11 @@ def read_status(path: Path = STATUS) -> dict | None:
         return None
 
 
-def request_update(path: Path = REQUEST) -> None:
-    """Called by the desk (Telegram /update): the updater job picks this file up within seconds."""
+def request_update(path: Path = REQUEST, purpose: str = "update") -> None:
+    """Called by the desk (Telegram /update, or /setup with purpose "settings"): the updater job picks this file up
+    within seconds. A settings request applies the phone's settings; it does not install new code by itself."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"requested_at": now(), "by": "telegram"}))
+    path.write_text(json.dumps({"requested_at": now(), "by": "telegram", "purpose": purpose}))
 
 
 def updater_installed(status_path: Path = STATUS) -> bool:
@@ -236,10 +237,13 @@ class Updater:
     def run(self, force: bool = False, check_only: bool = False) -> dict:
         """Every outcome of a requested update reaches the owner, including a crash or the system stopping the job."""
         requested = self.request_path.exists()
-        wanted = force or requested
+        purpose = (read_json(self.request_path) or {}).get("purpose", "update") if requested else None
+        wanted = force or (requested and purpose != "settings")
         self._t0 = self.clock()
         try:
             self._watchdog()
+            if not check_only:
+                self._apply_settings()
             return self._run_job(wanted, check_only)
         except Interrupted:
             self._notify(f"⚠️ The update job was stopped by the server during the {self._step or 'check'} step, probably "
@@ -256,6 +260,23 @@ class Updater:
         finally:
             if requested:
                 self.request_path.unlink(missing_ok=True)
+
+    def _apply_settings(self) -> None:
+        """Settings the owner confirmed with /setup on the phone (the desk cannot write its own settings file)."""
+        from .config import ENV_PATH
+        from .remote_setup import apply_request
+        env = ENV_PATH if self.root == ROOT else self.root / ".env"
+        result = apply_request(env, self.status_path.parent)
+        if result is None:
+            return
+        message, applied = result
+        self._notify(message)
+        if applied:
+            try:
+                self.restart()
+            except (subprocess.SubprocessError, OSError) as e:
+                self._notify(f"⚠️ The settings are saved, but the desk could not be restarted: {e}. They take effect at "
+                             "the next restart (`desk restart` on the server).")
 
     def _progress(self, step: str, **fields) -> None:
         """Remember how far an update got, so a job stopped half-way is finished or undone by the next one."""

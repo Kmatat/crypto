@@ -106,6 +106,14 @@ blocks a new buy.
 
 Try it with no setup at all: `python -m trader run --offline --cycles 300 --fast`
 
+## Settings from your phone
+
+`/setup` on Telegram changes the everyday settings with buttons: strategy, coins, risk level, budget, trading mode,
+check interval, daily report hour and pulse. The desk cannot write its own settings file (the server's sandbox forbids
+it, on purpose), so it hands the change to the update job, which checks every value again, keeps the previous file as
+`data/.env.previous`, writes the new one, restarts the desk and reports the result. Keys and tokens are never asked for
+on Telegram; they are changed with `desk setup` on the server.
+
 ## Updates without a terminal
 
 The server keeps itself current. A small update job runs every 30 minutes (and immediately when you

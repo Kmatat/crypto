@@ -1,6 +1,7 @@
 """Settings loaded from environment variables / a .env file."""
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,7 +122,9 @@ def _tolerant(name: str, default: float, notes: list[str]) -> float:
     try:
         value = float(text.rstrip("%").strip())
     except ValueError:
-        notes.append(f"{name}={raw!r} is not a number: the tested value {default:g} is used")
+        value = float("nan")
+    if not math.isfinite(value):   # also 'nan', 'inf', '1e400'
+        notes.append(f"{name}={raw!r} is not a usable number: the tested value {default:g} is used")
         return default
     return value / 100 if percent else value
 

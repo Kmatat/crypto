@@ -195,7 +195,7 @@ def test_strategies_watchlist_and_status_in_trend_mode():
     text = main.trend_strategy_text(bot, j)
     assert text.startswith("📈 Strategy in force: the daily trend rule (STRATEGY=trend)")
     assert "Different from the tested settings: average 100 days (tested 50)" in text and "/trendtest" in text
-    assert "4 coins" not in text and "3 position slots (fewer than the coins: only the strongest 3 are held)" in text
+    assert "4 coins" not in text and "3 position slots (fewer than the coins: the strongest are bought first" in text
     assert f"last decided day: {yesterday()}" in text and "• AAA BUY on" in text and "• CCC HOLD on" in text
     assert text.endswith("The hourly champion and challengers are kept for STRATEGY=hourly.")
     assert j.get("strategy_champion") is None              # no hourly card recorded
@@ -254,8 +254,10 @@ def test_late_daily_decisions_are_reported_from_two_oclock(monkeypatch):
     assert sent == []                                      # 01:30 UTC: a retry is still normal
     Clock.hour_now = 3
     main.maybe_pulse(bot, fake, bot.base)
-    assert sent == [(f"⏰ The daily trend decisions for {day} stayed incomplete after 4 tries; see /diagnose. Open "
-                     "positions keep their emergency stop meanwhile. (Repeats at most every 6 hours.)", "trend-late")]
+    assert sent == []                  # given up for the day: already announced by its alert and the day's summary
+    j.set("trend_day", "2000-01-01")                       # the day's decisions have not run at all
+    main.maybe_pulse(bot, fake, bot.base)
+    assert len(sent) == 1 and sent[0][1] == "trend-late" and "have not run yet" in sent[0][0]
 
 
 def test_heartbeat_and_diary_with_the_trend_rule():

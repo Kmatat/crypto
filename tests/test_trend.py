@@ -387,8 +387,9 @@ def test_the_lessons_leave_out_trades_from_before_a_switch():
         j.db.execute("INSERT INTO closed_trades (symbol, opened_at, closed_at, entry_price, exit_price, qty, cost, pnl, "
                      "pnl_pct, exit_reason) VALUES ('BTCUSDT', ?, ?, 1, 1, 1, 100, ?, 0, 'signal')", (t, t, pnl))
     j.db.commit()
-    since = (now - dt.timedelta(days=3)).isoformat(timespec="seconds")
-    assert ResearchAgent.lessons(j)["trades"] == 2 and ResearchAgent.lessons(j, since=since)["trades"] == 1
+    era = [((now - dt.timedelta(days=6)).isoformat(timespec="seconds"), (now - dt.timedelta(days=3)).isoformat())]
+    assert ResearchAgent.lessons(j)["trades"] == 2 and ResearchAgent.lessons(j, exclude=era)["trades"] == 1
+    assert ResearchAgent.lessons(j, exclude=[(era[0][0], None)])["trades"] == 0   # an era still running
 
 
 def test_a_typo_in_a_trend_setting_never_stops_the_desk(monkeypatch, tmp_path):
@@ -399,7 +400,10 @@ def test_a_typo_in_a_trend_setting_never_stops_the_desk(monkeypatch, tmp_path):
     monkeypatch.setenv("TREND_SMA_DAYS", "fifty")
     s = Settings.load()
     assert s.trend_vol_target == 0.25 and abs(s.trend_stop_pct - 0.2) < 1e-12 and s.trend_sma_days == 50
-    assert any("TREND_SMA_DAYS='fifty' is not a number" in m for m in s.migrations)
+    assert any("TREND_SMA_DAYS='fifty' is not a usable number" in m for m in s.migrations)
+    for bad in ("nan", "inf", "1e400"):
+        monkeypatch.setenv("TREND_SMA_DAYS", bad)
+        assert Settings.load().trend_sma_days == 50
     monkeypatch.setenv("TREND_STOP_PCT", "")
     assert Settings.load().trend_stop_pct == 0.25
     wrong = Settings(offline=True, strategy="trend", trend_stop_pct=0.6).problems()
@@ -432,3 +436,33 @@ def test_the_hourly_cards_record_stops_at_the_switch_to_the_trend_rule():
     assert periods == [("2026-09-01T00:00:00+00:00", switched)]
     later = {"opened_at": "2099-01-01T00:00:00+00:00", "pnl": -5.0}
     assert live_record([later], periods)["trades"] == 0            # a trend trade is not the hourly card's
+
+
+def test_a_failed_sale_stays_a_sale_and_earlier_buys_stay_in_the_days_summary():
+    up = wavy(130, 100, 0.02)
+    bot, j = trend_desk({"AAAUSDT": candles(up), "BBBUSDT": candles(wavy(130, 100, 0.015))}, symbols=["AAAUSDT", "BBBUSDT"])
+    bot.run_cycle()
+    assert set(j.positions()) == {"AAAUSDT", "BBBUSDT"}
+    bot.market.series["AAAUSDT"] = candles(up + [up[-1] * 0.5])        # AAA closes far below its average
+    bot.market.prices["AAAUSDT"] = up[-1] * 0.5
+    bot.execution.execute = lambda side, sym, qty=0, quote_amount=0: {"ok": False, "error": "exchange busy"}
+    j.set("trend_day", "2000-01-01")
+    bot.run_cycle()
+    assert bot.trend_report["coins"]["AAAUSDT"]["action"] == "SELL"     # not "holds: still above its average"
+    last = j.db.execute("SELECT action FROM decisions WHERE symbol='AAAUSDT' ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert last == "SELL"
+
+
+def test_the_daily_candle_cache_keeps_one_entry_per_coin():
+    from trader.agents.market import MarketDataAgent
+    asked = []
+
+    class Client:
+        def klines(self, sym, interval, limit):
+            asked.append(limit)
+            return [{"time": i, "close": 1.0} for i in range(limit)]
+    m = MarketDataAgent(Client())
+    for limit in range(122, 200):
+        m.daily_candles("BTCUSDT", limit)
+    assert len(m._daily_candles) == 1 and len(m.daily_candles("BTCUSDT", 130)) == 130
+    assert asked[-1] == 199                                             # a shorter request reuses the longer read

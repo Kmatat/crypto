@@ -105,10 +105,10 @@ def describe(sym: str, sig: dict | None, sma_days: int) -> str:
 
 # ---- history and replay ----
 def fetch_daily(client, symbol: str, days: int, now_ms: int | None = None) -> list[dict]:
-    """Finished daily candles for the last `days` days (public Binance data, pages of 1000)."""
+    """The last `days` finished daily candles (public Binance data, pages of 1000)."""
     from .backtest import _klines_page
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    start, out = now_ms - days * DAY_MS, []
+    start, out = (now_ms // DAY_MS - days) * DAY_MS, []
     while True:
         rows = _klines_page(client, symbol, "1d", start)
         if not rows:
@@ -211,7 +211,12 @@ def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end
                 marks[sym] = c
         final = cash + sum(p["qty"] * marks.get(sym, p["entry"]) for sym, p in pos.items())
     curve.append(final)
-    first = {sym: rows[sym][index[sym][days[0]]]["open"] for sym in coins if days and days[0] in index[sym]}
+    first = {}   # each coin from its first day in the period (a coin listed later is held from its listing)
+    for sym in coins:
+        for d in days:
+            if d in index[sym]:
+                first[sym] = rows[sym][index[sym][d]]["open"]
+                break
     hold = {sym: (marks[sym] / first[sym] - 1) * 100 for sym in first if sym in marks}
     holding = sorted(pos)
     if days:   # what the rule holds once it has acted on the latest close, as the live desk does at 00:00 UTC
@@ -226,9 +231,25 @@ def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end
                 ready[sym] = True
         keep = [x for x in pos if not (sigs.get(x) is not None and not sigs[x]["on"])
                 and not (index[x].get(last) is not None and rows[x][index[x][last]]["low"] <= pos[x]["stop"])]
-        new = sorted((x for x in coins if x not in pos and ready[x] and sigs.get(x) is not None and sigs[x]["on"]),
-                     key=lambda x: -sigs[x]["momentum"])
-        holding = sorted(keep + new[:max(0, s.max_open_positions - len(keep))])
+        new = sorted((x for x in coins if x not in pos and ready[x] and sigs.get(x) is not None and sigs[x]["on"]
+                      and x in marks), key=lambda x: -sigs[x]["momentum"])
+        # the buys go through the same Risk Manager as the live desk (slots, cash, the loss brake), at the last close
+        left = cash + sum(pos[x]["qty"] * marks.get(x, pos[x]["entry"]) * (1 - PAPER_FEE) * (1 - SLIPPAGE)
+                          for x in pos if x not in keep)
+        equity = left + sum(pos[x]["qty"] * marks.get(x, pos[x]["entry"]) for x in keep)
+        if tripped is not None and equity >= start * (1 - s.max_drawdown_pct / 2):
+            tripped = None
+        picked = []
+        for x in new:
+            folio = {"cash": left, "equity": equity, "open_positions": len(keep) + len(picked), "day_start_equity": equity,
+                     "starting_balance": start, "brake_tripped_days": None if tripped is None else last + 1 - tripped}
+            verdict = risk.review_trend(x, marks[x], share(sigs[x], len(coins), vol_target, s.max_position_pct), folio)
+            if verdict.get("trip"):
+                tripped = last + 1
+            if verdict["approved"]:
+                picked.append(x)
+                left -= verdict["quote_amount"]
+        holding = sorted(keep + picked)
     return _metrics(start, final, trades, curve, len(days), hold, holding, buys_refused, len(pos))
 
 

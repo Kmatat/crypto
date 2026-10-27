@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import trend
-from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
+from .config import AI_BUDGET_CEILING_USD, ENV_PATH, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
 from .notify import Telegram, pace_message, scout_message, trade_messages, trend_lines, trend_message
 from .orchestrator import Orchestrator
@@ -61,6 +61,7 @@ HELP_TEXT = (
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
     "/review - Claude reads the notebook and writes a plain-language review (uses a little of the AI budget)\n"
     "/version - which code version is running, and whether a newer one exists\n"
+    "/setup - change the strategy, coins, risk level, budget, trading mode or timing from your phone\n"
     "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
     "/help - this list\n\n"
     "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
@@ -97,6 +98,7 @@ def help_text(s: Settings) -> str:
         + ("uses a little of the AI budget" if s.use_claude else "needs Claude, which desk setup adds") + ")\n"
         "/aibudget [usd] and /ai - Claude's budget and the AI settings (only /review uses AI with the trend rule)\n"
         "/version - which code version is running, and whether a newer one exists\n"
+        "/setup - change the strategy, coins, risk level, budget, trading mode or timing from your phone\n"
         "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
         "/help - this list\n\n"
         "You also get a message for every buy, sell or failed order, a short summary of the daily trend decisions "
@@ -171,6 +173,11 @@ def cmd_check(s: Settings) -> int:
             missing = [sym for sym in s.symbols if not c.symbol_filters(sym)["oco_allowed"]]
             if missing:
                 raise RuntimeError(f"not available for {', '.join(missing)} - the desk will watch those itself")
+            if s.trend:   # the trend rule's far stop needs a stop-market order (a stop-limit that far down is refused)
+                limit_only = [sym for sym in s.symbols if "STOP_LOSS" not in c.symbol_filters(sym)["order_types"]]
+                if limit_only:
+                    raise RuntimeError(f"no stop-market order on Binance for {', '.join(limit_only)}: the desk holds "
+                                       "their emergency stop itself (it then checks every few minutes)")
             return f"supported for {', '.join(s.symbols)}"
         step("Stop-loss orders on the exchange (OCO)", oco)
     if s.trend:   # the daily trend rule reads only daily prices: no news, forex or scout to check
@@ -179,17 +186,20 @@ def cmd_check(s: Settings) -> int:
         def daily_history():
             sma = trend.params(s)[0]
             client, need = BinanceClient(PUBLIC_BASE_URL), trend.window(sma)
-            short, lines = [], []
+            short, unreadable, lines = [], [], []
             for sym in s.symbols:
                 try:
                     days = trend.fetch_daily(client, sym, trend.history_days(sma))
                 except Exception as e:  # noqa: BLE001 - name the coin, check the others
-                    short.append(f"{sym.removesuffix('USDT')} (could not be read: {e})")
+                    unreadable.append(f"{sym.removesuffix('USDT')} ({e})")
                     continue
                 if len(days) < need:
                     short.append(f"{sym.removesuffix('USDT')} ({len(days)} days)")
                 lines.append(trend.describe(sym, trend.signal([c["close"] for c in days], sma), sma))
             detail = "".join(f"\n       {line}" for line in lines)
+            if unreadable:
+                raise RuntimeError(f"could not read the daily prices of {', '.join(unreadable)}: check the network or "
+                                   "the coin names in SYMBOLS (the desk retries at every check)" + detail)
             if short:
                 raise RuntimeError(f"fewer than {need} finished days for {', '.join(short)}: the rule keeps "
                                    f"{'it' if len(short) == 1 else 'them'} out until then{detail}")
@@ -229,7 +239,13 @@ def cmd_check(s: Settings) -> int:
                 why = "; ".join(p["text"] for p in ai.take_problems()) or "no valid answer (busy, or the model is unknown)"
                 raise RuntimeError(why)
             return f"{ai.label} answered ({', '.join(ai.models)})"
-        step("Free AI" + unused, free)
+        if s.trend:   # the rule does not use it: a busy free AI is information, not a failed check
+            try:
+                print(f"[ OK ] Free AI{unused}: {free()}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[INFO] Free AI{unused}: not answering ({e})")
+        else:
+            step("Free AI" + unused, free)
     elif s.free_ai_provider and s.trend:   # not used by the rule: an incomplete setting is no failure
         print(f"[INFO] Free AI: FREE_AI_PROVIDER={s.free_ai_provider} is incomplete{unused}")
     elif s.free_ai_provider:
@@ -327,7 +343,9 @@ def trend_strategy_text(bot: Orchestrator, j: Journal) -> str:
     sma, vol, stop = trend.params(s)
     lines = ["📈 Strategy in force: the daily trend rule (STRATEGY=trend)",
              f"Hold a coin while its finished daily close is above its {sma}-day average; sell after a close at or below. "
-             f"Emergency stop {stop:.0%} below the entry on the exchange, no profit target. Each coin's share is "
+             f"Emergency stop {stop:.0%} below the entry "
+             + ("(checked by the desk at every market check: paper trading)" if s.mode == "simulation" else "on the exchange")
+             + f", no profit target. Each coin's share is "
              f"1/{len(s.symbols)} of the account, smaller for coins swinging more than {vol:.0%} a year, at most "
              f"{s.max_position_pct:.0%}. Decisions once a day after 00:00 UTC, no AI."]
     t_sma, t_vol, t_stop = trend.TESTED
@@ -344,8 +362,8 @@ def trend_strategy_text(bot: Orchestrator, j: Journal) -> str:
     coins = ", ".join(x.removesuffix("USDT") for x in s.symbols)
     lines.append(f"Coins: {coins}" + (" (the coins of the tests)" if set(s.symbols) == set(trend.TESTED_COINS) else "")
                  + f" · {s.max_open_positions} position slots"
-                 + (f" (fewer than the coins: only the strongest {s.max_open_positions} are held)"
-                    if s.max_open_positions < len(s.symbols) else ""))
+                 + (" (fewer than the coins: the strongest are bought first, and a held coin is never swapped for a "
+                    "stronger one)" if s.max_open_positions < len(s.symbols) else ""))
     start = (j.get("trend_start") or {}).get("ts")
     lines.append(f"Started: {start[:10] if start else 'not yet (at the first daily decisions)'} · last decided day: "
                  f"{j.get('trend_day') or 'none yet'}")
@@ -371,13 +389,18 @@ def maybe_trend_summary(bot: Orchestrator, tg: Telegram) -> None:
     """Once a day with the daily trend rule: its decisions in one short message, sent silently (it arrives at night for
     an owner in Europe or the Gulf). The step may run on several checks when it is retried: sent once it is final."""
     rep = bot.trend_report
-    if not tg.enabled or not rep or not (rep.get("final") or rep.get("complete")):
+    if rep and (rep.get("final") or rep.get("complete")) and rep.get("day"):
+        bot.journal.set("trend_summary_pending", rep)   # kept until delivered: a failed send is tried at the next check
+    rep = bot.journal.get("trend_summary_pending")
+    if not tg.enabled or not rep or not rep.get("day"):
         return
-    day = rep.get("day")
+    day = rep["day"]
     if bot.journal.get("trend_summary_sent") == day:
+        bot.journal.set("trend_summary_pending", None)
         return
     if tg.send(trend_message(rep, bot), silent=True):
         bot.journal.set("trend_summary_sent", day)
+        bot.journal.set("trend_summary_pending", None)
 
 
 def scorecard_block(bot: Orchestrator, j: Journal) -> str:
@@ -489,7 +512,8 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
             lab.should_stop = should_stop
         research = ResearchAgent(bot.ai)   # web research needs Claude; the proposals may come from the free AI
         # after a switch back from the daily trend rule, its trades teach the hourly strategy nothing
-        lessons = research.lessons(bot.journal, since=None if bot.base.trend else bot.journal.get("strategy_mode_since"))
+        from .notes import card_periods
+        lessons = research.lessons(bot.journal, exclude=card_periods(bot.journal.get("strategy_history") or [], "trend"))
         bot.journal.set("lessons", lessons)
         if lessons.get("notes"):
             bot.journal.event("lesson", "; ".join(lessons["notes"]))
@@ -622,7 +646,9 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     hours = max(1.0, now.hour + now.minute / 60)
     if free and not trend_mode:
         lines.append(free_ai_line(free))
-    lines.append(f"At today's pace about ${llm.spent_today / hours * 24 * 30:,.0f} a month. Change it with /aibudget 3 "
+    if not trend_mode:   # the trend rule spends only on an occasional /review: a daily pace would mislead
+        lines.append(f"At today's pace about ${llm.spent_today / hours * 24 * 30:,.0f} a month.")
+    lines.append(f"Change it with /aibudget 3 "
                  f"(dollars a day, at most ${AI_BUDGET_CEILING_USD:g}). A cheaper model (CLAUDE_MODEL=claude-haiku-5-5 in desk "
                  "setup) does the same work for a fraction of the cost.")
     return "\n".join(lines)
@@ -735,7 +761,9 @@ def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
                                    "accept. Send /health.", every_hours=12)
     now = dt.datetime.now(dt.timezone.utc)
     # the daily trend decisions late or given up: said from 02:00 UTC (a retry at 00:45 is normal), every 6 hours
-    if s.trend and now.hour >= 2 and (late := trend_state(bot, bot.journal)["warning"]):
+    state = trend_state(bot, bot.journal) if s.trend else {}
+    if state.get("late") and now.hour >= 2:   # given up for the day: said once already (the day's summary and alert)
+        late = state["warning"]
         tg.send_once("trend-late", f"⏰ {late[0].upper() + late[1:]}. Open positions keep their emergency stop "
                                    "meanwhile. (Repeats at most every 6 hours.)", every_hours=6)
     if not tg.enabled or not s.pulse_hours:
@@ -874,6 +902,50 @@ def cmd_run(s: Settings, args) -> None:
             return "⏳ Checking GitHub for new code now. You'll get a message with the result within a few minutes."
 
         from .updater import version_text
+        phone: dict = {"session": None}   # the /setup conversation in progress (the Telegram thread only)
+
+        def setup_now():
+            from dotenv import dotenv_values
+            from .remote_setup import PhoneSetup
+            from .setup_wizard import check_demo_prices, check_symbol
+            from .updater import updater_installed
+            if not updater_installed():
+                return ("The phone setup needs the server's update job (installed by deploy/setup.sh). On this machine "
+                        "run:  python -m trader setup")
+            current = {k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None} if ENV_PATH.exists() else {}
+            phone["session"] = PhoneSetup(current, check_symbol=check_symbol, demo_warnings=check_demo_prices)
+            return phone["session"].start()
+
+        def phone_answer(text: str):
+            """A plain message (not a /command) while /setup is open; None otherwise (then /help answers)."""
+            session = phone["session"]
+            if session is None:
+                return None
+            if session.expired:
+                phone["session"] = None
+                return ("The phone setup timed out (15 minutes without an answer); nothing was changed. Send /setup "
+                        "to start again.", None)
+            reply = session.answer(text)
+            if session.cancelled:
+                phone["session"] = None
+            elif session.done:
+                from .remote_setup import NAMES, describe, write_request
+                from .updater import DATA, request_update
+                phone["session"] = None
+                write_request(DATA, session.pending)
+                request_update(purpose="settings")
+                changed = "; ".join(f"{NAMES[k]} → {describe(k, v)}" for k, v in session.pending.items())
+                with_journal(s, lambda j: j.event("owner", f"Settings change sent from the phone: {changed}"))
+                return ("⏳ Sent to the server. The update job checks the settings, applies them and restarts the desk "
+                        "within a few minutes (it finishes its current market check first); you'll get a message with "
+                        "the result.", None)
+            return reply
+
+        def cancel_now():
+            if phone["session"] is None:
+                return "Nothing to cancel."
+            phone["session"] = None
+            return "Phone setup cancelled; nothing was changed.", None
 
         def lab_status() -> str:
             if s.trend:   # the rule's own status; the hourly cards stay untouched
@@ -1029,6 +1101,9 @@ def cmd_run(s: Settings, args) -> None:
 
         tg.listen({
             "/update": update_now,
+            "/setup": setup_now,
+            "/cancel": cancel_now,
+            "*": phone_answer,
             "/version": version_text,
             "/strategies": lab_status,
             "/approve": approve,

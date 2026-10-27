@@ -127,7 +127,11 @@ class Journal:
             sold = 1.0
         cost = p["cost"] * sold
         pnl = fill["quote"] - cost
-        trade = {"symbol": symbol, "opened_at": p["opened_at"], "closed_at": now(), "entry_price": p["entry_price"],
+        closed = now()
+        if fill.get("time_ms"):   # an exchange order that filled between two checks: the real time of the sale
+            closed = dt.datetime.fromtimestamp(fill["time_ms"] / 1000, dt.timezone.utc).isoformat(timespec="seconds")
+            closed = max(closed, p["opened_at"])
+        trade = {"symbol": symbol, "opened_at": p["opened_at"], "closed_at": closed, "entry_price": p["entry_price"],
                  "exit_price": fill["avg_price"], "qty": fill["qty"], "cost": cost, "proceeds": fill["quote"],
                  "pnl": pnl, "pnl_pct": pnl / cost * 100, "exit_reason": reason}
         self.db.execute("INSERT INTO closed_trades (symbol, opened_at, closed_at, entry_price, exit_price, qty, cost,"

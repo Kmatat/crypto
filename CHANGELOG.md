@@ -5,6 +5,37 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.4 - 2026-10-27
+
+New: **the setup on your phone.** `/setup` on Telegram changes the strategy, coins, risk level, budget, trading mode,
+check interval, daily report hour and pulse with buttons. The desk cannot write its own settings file (the server's
+sandbox forbids it, on purpose), so it hands the change to the update job, which checks every value again, keeps the
+previous file as `data/.env.previous`, writes the new one, restarts the desk and confirms on Telegram. Keys and tokens
+are never asked for on Telegram; they stay a `desk setup` job on the server. A settings change never installs code by
+itself.
+
+Fixes from independent reviews of the daily trend strategy:
+- A slow memory leak: after an emergency stop the desk kept a new copy of a coin's daily prices every day (hundreds
+  of MB in a year on the 1 GB server); it now keeps one per coin.
+- A sale the exchange refused was shown in the daily summary as "holds: still above its average"; it now says the
+  sale failed and the coin is still held. A day's summary keeps the buys and sales of earlier tries, and a summary
+  that could not be sent (Telegram unreachable) is sent at the next check.
+- The re-entry rule after a stop counts from the time Binance filled the stop, not from when the desk noticed it at its
+  next check (a stop at 23:50 noticed at 00:05 belonged to the wrong day). Exchange exits are recorded at their fill
+  time for both strategies.
+- `/diagnose` judges what the rule would hold today with the same loss brake and cash limits as the desk.
+- The "a rule refused every buy" alarm no longer fires in trend mode for the desk's designed pauses (the loss brakes,
+  full slots), and the "decisions late" alert is not repeated for a day already reported as given up.
+- `TREND_SMA_DAYS=nan` or `inf` no longer stops the desk.
+- After a switch back to the hourly agents, the weekly lab's lessons leave out only the trend rule's own period and
+  trades (they had left out everything before the switch).
+- In replays, holding a coin listed during the period now counts from its listing, and a request for N days returns N
+  finished days.
+- Texts: `/strategies` says where the emergency stop lives in paper trading and how full slots work; `/aibudget` no
+  longer projects a monthly cost from one `/review`; `desk check` tells a coin whose prices could not be read from one
+  with too little history, flags coins without a stop-market order for the trend rule, and treats a busy free AI as
+  information in trend mode; prices of cheap coins keep their digits.
+
 ## 1.7.3 - 2026-10-27
 
 Your desk keeps trading exactly as before (the hourly agents) until you choose the daily trend rule in `desk setup`.

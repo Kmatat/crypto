@@ -155,6 +155,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/ai` | Which AI answers first (the free AI or Claude), the free AI's questions used today and when its allowance restarts. `/ai free-first` saves money, `/ai claude-first` uses Claude's judgement while its budget lasts. Kept across restarts |
 | `/aibudget` | Claude's daily budget, today's spend per agent and the month at today's pace. `/aibudget 3` lets Claude spend up to $3 a day (real money, at most $20), `/aibudget default` goes back to the settings file. Kept across restarts |
 | `/review` | Claude reads the notebook and sends a plain-language review: what works, what fails, what the lab should test next. Uses a little of the AI budget |
+| `/setup` | Change the strategy, coins, risk level, budget, trading mode, check interval, daily report hour or pulse from your phone, with buttons. The desk restarts with the new settings within a few minutes and confirms it. Keys and tokens are changed only on the server (`desk setup`) |
 | `/version` | Which code version is running, and whether a newer one is waiting |
 | `/update` | Install the latest code now. It is tested first and the desk restarts itself; you get a message with the result |
 
@@ -246,6 +247,21 @@ separately from Claude, so after a few weeks you can see which one's vetoes save
 used up for the day, Claude (if it has budget) or the built-in rules answer until it restarts (for Gemini, at
 midnight California time), and Telegram tells you once.
 
+## Change settings from your phone
+
+Send `/setup` to the bot. It shows the settings in force and a menu with buttons: **1 Strategy, 2 Coins, 3 Risk level,
+4 Budget, 5 Trading mode, 6 Check interval, 7 Daily report hour, 8 Pulse, 9 Apply changes, 0 Cancel**. Tap one, answer
+(for coins, type them, e.g. `BTC, ETH, SOL`), then **9 Apply changes** and **YES**. Within a few minutes Telegram says
+*"✅ Settings changed from your phone"* and the desk restarts with them (it finishes its current market check first).
+`/cancel`, or 15 minutes without an answer, ends the setup without changing anything.
+
+How it works, and why keys are not in it: the desk itself is not allowed to change its own settings file (a safety
+rule of the server: nothing that reaches the desk from outside can rewrite its configuration). So the phone sends
+the change to the server's update job, which checks every value again, keeps the previous settings as
+`~/crypto-desk/data/.env.previous`, writes the new ones and restarts the desk. API keys and tokens are never asked for
+on Telegram: a chat is stored on Telegram's servers, and the desk never asks for a key there (if a message ever does,
+it is not the desk). Change keys with `desk setup` on the server.
+
 ## Switch to the daily trend strategy
 
 Since 1.7.0 the desk can trade one plain, tested rule instead of the hourly agents: hold a coin while its daily
@@ -254,8 +270,9 @@ trend strategy" has the replays and the risks). To switch:
 
 1. On Telegram, send `/trendtest 1000` first if you like: it replays the rule on real prices over the last 1,000 days
    with the desk's limits and answers in a minute (it changes nothing).
-2. On the server, run `desk setup` and press **Enter** to keep every answer until **STEP 5 - Strategy, coins and
-   timing**. Choose **1) Daily trend rule**.
+2. On Telegram send `/setup`, tap **1 Strategy**, then **1 Daily trend rule** and **1 The 8 tested coins**, choose the
+   risk level, then **9 Apply changes** and **YES** (skip steps 3 and 4 below). Or on the server, run `desk setup` and
+   press **Enter** to keep every answer until **STEP 5 - Strategy, coins and timing**. Choose **1) Daily trend rule**.
 3. Press **Enter** for the 8 tested coins (BTC ETH SOL BNB XRP ADA DOGE LINK). The setup gives each coin its own
    position slot (`MAX_OPEN_POSITIONS=8`; at most 10% each, so up to 80% of the account can be in coins) and switches
    the coin scout off. On the demo account it warns if a coin is missing or priced more than 3% off on the Binance demo

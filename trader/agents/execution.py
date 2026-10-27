@@ -196,6 +196,8 @@ class TestnetBroker:
         for leg, o in legs.items():
             if o["status"] == "FILLED":
                 fill = self._fill_from_order(symbol, "SELL", o, self._fills(symbol, o))
+                if o.get("updateTime"):   # when Binance filled it, not when the desk noticed (its next check)
+                    fill["time_ms"] = int(o["updateTime"])
                 return {"state": "exited", "reason": "stop-loss" if leg == "sl" else "take-profit",
                         "fill": fill, "protection": protection}
         live = ("NEW", "PENDING_NEW", "PARTIALLY_FILLED")

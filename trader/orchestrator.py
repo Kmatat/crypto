@@ -610,8 +610,12 @@ class Orchestrator:
                 out.append({"symbol": sym, "stage": "trend", "error": f"daily prices unavailable: {e}"})
 
         day = (now.date() - dt.timedelta(days=1)).isoformat()
-        report = {"coins": {}, "adopted": [], "slots": self.s.max_open_positions}
+        draft = self.journal.get("trend_report_draft") or {}
+        report = {"coins": dict(draft.get("coins") or {}) if draft.get("day") == day else {},
+                  "adopted": list(draft.get("adopted") or []) if draft.get("day") == day else [],
+                  "slots": self.s.max_open_positions}
         self.trend_report = report
+        selling: set[str] = set()   # coins this step tried to sell: a failed sale is not a "hold"
 
         def decide(sym: str, action: str, why: str, verdict: dict) -> dict:
             g = sigs.get(sym)
@@ -622,9 +626,13 @@ class Orchestrator:
             if key not in self._trend_logged:   # a retry of the day's step records only what is new
                 self._trend_logged = {k for k in self._trend_logged if k[0] == day} | {key}
                 self.journal.log_decision(sym, decision, verdict, {"trend": g})
-            report["coins"][sym] = {"action": action, "why": why, "approved": verdict.get("approved"),
-                                    "risk": verdict.get("reason"),
-                                    "gap": round(g["close"] / g["sma"] - 1, 4) if g else None}
+            earlier = report["coins"].get(sym) or {}
+            if not (action == "HOLD" and earlier.get("action") in ("BUY", "SELL") and earlier.get("approved")):
+                # an earlier try's buy or sale stays in the day's summary when a retry finds the coin held or out
+                report["coins"][sym] = {"action": action, "why": why, "approved": verdict.get("approved"),
+                                        "risk": verdict.get("reason"),
+                                        "gap": round(g["close"] / g["sma"] - 1, 4) if g else None}
+            self.journal.set("trend_report_draft", {"day": day, "coins": report["coins"], "adopted": report["adopted"]})
             return decision
 
         # 1. sells: a coin that closed at or below its average, and coins the owner no longer lists
@@ -640,6 +648,7 @@ class Orchestrator:
                 complete = False
                 out.append({"symbol": sym, "stage": "trend", "error": f"not sold ({why}): no live price this check"})
                 continue
+            selling.add(sym)
             try:
                 decision = decide(sym, "SELL", why, {"approved": True, "reason": "closing position"})
                 result = self._result(sym, {"price": self.last_price[sym]}, decision,
@@ -686,7 +695,9 @@ class Orchestrator:
                                            f"{sma_days}-day average)")
             out.append({"symbol": sym, "action": "ADOPT", "old_stop": p["stop_loss"], "stop_loss": stop,
                         "take_profit": moved["take_profit"], "entry_price": p["entry_price"], "sma_days": sma_days})
-            report["adopted"].append(sym)
+            if sym not in report["adopted"]:
+                report["adopted"].append(sym)
+            self.journal.set("trend_report_draft", {"day": day, "coins": report["coins"], "adopted": report["adopted"]})
 
         # 3. buys: coins above their average that the desk does not hold, strongest 60-day gain first
         held = self.journal.positions()
@@ -696,7 +707,8 @@ class Orchestrator:
                 continue
             g = sigs[sym]
             if sym in held:
-                decide(sym, "HOLD", "holds: still above its average", {"approved": False, "reason": "holding"})
+                if sym not in selling:   # a sale that failed stays a SELL in the summary ("sale failed, still held")
+                    decide(sym, "HOLD", "holds: still above its average", {"approved": False, "reason": "holding"})
                 continue
             if g is None or not g["on"]:
                 decide(sym, "HOLD", "stays out" if g else "waits for more daily history",

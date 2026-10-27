@@ -161,3 +161,13 @@ def test_a_part_filled_order_that_cannot_be_cancelled_is_kept():
     bot.execution.broker.unprotect = no_answer
     position, result = bot._sync_protection("UNIUSDT", j.positions()["UNIUSDT"])
     assert result is None and j.positions()["UNIUSDT"]["protection"] == PAIR   # still known: cancelled next time
+
+
+def test_an_exchange_exit_is_recorded_at_the_time_binance_filled_it():
+    bot, j, ex = desk([], {})
+    filled = MS + 5 * 60_000
+    status = {"state": "exited", "reason": "stop-loss", "protection": {"kind": "exchange", "stop": 7.6, "take": 8.8},
+              "fill": {"order_id": "42", "qty": 71.6, "avg_price": 7.6, "quote": 71.6 * 7.6, "fee_quote": 0.5,
+                       "time_ms": filled}}
+    bot._record_exchange_exit("UNIUSDT", status)
+    assert j.last_stop_loss_ms("UNIUSDT") == filled

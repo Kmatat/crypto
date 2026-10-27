@@ -159,6 +159,9 @@ def judged_since(j: Journal, hours: float = 24, trend: bool = False) -> str:
     return max(since_iso(hours), state.get("since") or "")
 
 
+TREND_PAUSES = ("overall loss brake", "daily loss limit", "all position slots in use")
+
+
 def stuck_rule(f: dict, minimum: int = STUCK_MIN_SIGNALS) -> tuple[str, int] | None:
     """A single refusal reason that blocked every buy signal (with enough signals to mean something)."""
     if f["buy_signals"] < minimum or f["approved"]:
@@ -175,6 +178,8 @@ def stuck_rule_for(bot, j: Journal, f: dict | None = None) -> tuple[str, int] | 
     trend = bot.base.trend
     if f is None:
         f = funnel(j, judged_since(j, trend=trend))
+    if trend:   # the rule's designed pauses (the loss brakes, full slots) are announced elsewhere and are not a fault
+        f = {**f, "refused": {k: n for k, n in f["refused"].items() if k not in TREND_PAUSES}}
     return stuck_rule(f, STUCK_MIN_TREND if trend else STUCK_MIN_SIGNALS)
 
 

@@ -20,7 +20,7 @@ class MarketDataAgent:
         self.offline = offline
         self._synthetic: dict[str, list[dict]] = {}
         self._daily: dict[str, tuple[float, list[float]]] = {}
-        self._daily_candles: dict[tuple[str, int], tuple[float, list[dict]]] = {}
+        self._daily_candles: dict[str, tuple[float, int, list[dict]]] = {}   # coin -> (read at, rows asked, rows)
         self._rng: dict[str, random.Random] = {}
 
     def candles(self, symbol: str, limit: int = 200) -> list[dict]:
@@ -52,12 +52,13 @@ class MarketDataAgent:
         Offline: a deterministic synthetic series, so the trend mode can be tried without a network."""
         if self.offline or self.client is None:
             return self._synthetic_daily(symbol, limit)
-        cached = self._daily_candles.get((symbol, limit))
+        cached = self._daily_candles.get(symbol)
         # never across midnight UTC: a day read before its close must not pass for the finished day afterwards
-        if cached and time.time() - cached[0] < 3600 and int(cached[0] // 86400) == int(time.time() // 86400):
-            return cached[1]
+        if cached and cached[1] >= limit and time.time() - cached[0] < 3600 \
+                and int(cached[0] // 86400) == int(time.time() // 86400):
+            return cached[2][-limit:]
         rows = self.client.klines(symbol, "1d", limit)
-        self._daily_candles[(symbol, limit)] = (time.time(), rows)
+        self._daily_candles[symbol] = (time.time(), limit, rows)   # one entry per coin: memory stays flat
         return rows
 
     def price(self, symbol: str) -> float:

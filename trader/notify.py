@@ -45,14 +45,20 @@ class Telegram:
             raise RuntimeError(data.get("description", f"HTTP {r.status_code}"))
         return data["result"]
 
-    def send(self, text: str, silent: bool = False) -> bool:
+    def send(self, text: str, silent: bool = False, buttons: list[list[str]] | None = None,
+             remove_buttons: bool = False) -> bool:
         """`silent`: delivered without a sound (the daily trend summary arrives at night for an owner in Europe or the
-        Gulf)."""
+        Gulf). `buttons`: rows of answer buttons under the keyboard (the phone setup); `remove_buttons` hides them."""
         if not self.enabled:
             return False
         try:
-            quiet = {"disable_notification": True} if silent else {}
-            self.call("sendMessage", chat_id=self.chat_id, text=text[:MAX_LEN], disable_web_page_preview=True, **quiet)
+            extra = {"disable_notification": True} if silent else {}
+            if buttons:
+                extra["reply_markup"] = {"keyboard": [[{"text": b} for b in row] for row in buttons],
+                                         "resize_keyboard": True, "one_time_keyboard": True}
+            elif remove_buttons:
+                extra["reply_markup"] = {"remove_keyboard": True}
+            self.call("sendMessage", chat_id=self.chat_id, text=text[:MAX_LEN], disable_web_page_preview=True, **extra)
             return True
         except (requests.RequestException, ValueError, RuntimeError) as e:
             log.warning("Telegram send failed: %s", self.redact(e))
@@ -152,16 +158,25 @@ class Telegram:
             msg = upd.get("message") or {}
             if str(msg.get("chat", {}).get("id")) != self.chat_id:
                 continue  # not the owner
-            words = (msg.get("text") or "").strip().split()
+            text = (msg.get("text") or "").strip()
+            words = text.split()
             cmd = words[0].split("@")[0].lower() if words else ""
-            handler = handlers.get(cmd) or handlers["/help"]
             try:
-                arg = " ".join(words[1:])
-                reply = handler(arg) if inspect.signature(handler).parameters else handler()
+                # a plain answer (no /command) goes to the conversation in progress, if any (the phone setup)
+                reply = handlers["*"](text) if "*" in handlers and not cmd.startswith("/") else None
+                if reply is None:
+                    handler = handlers.get(cmd) or handlers["/help"]
+                    arg = " ".join(words[1:])
+                    reply = handler(arg) if inspect.signature(handler).parameters else handler()
             except Exception as e:
                 log.exception("Telegram command %s failed", cmd)
                 reply = f"Sorry, that command failed: {e}"
-            self.send(reply)
+            if isinstance(reply, tuple):   # (text, buttons): an answer that offers buttons
+                text_out, buttons = reply
+                if text_out:
+                    self.send(text_out, buttons=buttons, remove_buttons=not buttons)
+            elif reply:
+                self.send(reply)
         return offset
 
     def _get_updates(self, offset: int | None) -> list[dict]:
@@ -194,7 +209,12 @@ def clean(text, limit: int = 400) -> str:
 
 def price_text(v: float) -> str:
     """A coin price for the owner: cents from $1 up, four significant digits below (a $0.15 coin's stop is not $0.11)."""
-    return money(v) if v >= 1 else f"${v:.4g}"
+    if v >= 1:
+        return money(v)
+    text = f"{v:.4g}"
+    if "e" in text:   # never scientific notation on the phone (a coin below $0.0001)
+        text = f"{v:.10f}".rstrip("0").rstrip(".")
+    return f"${text}"
 
 
 TREND_REENTRY = "The trend rule buys it again only after a daily close at or below its average and a new close above it."
@@ -255,7 +275,7 @@ def _messages(r: dict, trend: bool) -> list[tuple[str, str]]:
     if not o:
         return out
     if not o.get("ok"):
-        error = str(o.get("error") or "no reason given")
+        error = "no reason given" if o.get("error") is None else str(o["error"])   # '' stays '' (the hourly text)
         hint = ""
         if "API-key" in error or "Signature" in error:
             hint = "\nYour testnet keys may have been reset by Binance. On the server run: desk setup"
@@ -267,8 +287,8 @@ def _messages(r: dict, trend: bool) -> list[tuple[str, str]]:
             r.get("protected"), "")
         mentor = f"\nMaster traders' checklist:\n{r['mentor']}" if r.get("mentor") else ""
         if r.get("source") == "trend":   # the daily trend rule: an emergency stop, no profit target
-            out.append(("", f"🟢 BUY {sym} (daily trend rule)\n{o['qty']:.6g} at {money(o['avg_price'])} = "
-                            f"{money(o['quote'])}\nEmergency stop {money(r['stop_loss'])}{shield}; no profit target "
+            out.append(("", f"🟢 BUY {sym} (daily trend rule)\n{o['qty']:.6g} at {price_text(o['avg_price'])} = "
+                            f"{money(o['quote'])}\nEmergency stop {price_text(r['stop_loss'])}{shield}; no profit target "
                             f"(the take-profit order moves up with the price)\nWhy: {clean(r['reasoning'])}"))
             return out
         out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
