@@ -50,7 +50,7 @@ def read_json(path: Path) -> dict | None:
     from .remote_setup import read_small
     try:
         data = json.loads(read_small(Path(path)) or "null")
-    except ValueError:
+    except (ValueError, RecursionError):   # (a list nested thousands deep is valid JSON that stops the parser)
         return None
     return data if isinstance(data, dict) else None
 

@@ -108,7 +108,7 @@ def pending_request(data_dir: Path) -> dict[str, str]:
         request = json.loads(read_small(data_dir / REQUEST_NAME) or "{}")
         changes = request.get("changes") if isinstance(request, dict) else None
         return {str(k): str(v) for k, v in changes.items()} if isinstance(changes, dict) else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
 
 
@@ -193,7 +193,7 @@ def apply_request(env_path: Path, data_dir: Path) -> tuple[str, bool] | None:
         changes = {str(k): str(v) for k, v in changes.items()}
         asked = dt.datetime.fromisoformat(request["requested_at"])
         age = (dt.datetime.now(dt.timezone.utc) - asked).total_seconds() / 3600
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
         return "⚠️ The settings sent from the phone could not be read; nothing was changed. Send /setup again.", False
     finally:
         claimed.unlink(missing_ok=True)

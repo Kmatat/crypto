@@ -5,6 +5,12 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.6 - 2026-10-27
+
+- The last finding of the phone-setup review: a request file holding data nested thousands of levels deep (valid,
+  but more than the reader can unpack) stopped the update job before it could report anything, at every run. Such a
+  file is now treated like any unreadable request: refused, removed and reported.
+
 ## 1.7.5 - 2026-10-27
 
 Fixes from a security and conversation review of the phone setup (`/setup`), each one reproduced first:

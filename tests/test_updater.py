@@ -286,3 +286,18 @@ def test_a_settings_file_that_does_not_load_keeps_the_update_job_working(tmp_pat
     assert len(sent) == 1                                              # told once per problem
     env.write_text("CYCLE_MINUTES=15.0\n")
     assert up.fallback_settings(ValueError("x")).auto_update          # the owner's choice; on unless turned off
+
+
+def test_a_deeply_nested_request_is_refused_not_a_crash(repos):
+    """1.7.6: valid JSON nested too deep for the parser (written into the data folder) must not stop the job."""
+    from trader import remote_setup as rs
+    _, server = repos
+    data = server / "data"
+    deep = "[" * 30000 + "]" * 30000
+    (data / "update-requested").write_text(deep)
+    (data / rs.REQUEST_NAME).write_text(deep)
+    tg = FakeTG()
+    u, _ = make(server, tg)
+    assert u.run()["result"] == "up_to_date"
+    assert not (data / "update-requested").exists() and not (data / rs.REQUEST_NAME).exists()
+    assert any("could not be read" in t for t in tg.sent)
