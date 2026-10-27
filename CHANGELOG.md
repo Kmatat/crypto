@@ -5,6 +5,12 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.5 - 2026-10-27
+
+- `/health` says how long a market check takes on this server ("Server speed: a check takes about 41 s (slowest of the
+  last 96: 2.3 min); plenty of time to spare"), with a warning when the typical check takes more than 5 minutes. It
+  answers "is the server too slow?" from the desk's own measurements.
+
 ## 1.6.4 - 2026-10-26
 
 - The demo goals say when the 150-trade sample will be complete at the pace so far ("20 of 150 trades needed (at 10 a

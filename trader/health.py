@@ -332,6 +332,10 @@ def agents_text(bot, j: Journal, days: float = 7) -> str:
 
 
 # ---------------------------------------------------------------- /health and the pulse
+def duration(seconds: float) -> str:
+    return f"{seconds:.0f} s" if seconds < 90 else f"{seconds / 60:.1f} min"
+
+
 def health_text(bot, j: Journal, version: str, started_at: str, update_status: dict | None, code_version: str | None) -> str:
     beat = j.get("heartbeat") or {}
     pace = (bot.pace or {}).get("minutes", bot.s.cycle_minutes)
@@ -344,6 +348,13 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
         late = minutes > 2 * pace + 15
         lines.append(("⚠️ " if late else "✅ ") + f"Last market check {ago(beat['ts'])} (cycle {beat.get('cycle')}), "
                      f"next in about {pace} min")
+        if (took := j.get("check_seconds")):
+            typical = sorted(took)[len(took) // 2]
+            slow = typical > 5 * 60
+            lines.append(("⚠️ " if slow else "✅ ") + f"Server speed: a check takes about {duration(typical)} "
+                         f"(slowest of the last {len(took)}: {duration(max(took))})"
+                         + ("; that is slow next to the check interval: a bigger server would help"
+                            if slow else "; plenty of time to spare, the server is not holding the desk back"))
     else:
         lines.append("⏳ No market check finished yet since the start")
     problems = bot.base.problems()

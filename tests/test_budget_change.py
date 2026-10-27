@@ -139,3 +139,17 @@ def test_the_goals_say_when_the_trade_sample_will_be_complete(tmp_path):
     p = performance(j, {})
     text = goals_text(goals(j, p), p)
     assert "20 of 150 trades needed (at 10 a week, complete in about week 15)" in text
+
+
+def test_health_says_how_long_a_check_takes():
+    from trader.__main__ import heartbeat
+    from trader.health import health_text
+    j = Journal(":memory:", 5000)
+    bot = Orchestrator(Settings(offline=True, symbols=["BTCUSDT"], starting_balance=5000), j)
+    for s in (38.0, 41.0, 140.0):
+        heartbeat(bot, 1, seconds=s)
+    text = health_text(bot, j, "1.6.5", "2026-10-27T08:00:00+00:00", None, None)
+    assert "✅ Server speed: a check takes about 41 s (slowest of the last 3: 2.3 min)" in text
+    assert "not holding the desk back" in text
+    j.set("check_seconds", [400.0] * 5)
+    assert "⚠️ Server speed: a check takes about 6.7 min" in health_text(bot, j, "1.6.5", "x" * 19, None, None)

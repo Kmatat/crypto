@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
@@ -517,11 +518,15 @@ def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
         bot.journal.set("last_pulse", now.isoformat(timespec="seconds"))
 
 
-def heartbeat(bot: Orchestrator, cycle: int = 0, note: str = "") -> None:
+def heartbeat(bot: Orchestrator, cycle: int = 0, note: str = "", seconds: float | None = None) -> None:
     """After every check: the time, for /health, the pulse and the update job's watchdog (a separate process
-    that notices when the desk has stopped checking the market)."""
+    that notices when the desk has stopped checking the market). `seconds`: how long the check took, so /health can
+    say whether the server keeps up (the last 96 checks are kept)."""
     beat = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "cycle": cycle,
             "next_minutes": bot.pace["minutes"], "version": version_string(), "note": note}
+    if seconds is not None:
+        beat["seconds"] = round(seconds, 1)
+        bot.journal.set("check_seconds", ((bot.journal.get("check_seconds") or []) + [round(seconds, 1)])[-96:])
     bot.journal.set("heartbeat", beat)
     if not bot.s.offline and bot.s.db_path != ":memory:":
         write_json(HEARTBEAT, beat)
@@ -760,6 +765,7 @@ def cmd_run(s: Settings, args) -> None:
     try:
         while not stop.is_set():
             n += 1
+            started = time.monotonic()
             try:
                 with trade_lock:
                     summary = bot.run_cycle()
@@ -773,7 +779,7 @@ def cmd_run(s: Settings, args) -> None:
                 except Exception:  # noqa: BLE001 - the journal itself may be the problem
                     pass
                 summary = []
-            heartbeat(bot, n)
+            heartbeat(bot, n, seconds=time.monotonic() - started)
             try:
                 record_errors(bot, summary, seen_errors)
                 maybe_pulse(bot, tg, s)
