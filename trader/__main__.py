@@ -22,11 +22,13 @@ import threading
 import time
 from pathlib import Path
 
+from . import trend
 from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
-from .notify import Telegram, pace_message, scout_message, trade_messages
+from .notify import Telegram, pace_message, scout_message, trade_messages, trend_lines, trend_message
 from .orchestrator import Orchestrator
-from .report import goals, goals_text, performance, print_report, report_text, status_text, watchlist_text
+from .report import (GOALS_TREND, goals, goals_text, performance, print_report, report_text, status_text,
+                     watchlist_text)
 from .lab import Lab, LabInterrupted, status_text as lab_status_text, week_report
 from .agents.head import HeadTraderAgent
 from .agents.research import ResearchAgent, review_text
@@ -36,8 +38,8 @@ from .notify import clean
 from .scorecard import claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
 from .ai_router import ORDERS, AIRouter, is_ai_source
-from .health import (agents_text, diagnose_text, free_ai_line, funnel, health_text, judged_since, pulse_text, stuck_rule,
-                     write_json)
+from .health import (agents_text, diagnose_text, free_ai_line, health_text, pulse_text, stuck_rule_for, trend_line,
+                     trend_state, write_json)
 
 log = logging.getLogger("trader")
 
@@ -64,28 +66,83 @@ HELP_TEXT = (
     "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
     "changes, a short pulse every few hours (PULSE_HOURS), and a daily report."
 )
+TREND_NO_CARDS = ("Strategy cards and challengers belong to the hourly strategy; the daily trend rule runs no card. "
+                  "They wait unchanged until you choose the hourly strategy again in desk setup.")
+
+
+def trades_trend(bot) -> bool:
+    """True when the desk trades the daily trend rule (STRATEGY=trend); a stand-in desk without settings: False."""
+    return bool(getattr(getattr(bot, "base", None), "trend", False))
+
+
+def help_text(s: Settings) -> str:
+    """The command list. With the daily trend rule it lists only what works with it: the lab, the playbook and the
+    strategy cards belong to the hourly strategy."""
+    if not s.trend:
+        return HELP_TEXT
+    g, sma = GOALS_TREND, trend.params(s)[0]
+    return (
+        "🤖 Crypto trading desk commands (daily trend rule)\n"
+        "/status - open positions, the daily trend decisions and each coin's latest decision with the reason\n"
+        f"/report - performance so far and the trend rule's goals ({g['weeks']} weeks, {g['closed_trades']} trades, "
+        f"profit factor {g['profit_factor']:g} or more, worst drop at most {g['max_drawdown_pct']}%)\n"
+        f"/watchlist - your coins and where each closed against its {sma}-day average\n"
+        "/strategies - the rule in force and its settings\n"
+        "/trendtest [days] - the rule replayed on real prices over the last days (default 365), with the desk's limits\n"
+        "/health - is everything working? last check, the daily decisions, errors, settings problems, updates\n"
+        "/agents [days] - how many agents are working and what changed (default: the last 7 days)\n"
+        "/diagnose [days] - the desk's records versus the rule replayed on the same daily prices\n"
+        "/notes - the desk's notebook as a zip: trades, diary and results in Markdown, ready to give to Claude\n"
+        "/review - Claude reads the notebook and writes a plain-language review ("
+        + ("uses a little of the AI budget" if s.use_claude else "needs Claude, which desk setup adds") + ")\n"
+        "/aibudget [usd] and /ai - Claude's budget and the AI settings (only /review uses AI with the trend rule)\n"
+        "/version - which code version is running, and whether a newer one exists\n"
+        "/update - install the latest code now (it is tested first; the desk restarts itself)\n"
+        "/help - this list\n\n"
+        "You also get a message for every buy, sell or failed order, a short summary of the daily trend decisions "
+        "after 00:00 UTC (silent, so it does not wake you), a short pulse every few hours (PULSE_HOURS), and a daily "
+        "report."
+    )
 
 
 def print_cycle(n: int, summary: list[dict]) -> None:
     print(f"\n--- cycle {n} ({dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC) ---")
     for r in summary:
-        if "error" in r:
-            print(f"{r['symbol']:9s} ERROR {r['error']}")
-            continue
-        line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if is_ai_source(r.get('source')) else ' '}"
-        if "confidence" in r:
-            px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
+        try:
+            print(cycle_line(r))
+        except Exception:  # noqa: BLE001 - a console line must never stop the desk
+            print(str(r)[:400])
+
+
+def cycle_line(r: dict) -> str:
+    """One console line per result of a check."""
+    if "error" in r:
+        return f"{r['symbol']:9s} ERROR {r['error']}"
+    if r.get("action") == "ADOPT":   # the daily trend rule took over a position of the hourly strategy
+        return (f"{r['symbol']:9s} ADOPT  now follows the daily trend rule: stop {r['old_stop']:,.6g} -> "
+                f"{r['stop_loss']:,.6g}, take-profit order {r['take_profit']:,.6g}")
+    if r.get("action") == "RAISE":   # the trend rule's take-profit order moved up with the price
+        return (f"{r['symbol']:9s} RAISE  take-profit order -> {r['take_profit']:,.6g} (price {r['price']:,.6g}, "
+                f"{r['price'] / r['entry_price'] - 1:+.0%} since the buy; stop {r['stop_loss']:,.6g})")
+    line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if is_ai_source(r.get('source')) else ' '}"
+    if "confidence" in r:
+        px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
+        if r.get("source") == "trend":   # the rule has no confidence: how far the close is above its average
+            score = r.get("score")
+            line += (f" above avg {score:+.1%}" if score is not None else " above avg n/a") + \
+                f" price={px}  risk: {r['risk']}"
+        else:
             line += f" conf={r['confidence']:.2f} score={r['score']:+.2f} price={px}  risk: {r['risk']}"
-        if "reason" in r:
-            line += f" ({r['reason']})"
-        if "protect_error" in r:
-            line += f"  protection not placed: {r['protect_error']}"
-        if o := r.get("order"):
-            line += f"  -> {'FILLED' if o['ok'] else 'FAILED'} " + (
-                f"{o['qty']:.6g} @ {o['avg_price']:,.6g}" if o["ok"] else o["error"])
-        if t := r.get("trade"):
-            line += f"  P&L {t['pnl']:+.2f} USDT ({t['pnl_pct']:+.2f}%)"
-        print(line)
+    if "reason" in r:
+        line += f" ({r['reason']})"
+    if "protect_error" in r:
+        line += f"  protection not placed: {r['protect_error']}"
+    if o := r.get("order"):
+        line += f"  -> {'FILLED' if o['ok'] else 'FAILED'} " + (
+            f"{o['qty']:.6g} @ {o['avg_price']:,.6g}" if o["ok"] else str(o["error"]))
+    if t := r.get("trade"):
+        line += f"  P&L {t['pnl']:+.2f} USDT ({t['pnl_pct']:+.2f}%)"
+    return line
 
 
 def cmd_check(s: Settings) -> int:
@@ -116,15 +173,41 @@ def cmd_check(s: Settings) -> int:
                 raise RuntimeError(f"not available for {', '.join(missing)} - the desk will watch those itself")
             return f"supported for {', '.join(s.symbols)}"
         step("Stop-loss orders on the exchange (OCO)", oco)
-    step("News feeds", lambda: f"{len(NewsAgent().fetch_headlines())} headlines")
-    step("Forex (ECB rates)", lambda: ForexAgent().run()["regime"])
-    if s.auto_coins:
+    if s.trend:   # the daily trend rule reads only daily prices: no news, forex or scout to check
+        print("[INFO] News / Forex / Market scout: not used by the daily trend rule")
+
+        def daily_history():
+            sma = trend.params(s)[0]
+            client, need = BinanceClient(PUBLIC_BASE_URL), trend.window(sma)
+            short, lines = [], []
+            for sym in s.symbols:
+                try:
+                    days = trend.fetch_daily(client, sym, trend.history_days(sma))
+                except Exception as e:  # noqa: BLE001 - name the coin, check the others
+                    short.append(f"{sym.removesuffix('USDT')} (could not be read: {e})")
+                    continue
+                if len(days) < need:
+                    short.append(f"{sym.removesuffix('USDT')} ({len(days)} days)")
+                lines.append(trend.describe(sym, trend.signal([c["close"] for c in days], sma), sma))
+            detail = "".join(f"\n       {line}" for line in lines)
+            if short:
+                raise RuntimeError(f"fewer than {need} finished days for {', '.join(short)}: the rule keeps "
+                                   f"{'it' if len(short) == 1 else 'them'} out until then{detail}")
+            return (f"at least {need} finished days for "
+                    + ("the coin" if len(s.symbols) == 1 else f"each of the {len(s.symbols)} coins") + detail)
+        step("Daily history (trend rule)", daily_history)
+    else:
+        step("News feeds", lambda: f"{len(NewsAgent().fetch_headlines())} headlines")
+        step("Forex (ECB rates)", lambda: ForexAgent().run()["regime"])
+    if s.auto_coins and not s.trend:
         def scout():
             from .agents.scout import MarketScoutAgent
             testnet = BinanceClient(TESTNET_BASE_URL, s.api_key, s.api_secret) if s.mode == "testnet" else None
             cands = MarketScoutAgent(BinanceClient(PUBLIC_BASE_URL), testnet, None, s).candidates()
             return f"{len(cands)} liquid coins to choose from, e.g. " + ", ".join(c["symbol"][:-4] for c in cands[:8])
         step("Market scout", scout)
+    only_review = " (only for /review in trend mode)" if s.trend else ""
+    unused = " (not used by the daily trend rule)" if s.trend else ""
     if s.anthropic_key:
         def claude():
             ok = ClaudeJSON(s.claude_model, s.anthropic_key).ask(
@@ -133,9 +216,9 @@ def cmd_check(s: Settings) -> int:
             if ok is None:
                 raise RuntimeError("no valid answer - check the API key and account credit")
             return f"{s.claude_model} answered"
-        step("Claude", claude)
+        step("Claude" + only_review, claude)
     else:
-        print("[INFO] Claude: not configured")
+        print("[INFO] Claude: not configured" + (" (only /review would use it in trend mode)" if s.trend else ""))
     if s.use_free_ai:
         def free():
             from .free_ai import from_settings
@@ -146,10 +229,14 @@ def cmd_check(s: Settings) -> int:
                 why = "; ".join(p["text"] for p in ai.take_problems()) or "no valid answer (busy, or the model is unknown)"
                 raise RuntimeError(why)
             return f"{ai.label} answered ({', '.join(ai.models)})"
-        step("Free AI", free)
+        step("Free AI" + unused, free)
+    elif s.free_ai_provider and s.trend:   # not used by the rule: an incomplete setting is no failure
+        print(f"[INFO] Free AI: FREE_AI_PROVIDER={s.free_ai_provider} is incomplete{unused}")
     elif s.free_ai_provider:
         print(f"[FAIL] Free AI: FREE_AI_PROVIDER={s.free_ai_provider} is incomplete - run desk setup")
         failures += 1
+    elif s.trend:
+        print(f"[INFO] Free AI: not configured{unused}")
     else:
         print("[INFO] Free AI: not configured" + ("" if s.use_claude else " - agents use built-in rules"))
     if s.telegram_token and s.telegram_chat_id:
@@ -191,6 +278,8 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     text = report_text(perf, title=f"☀️ Daily report {today}")
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=s.trend), perf)
+    if s.trend and (block := trend_day_text(bot, bot.journal)):
+        text += "\n\n" + block
     if card := scorecard_block(bot, bot.journal):
         text += "\n\n" + card
     bot.notes.refresh(bot.last_price, scorecard=card)  # the notebook's PERFORMANCE.md carries today's scorecard
@@ -198,8 +287,103 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
         bot.journal.set("last_daily_report", today)
 
 
+def trend_decisions(j: Journal, day: str) -> dict[str, dict]:
+    """The daily trend rule's decisions on the closes of `day` (made the day after it), the last one per coin, in the
+    form of a trend report's coins (notify.trend_lines)."""
+    after = dt.date.fromisoformat(day) + dt.timedelta(days=1)
+    rows = j.db.execute("SELECT symbol, action, risk_approved, risk_reason, combined_score, reasoning FROM decisions "
+                        "WHERE source='trend' AND ts >= ? AND ts < ? ORDER BY id",
+                        (after.isoformat(), (after + dt.timedelta(days=1)).isoformat())).fetchall()
+    out = {}
+    for r in rows:
+        reasoning = str(r["reasoning"] or "")
+        young = "not enough daily history" in reasoning   # no average yet: its score is a placeholder
+        out[r["symbol"]] = {"action": r["action"], "why": reasoning.split(" · ")[0], "approved": bool(r["risk_approved"]),
+                            "risk": r["risk_reason"], "gap": None if young else r["combined_score"]}
+    return out
+
+
+def trend_day_text(bot: Orchestrator, j: Journal) -> str:
+    """The daily report's look at the trend rule: where the coins stood at its last daily decisions."""
+    day = j.get("trend_day")
+    coins = trend_decisions(j, day) if day else {}
+    if not coins:
+        return ""
+    positions = j.positions()
+    lines = trend_lines(coins, trend.params(bot.base)[0], positions, actions=False)
+    return "\n".join([f"📈 Daily trend rule, closes of {day}", *lines,
+                      f"{len(positions)} of {bot.base.max_open_positions} slots used"])
+
+
+def latest_trend_decision(j: Journal, sym: str):
+    return j.db.execute("SELECT ts, action, reasoning, risk_reason FROM decisions WHERE symbol=? AND source='trend' "
+                        "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+
+
+def trend_strategy_text(bot: Orchestrator, j: Journal) -> str:
+    """/strategies with the daily trend rule: the rule and its settings, when it started, each coin's last decision.
+    The hourly cards are not touched (Lab.champion() would record one)."""
+    s = bot.base
+    sma, vol, stop = trend.params(s)
+    lines = ["📈 Strategy in force: the daily trend rule (STRATEGY=trend)",
+             f"Hold a coin while its finished daily close is above its {sma}-day average; sell after a close at or below. "
+             f"Emergency stop {stop:.0%} below the entry on the exchange, no profit target. Each coin's share is "
+             f"1/{len(s.symbols)} of the account, smaller for coins swinging more than {vol:.0%} a year, at most "
+             f"{s.max_position_pct:.0%}. Decisions once a day after 00:00 UTC, no AI."]
+    t_sma, t_vol, t_stop = trend.TESTED
+    diffs = ([f"average {sma} days (tested {t_sma})"] if sma != t_sma else []) \
+        + ([f"volatility target {vol:.0%} (tested {t_vol:.0%})"] if abs(vol - t_vol) > 1e-9 else []) \
+        + ([f"emergency stop {stop:.0%} (tested {t_stop:.0%})"] if abs(stop - t_stop) > 1e-9 else [])
+    if (s.trend_sma_days, s.trend_vol_target, s.trend_stop_pct) != (sma, vol, stop):
+        lines.append("Your TREND_ settings are outside the allowed ranges, so the tested values are used (see /health).")
+    elif diffs:
+        lines.append("Different from the tested settings: " + " · ".join(diffs) + ". The test results do not apply as "
+                     "they are; /trendtest replays your settings.")
+    else:
+        lines.append("Settings: as tested.")
+    coins = ", ".join(x.removesuffix("USDT") for x in s.symbols)
+    lines.append(f"Coins: {coins}" + (" (the coins of the tests)" if set(s.symbols) == set(trend.TESTED_COINS) else "")
+                 + f" · {s.max_open_positions} position slots"
+                 + (f" (fewer than the coins: only the strongest {s.max_open_positions} are held)"
+                    if s.max_open_positions < len(s.symbols) else ""))
+    start = (j.get("trend_start") or {}).get("ts")
+    lines.append(f"Started: {start[:10] if start else 'not yet (at the first daily decisions)'} · last decided day: "
+                 f"{j.get('trend_day') or 'none yet'}")
+    lines.append("\nLatest daily decisions:")
+    for sym in s.symbols:
+        r = latest_trend_decision(j, sym)
+        lines.append(f"• {sym.removesuffix('USDT')} {r['action']} on {r['ts'][:10]}: {clean(r['reasoning'], 300)}" if r
+                     else f"• {sym.removesuffix('USDT')}: no daily decision yet")
+    lines.append("\nThe hourly champion and challengers are kept for STRATEGY=hourly.")
+    return "\n".join(lines)
+
+
+def trend_watchlist_text(s: Settings, j: Journal) -> str:
+    """/watchlist with the daily trend rule: the owner's coins and where each stood at its last daily decision."""
+    lines = ["🔭 Your coins (SYMBOLS; the scout is off in trend mode)"]
+    for sym in s.symbols:
+        r = latest_trend_decision(j, sym)
+        lines.append(f"• {sym.removesuffix('USDT')}: " + (clean(r["reasoning"], 300) if r else "no daily decision yet"))
+    return "\n".join(lines)
+
+
+def maybe_trend_summary(bot: Orchestrator, tg: Telegram) -> None:
+    """Once a day with the daily trend rule: its decisions in one short message, sent silently (it arrives at night for
+    an owner in Europe or the Gulf). The step may run on several checks when it is retried: sent once it is final."""
+    rep = bot.trend_report
+    if not tg.enabled or not rep or not (rep.get("final") or rep.get("complete")):
+        return
+    day = rep.get("day")
+    if bot.journal.get("trend_summary_sent") == day:
+        return
+    if tg.send(trend_message(rep, bot), silent=True):
+        bot.journal.set("trend_summary_sent", day)
+
+
 def scorecard_block(bot: Orchestrator, j: Journal) -> str:
     """Claude-vs-rules scorecard from real later prices (empty when there is nothing to judge or no data)."""
+    if trades_trend(bot):   # it judges the hourly AI's vetoes on hourly candles: nothing of the trend rule's, heavy to fetch
+        return ""
     client = bot.market.client
     if client is None:
         return ""
@@ -225,17 +409,21 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
     return text
 
 
-def status_extra(bot: Orchestrator, s: Settings) -> list[str]:
+def status_extra(bot: Orchestrator, s: Settings, j: Journal | None = None) -> list[str]:
     lines = [f"Next check in about {bot.pace['minutes']} min: {bot.pace['reason']} ({bot.pace['source']})"]
+    if s.trend:   # the daily decisions and the slots; `j` is the caller's connection (the Telegram thread has its own)
+        j = j or bot.journal
+        lines.append(trend_line(bot, j))
+        lines.append(f"Position slots: {len(j.positions())} of {s.max_open_positions} in use")
     from .updater import read_status
     if (st := read_status()) and st.get("behind"):
         lines.append("🆕 A new code version is available - send /update" if not st.get("auto_update")
                      else "🆕 A new code version is available - it installs automatically within 30 min")
-    if bot.llm:
+    if bot.llm and not (s.trend and bot.llm.spent_today <= 0):   # with the trend rule only /review spends
         budget = bot.llm.effective_daily_budget()
         cap = f" of ${budget:.2f} daily cap" if budget else ""
         lines.append(f"Claude spend today: about ${bot.llm.spent_today:.2f}{cap}")
-    if getattr(bot, "free_ai", None):
+    if getattr(bot, "free_ai", None) and not s.trend:   # the trend rule asks no AI
         lines.append(free_ai_line(bot.free_ai))
     return lines
 
@@ -300,7 +488,8 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         if should_stop:
             lab.should_stop = should_stop
         research = ResearchAgent(bot.ai)   # web research needs Claude; the proposals may come from the free AI
-        lessons = research.lessons(bot.journal)
+        # after a switch back from the daily trend rule, its trades teach the hourly strategy nothing
+        lessons = research.lessons(bot.journal, since=None if bot.base.trend else bot.journal.get("strategy_mode_since"))
         bot.journal.set("lessons", lessons)
         if lessons.get("notes"):
             bot.journal.event("lesson", "; ".join(lessons["notes"]))
@@ -338,9 +527,9 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         perf_text = report_text(perf, title="Performance") + "\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=bot.base.trend), perf)
         review = None
         if bot.llm:
-            data = research.review(bot.notes.digest(bot.last_price, scorecard=scorecard))
+            data = research.review(bot.notes.digest(bot.last_price, scorecard=scorecard), trend=bot.base.trend)
             if data:
-                review = review_text(data)
+                review = review_text(data, trend=bot.base.trend)
                 bot.journal.event("review", "Claude reviewed the notebook: " + str(data.get("summary", ""))[:300])
                 bot.journal.set("last_review", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                                                 "review": data})
@@ -381,11 +570,16 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     applied at once); '/aibudget default' goes back to the settings file. Changes are logged in the diary."""
     llm = bot.llm
     free = getattr(bot, "free_ai", None)
+    trend_mode = trades_trend(bot)   # the daily trend rule asks no AI about trades: only /review spends
     if not llm:
+        if trend_mode:
+            return ("Claude is not configured on this desk (no API key), so there is no AI bill. The daily trend rule "
+                    "asks no AI about trades; only /review would use Claude.")
         if free:
             return ("Claude is not configured, so there is no AI bill: the free AI answers within its daily allowance.\n"
                     + free_ai_line(free))
         return "Claude is not configured on this desk (no API key), so there is no AI budget. The free rules decide."
+    note = " With the daily trend rule only /review uses Claude." if trend_mode else ""
     arg = arg.strip().lower().lstrip("$")
     if arg in ("default", "reset"):
         j.set("ai_budget_override", None)
@@ -393,7 +587,7 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
         llm.pct_daily_budget = bot.base.starting_balance * bot.base.ai_pct_month() / 100 / 30 if bot.base.ai_pct_month() else 0.0
         llm.budget_hit = False
         j.event("owner", f"Claude's daily budget back to the settings: ${llm.effective_daily_budget():.2f}")
-        return f"✅ Claude's daily budget is back to the settings file: ${llm.effective_daily_budget():.2f} a day."
+        return f"✅ Claude's daily budget is back to the settings file: ${llm.effective_daily_budget():.2f} a day." + note
     if arg:
         try:
             usd = float(arg)
@@ -407,13 +601,16 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
         llm.budget_hit = llm.spent_today >= usd
         j.event("owner", f"Claude's daily budget set to ${usd:.2f} a day")
         return (f"✅ Claude may now spend up to ${usd:.2f} a day (at most ${usd * 30:,.0f} a month of real money). It applies "
-                f"now and after restarts; /aibudget default goes back to the settings file.")
+                f"now and after restarts; /aibudget default goes back to the settings file.") + note
     by = llm.by_caller or {}
     cap = llm.effective_daily_budget()
+    used_up = ("/review waits until then" if trend_mode else
+               "the free AI, then the free rules, answer" if free else "free rules")
     lines = [f"💸 Claude's budget: " + (f"${cap:.2f} a day" if cap else "no daily cap") + f" on {llm.model}; "
              f"spent today ${llm.spent_today:.2f}"
-             + ((" (used up until 00:00 UTC: " + ("the free AI, then the free rules, answer" if free else "free rules")
-                 + ")") if llm.budget_hit else "")]
+             + ((" (used up until 00:00 UTC: " + used_up + ")") if llm.budget_hit else "")]
+    if trend_mode:
+        lines.append("The daily trend rule asks no AI about trades: only /review uses Claude.")
     if j.get("ai_budget_override"):
         lines.append(f"Set by you with /aibudget on {j.get('ai_budget_override')['set_at'][:10]}.")
     for name, label in (("news", "News"), ("decision", "Buy/sell decisions"), ("scout", "Coin scout"),
@@ -423,7 +620,7 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
             lines.append(f"• {label}: {c['calls']} calls, ${c['usd']:.2f}")
     now = dt.datetime.now(dt.timezone.utc)
     hours = max(1.0, now.hour + now.minute / 60)
-    if free:
+    if free and not trend_mode:
         lines.append(free_ai_line(free))
     lines.append(f"At today's pace about ${llm.spent_today / hours * 24 * 30:,.0f} a month. Change it with /aibudget 3 "
                  f"(dollars a day, at most ${AI_BUDGET_CEILING_USD:g}). A cheaper model (CLAUDE_MODEL=claude-haiku-5-5 in desk "
@@ -436,6 +633,24 @@ def ai_command(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     '/ai claude-first' changes the order at once and keeps it across restarts."""
     free, claude, router = getattr(bot, "free_ai", None), bot.llm, getattr(bot, "ai", None)
     arg = arg.strip().lower()
+    if trades_trend(bot):   # the daily trend rule asks no AI about trades: the order is a setting of the hourly strategy
+        if arg and arg != "default" and arg not in ORDERS:
+            return "Usage: /ai, /ai free-first, /ai claude-first or /ai default"
+        if arg:
+            return ("The AI order (free-first or claude-first) applies to the hourly strategy (STRATEGY=hourly): nothing "
+                    "changed. The daily trend rule asks no AI about trades; only /review uses Claude.")
+        lines = ["🤖 The desk's AIs", "The daily trend rule asks no AI about trades: the rule decides alone. Only /review "
+                 "uses Claude."]
+        if claude:
+            budget = claude.effective_daily_budget()
+            lines.append(f"Claude ({claude.model}): ${claude.spent_today:.2f} spent today "
+                         + (f"of ${budget:.2f}" if budget else "(no daily cap)") + " (/aibudget to change)")
+        else:
+            lines.append("Claude is not configured, so /review is not available (desk setup adds it).")
+        if free:
+            lines.append(f"The free AI ({free.label}) is set up but not used by the daily trend rule; it answers again "
+                         "with STRATEGY=hourly.")
+        return "\n".join(lines)
     if arg == "default":
         j.set("ai_order_override", None)
         if isinstance(router, AIRouter):
@@ -513,15 +728,19 @@ def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict |
 def maybe_pulse(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     """Every PULSE_HOURS: what the desk did, so a silent phone always means something is wrong. And straight
     away, at most twice a day: one rule refusing every buy signal for a day (a sign of a broken setting)."""
-    f = funnel(bot.journal, judged_since(bot.journal))  # only decisions under the strategy now in force
-    if (stuck := stuck_rule(f)):
+    if (stuck := stuck_rule_for(bot, bot.journal)):   # only decisions under the strategy now in force
+        window = "since the daily trend rule started (last 7 days at most)" if s.trend else "last 24 hours at most"
         tg.send_once("stuck-rule", f"🛑 '{stuck[0]}' refused every one of the {stuck[1]} buy signals made under the current "
-                                   "strategy (last 24 hours at most). That usually means a setting the rule can never "
+                                   f"strategy ({window}). That usually means a setting the rule can never "
                                    "accept. Send /health.", every_hours=12)
+    now = dt.datetime.now(dt.timezone.utc)
+    # the daily trend decisions late or given up: said from 02:00 UTC (a retry at 00:45 is normal), every 6 hours
+    if s.trend and now.hour >= 2 and (late := trend_state(bot, bot.journal)["warning"]):
+        tg.send_once("trend-late", f"⏰ {late[0].upper() + late[1:]}. Open positions keep their emergency stop "
+                                   "meanwhile. (Repeats at most every 6 hours.)", every_hours=6)
     if not tg.enabled or not s.pulse_hours:
         return
     last = bot.journal.get("last_pulse")
-    now = dt.datetime.now(dt.timezone.utc)
     if last and (now - dt.datetime.fromisoformat(last)).total_seconds() < s.pulse_hours * 3600:
         return
     if tg.send(pulse_text(bot, bot.journal, s.pulse_hours, version_string())):
@@ -537,6 +756,8 @@ def heartbeat(bot: Orchestrator, cycle: int = 0, note: str = "", seconds: float 
     if seconds is not None:
         beat["seconds"] = round(seconds, 1)
         bot.journal.set("check_seconds", ((bot.journal.get("check_seconds") or []) + [round(seconds, 1)])[-96:])
+    if trades_trend(bot):   # the last finished day the daily trend rule decided
+        beat["trend_day"] = bot.journal.get("trend_day")
     bot.journal.set("heartbeat", beat)
     if not bot.s.offline and bot.s.db_path != ":memory:":
         write_json(HEARTBEAT, beat)
@@ -546,7 +767,7 @@ def record_errors(bot: Orchestrator, summary: list[dict], seen: dict) -> None:
     """Errors in a check go to the diary (once per agent and coin per 6 hours), so /agents can say who is failing."""
     now = dt.datetime.now(dt.timezone.utc).timestamp()
     for r in summary:
-        if "error" not in r:
+        if "error" not in r or r.get("symbol") == "TREND":   # the trend step's give-up is in the diary already
             continue
         key = (r.get("stage", ""), r["symbol"])
         text = f"{r.get('stage', 'check')} {r['symbol']}: {r['error']}"[:400]
@@ -581,24 +802,46 @@ def start_checks(bot: Orchestrator, s: Settings) -> list[str]:
     return out
 
 
+def start_summary(bot: Orchestrator, s: Settings) -> dict:
+    """What the start messages say: the mode, the strategy (named for the daily trend rule only), who decides, the
+    pace of the checks and the coins."""
+    mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
+        "offline test (made-up prices)" if s.offline else "paper trading at real prices"
+    if s.trend:   # the rule decides alone; the checks between the daily decisions watch prices and protection
+        sma, _, stop_pct = trend.params(s)
+        strategy = f"daily trend rule ({sma}-day average, {stop_pct:.0%} emergency stop)"
+        ai = "none for trading (Claude only for /review)" if s.use_claude else "none (the rule decides alone)"
+        pace = (f"every {s.cycle_minutes} min (prices and exchange protection; the trend decisions once a day after "
+                "00:00 UTC)")
+    else:
+        strategy = None
+        ais = ([f"free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)})"] if bot.free_ai else []) \
+            + ([f"Claude ({s.claude_model})"] if s.use_claude else [])
+        if bot.free_ai and s.use_claude and getattr(bot.ai, "order", "") == "claude-first":
+            ais.reverse()
+        ai = (" first, then ".join(ais) + ", then the built-in rules") if ais else "built-in rules"
+        pace = f"every {s.cycle_minutes} min" + (
+            f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if ais else "")
+    coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
+    return {"mode": mode, "strategy": strategy, "ai": ai, "pace": pace, "coins": coins}
+
+
 def cmd_run(s: Settings, args) -> None:
     lock = single_instance(s.db_path)  # noqa: F841 - held until exit
     bot = Orchestrator(s)
     trade_lock = threading.Lock()
     stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish; the lab stops early
     tg = Telegram(s.telegram_token, s.telegram_chat_id) if not s.offline else Telegram("")
-    mode = "Binance testnet demo account (fake money)" if s.mode == "testnet" and not s.offline else \
-        "offline test (made-up prices)" if s.offline else "paper trading at real prices"
-    ais = ([f"free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)})"] if bot.free_ai else []) \
-        + ([f"Claude ({s.claude_model})"] if s.use_claude else [])
-    if bot.free_ai and s.use_claude and getattr(bot.ai, "order", "") == "claude-first":
-        ais.reverse()
-    ai = (" first, then ".join(ais) + ", then the built-in rules") if ais else "built-in rules"
-    pace = f"every {s.cycle_minutes} min" + (
-        f" (the AI may adjust it between {s.min_check_minutes} and {s.max_check_minutes})" if ais else "")
-    coins = ", ".join(s.symbols) + (f" + scout picks (up to {s.max_coins} coins)" if bot.scout else "")
-    print(f"Version {version_string()}  Mode: {mode}  AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
-    bot.journal.event("start", f"Desk started: {mode}; AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
+    info = start_summary(bot, s)
+    mode, strategy, ai, pace, coins = info["mode"], info["strategy"], info["ai"], info["pace"], info["coins"]
+    print(f"Version {version_string()}  Mode: {mode}  " + (f"Strategy: {strategy}  " if strategy else "")
+          + f"AI: {ai}  checks: {pace}\nCoins: {coins}  journal: {s.db_path}")
+    if s.offline and s.trend:
+        print("Note: the daily trend rule decides once a day, so an offline run makes one daily decision per real day. "
+              "To see the rule over years: python -m trader backtest --strategy trend (on the server: desk backtest "
+              "--strategy trend), or /trendtest on Telegram.")
+    bot.journal.event("start", f"Desk started: {mode}; " + (f"strategy: {strategy}; " if strategy else "")
+                      + f"AI: {ai}; coins: {coins}; checks {pace}; version {bot.notes.version()}")
     started_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     if not s.offline and s.db_path != ":memory:":  # the update job waits for this file to confirm a new version started
         write_json(DESK_STARTED, {"version": version_string(), "revision": revision(), "pid": os.getpid(),
@@ -612,12 +855,15 @@ def cmd_run(s: Settings, args) -> None:
     if tg.enabled:
         if bot.journal.get("last_daily_report") is None:  # first start: first daily report tomorrow
             bot.journal.set("last_daily_report", dt.datetime.now(dt.timezone.utc).date().isoformat())
-        tg.send(f"🚀 Trading desk started (version {version_string()})\nMode: {mode}\nAI: {ai}\nCoins: {coins}\n"
-                f"Budget: ${s.starting_balance:,.0f} · checks {pace}\n\n{HELP_TEXT}")
+        tg.send(f"🚀 Trading desk started (version {version_string()})\nMode: {mode}\n"
+                + (f"Strategy: {strategy}\n" if strategy else "") + f"AI: {ai}\nCoins: {coins}\n"
+                f"Budget: ${s.starting_balance:,.0f} · checks {pace}\n\n{help_text(s)}")
         if notices:
             tg.send("\n\n".join(notices))
 
         def watched(j: Journal) -> list[str]:
+            if s.trend:   # the owner's coins; the scout's old watchlist is not used
+                return list(s.symbols)
             return (j.get("watchlist") or default_watchlist(s))["symbols"]
 
         def update_now() -> str:
@@ -630,9 +876,13 @@ def cmd_run(s: Settings, args) -> None:
         from .updater import version_text
 
         def lab_status() -> str:
+            if s.trend:   # the rule's own status; the hourly cards stay untouched
+                return with_journal(s, lambda j: trend_strategy_text(bot, j))
             return with_journal(s, lambda j: lab_status_text(Lab(bot.base, j, client=None)))
 
         def approve(arg: str) -> str:
+            if s.trend:
+                return TREND_NO_CARDS
             card_id = arg.strip().lower()
             if not card_id:
                 return "Usage: /approve <id>  (ids are shown by /strategies)"
@@ -642,6 +892,8 @@ def cmd_run(s: Settings, args) -> None:
             return f"✅ Promoted {card.name} [{card.id}]. The desk switches at its next check.\n{card.describe_diff(bot.card)}"
 
         def reject(arg: str) -> str:
+            if s.trend:
+                return TREND_NO_CARDS
             ok = with_journal(s, lambda j: Lab(bot.base, j, client=None).reject(arg.strip().lower()))
             return "Rejected." if ok else "No such challenger (or it is already the champion). See /strategies."
 
@@ -714,7 +966,8 @@ def cmd_run(s: Settings, args) -> None:
             if bot.market.client is None:
                 return "The replay needs Binance's public prices, which offline mode does not read."
             ts = trend.preview_settings(bot.base)
-            ts = dataclasses.replace(ts, starting_balance=float(bot.journal.get("starting_balance") or ts.starting_balance))
+            start = with_journal(s, lambda j: j.get("starting_balance"))   # this thread's own connection
+            ts = dataclasses.replace(ts, starting_balance=float(start or ts.starting_balance))
 
             def work() -> None:
                 try:
@@ -758,13 +1011,14 @@ def cmd_run(s: Settings, args) -> None:
             def work() -> None:
                 def run(j: Journal) -> str:
                     notes = Notes(j, bot.notes.dir, bot.base)
-                    data = ResearchAgent(bot.llm).review(notes.digest(bot.last_price, scorecard=j.get("scorecard_text") or ""))
+                    data = ResearchAgent(bot.llm).review(notes.digest(bot.last_price, scorecard=j.get("scorecard_text") or ""),
+                                                         trend=bot.base.trend)
                     if not data:
                         return ("Claude could not review the notebook right now (daily AI budget used up, or the service "
                                 "is unavailable). Try again later.")
                     j.event("review", "Claude reviewed the notebook: " + str(data.get("summary", ""))[:300])
                     j.set("last_review", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "review": data})
-                    return review_text(data)
+                    return review_text(data, trend=bot.base.trend)
                 try:
                     tg.send_long(clean(with_journal(s, run), 12_000))
                 except Exception as e:  # a review must never take the desk down
@@ -794,10 +1048,11 @@ def cmd_run(s: Settings, args) -> None:
                                                          performance(j, bot.last_price))
                                             + (("\n\n" + scorecard_block(bot, j)) if scorecard_block(bot, j) else "")),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
-                                                                     status_extra(bot, s))),
-            "/watchlist": lambda: with_journal(s, lambda j: watchlist_text(j.get("watchlist") or default_watchlist(s))),
-            "/help": lambda: HELP_TEXT,
-            "/start": lambda: HELP_TEXT,
+                                                                     status_extra(bot, s, j), trend=s.trend)),
+            "/watchlist": lambda: with_journal(s, lambda j: trend_watchlist_text(s, j) if s.trend else
+                                               watchlist_text(j.get("watchlist") or default_watchlist(s))),
+            "/help": lambda: help_text(s),
+            "/start": lambda: help_text(s),
         })
 
     limit = 1 if args.once else args.cycles
@@ -812,7 +1067,8 @@ def cmd_run(s: Settings, args) -> None:
             try:
                 with trade_lock:
                     summary = bot.run_cycle()
-                    if (why := Lab(bot.base, bot.journal, client=None).watch_live()):
+                    # a card that is not running is never rolled back because of the daily trend rule's trades
+                    if not s.trend and (why := Lab(bot.base, bot.journal, client=None).watch_live()):
                         tg.send(f"⏪ Strategy rolled back to the previous champion: {why}. Review /strategies.")
             except Exception as e:  # keep the desk alive; the service would restart it anyway
                 log.exception("Cycle %s failed", n)
@@ -831,8 +1087,12 @@ def cmd_run(s: Settings, args) -> None:
             if not args.quiet:
                 print_cycle(n, summary)
                 sys.stdout.flush()
-            for key, msg in trade_messages(summary):
+            for key, msg in trade_messages(summary, trend=s.trend):
                 tg.send_once(key, msg) if key else tg.send(msg)
+            try:
+                maybe_trend_summary(bot, tg)
+            except Exception:  # noqa: BLE001 - reporting must never stop trading
+                log.exception("Daily trend summary failed")
             if bot.scout_update and (bot.scout_update["added"] or bot.scout_update["removed"]):
                 tg.send(scout_message(bot.scout_update))
             if bot.pace["minutes"] != last_minutes:
@@ -840,9 +1100,10 @@ def cmd_run(s: Settings, args) -> None:
                 bot.journal.event("pace", pace_message(bot.pace).removeprefix("⏱️ "))
                 last_minutes = bot.pace["minutes"]
             for r in summary:  # risk limits pausing new buys deserve one clear message
-                if r.get("risk", "").startswith(("daily loss limit", "overall loss limit")):
+                if str(r.get("risk") or "").startswith(("daily loss limit", "overall loss limit")):
+                    kept = "their emergency stop" if s.trend else "their stop-loss and take-profit"
                     tg.send_once("risk-limit", f"🛑 {r['risk'][0].upper() + r['risk'][1:]}.\nOpen positions keep "
-                                               "their stop-loss and take-profit; no new positions are opened.",
+                                               f"{kept}; no new positions are opened.",
                                  every_hours=12)
                     break
             weekly_backup(bot, tg)
@@ -855,7 +1116,8 @@ def cmd_run(s: Settings, args) -> None:
                 why = (f" That cap is {s.ai_pct_month():g}% a month of your ${s.starting_balance:,.0f} starting balance."
                        if bot.llm.pct_daily_budget and cap == bot.llm.pct_daily_budget else "")
                 why += " Send /aibudget to see where it went or raise it."
-                after = ("The free AI answers within its daily allowance, then the built-in rules, until 00:00 UTC."
+                after = ("Only /review uses Claude in trend mode; it waits until 00:00 UTC." if s.trend else
+                         "The free AI answers within its daily allowance, then the built-in rules, until 00:00 UTC."
                          if bot.free_ai else "The agents use the free built-in rules until 00:00 UTC.")
                 tg.send_once("ai-budget", f"💸 Claude's daily budget (${cap:.2f}) is used up. {after}{why}", every_hours=12)
             maybe_daily_report(bot, tg, s)

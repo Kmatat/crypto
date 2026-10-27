@@ -61,7 +61,7 @@ def test_a_fresh_trend_notebook_describes_the_rule_not_a_laboratory(tmp_path):
     rd = t["README"]
     assert "fixed in code (trader/trend.py)" in rd and "TREND_SMA_DAYS, TREND_VOL_TARGET and TREND_STOP_PCT" in rd
     assert "| Strategy | the daily trend rule (STRATEGY=trend): one decision a day, at the first check after 00:00 UTC" in rd
-    assert "no AI in the decisions" in rd and "| Emergency stop | 25% below the entry, on the exchange" in rd
+    assert "no AI in the decisions" in rd and "| Emergency stop | 25% below the entry, checked by the desk at every market check (paper trading)" in rd
     assert "| Take-profit | an order at 1.9x the price" in rd and "no profit cap" in rd
     assert "| Overall loss brake | 10% below the start: no new buys" in rd and "ride on with their emergency stop" in rd
     assert "Compare the live record with /trendtest's replay of the same weeks." in rd
@@ -123,7 +123,7 @@ def test_settings_outside_the_ranges_and_too_few_slots_are_explained():
     assert text.startswith("# Strategy: the daily trend rule (STRATEGY=trend), in force since its first check")
     assert "No strategy recorded yet" not in text
     assert "TREND_SMA_DAYS 3" in text and "the tested values are used" in text and "| 50 days | 50 days |" in text
-    assert "Only 2 positions at once for 3 coins: the rule holds only the strongest 2" in text
+    assert "Only 2 positions at once for 3 coins: when more coins qualify than there are free positions" in text
     assert "| BTC | - | no daily decision yet |" in text
     assert n.digest().startswith("The desk runs the fixed daily trend rule (STRATEGY=trend) since its first check")
 

@@ -162,7 +162,7 @@ Messages also arrive automatically:
 - every buy, sell or failed order;
 - when the scout changes the coin list;
 - when the AI changes how often it checks;
-- with the daily trend rule (from version 1.7.2): a short summary of each day's decisions just after 00:00 UTC (sent silently, so it
+- with the daily trend rule: a short summary of each day's decisions just after 00:00 UTC (sent silently, so it
   does not wake you), and a message when a winner's take-profit order is moved up or a position bought by the
   hourly strategy is taken over;
 - a daily report.

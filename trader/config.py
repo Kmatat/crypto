@@ -266,7 +266,7 @@ class Settings:
             if self.max_open_positions < len(self.symbols):
                 out.append(f"STRATEGY=trend with {len(self.symbols)} coins but MAX_OPEN_POSITIONS {self.max_open_positions}: "
                            f"the rule was tested with a slot for every coin (MAX_OPEN_POSITIONS {len(self.symbols)}); with "
-                           f"fewer it holds only the strongest {self.max_open_positions} and earned much less in the tests")
+                           f"fewer it buys the strongest first, never swaps a held coin for a stronger one, and earned much less in the tests")
             from .trend import RANGES
             wrong = [f"{key}={value:g} (allowed {low:g}-{high:g})" for key, value, (low, high) in
                      zip(RANGES, (self.trend_sma_days, self.trend_vol_target, self.trend_stop_pct), RANGES.values())

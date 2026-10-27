@@ -411,3 +411,24 @@ def test_the_replay_reports_what_the_rule_holds_after_the_latest_close():
     closes = [100.0 * 0.995 ** i for i in range(120)] + [80.0]   # below its average for months, then far above it
     r = trend.backtest(s, {"AAAUSDT": candles(closes)})
     assert r["still_open"] == 0 and r["holding"] == ["AAAUSDT"]    # the live desk buys at 00:00: the replay agrees
+
+
+def test_the_hourly_cards_record_stops_at_the_switch_to_the_trend_rule():
+    from trader.notes import card_periods, live_record
+    from trader.strategy import StrategyCard
+    j = Journal(":memory:", 10_000)
+    card = StrategyCard(name="hourly champion")
+    j.set("strategy_champion", {"card": card.to_dict(), "since": "2026-09-01T00:00:00+00:00", "by": "owner settings",
+                                "previous": None})
+    j.set("strategy_history", [{"ts": "2026-09-01T00:00:00+00:00", "event": "promote", "id": card.id,
+                                "name": card.name, "by": "owner settings", "note": "first run"}])
+    j.log_decision("AAAUSDT", {"action": "HOLD", "confidence": 0.5, "source": "rules", "reasoning": "r"},
+                   {"approved": False, "reason": "HOLD"}, {})
+    bot, _ = trend_desk({"AAAUSDT": candles(wavy(130, 100, 0.02))})
+    bot.journal = j
+    bot.note_strategy_mode()                                       # the owner switches to the trend rule
+    switched = j.get("strategy_history")[-1]["ts"]
+    periods = card_periods(j.get("strategy_history"), card.id)
+    assert periods == [("2026-09-01T00:00:00+00:00", switched)]
+    later = {"opened_at": "2099-01-01T00:00:00+00:00", "pnl": -5.0}
+    assert live_record([later], periods)["trades"] == 0            # a trend trade is not the hourly card's

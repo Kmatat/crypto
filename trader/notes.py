@@ -471,8 +471,10 @@ class Notes:
                 ["Position cap", f"each coin gets an equal share of the account (1/{max(1, len(s.symbols))}), made smaller "
                                  f"for coins that swing more than {vol_target:.0%} a year, and never more than "
                                  f"{s.max_position_pct:.0%} of equity; at most {s.max_open_positions} positions"],
-                ["Emergency stop", f"{stop_pct:.0%} below the entry, on the exchange; after it fires the coin is bought "
-                                   "again only once its trend has reset"],
+                ["Emergency stop", f"{stop_pct:.0%} below the entry, "
+                                   + ("checked by the desk at every market check (paper trading)" if s.mode == "simulation"
+                                      else "on the exchange")
+                                   + "; after it fires the coin is bought again only once its trend has reset"],
                 ["Take-profit", f"an order at {trend.TAKE_MULT:g}x the price (Binance's protective pair needs one), raised "
                                 f"whenever the price comes within {trend.RAISE_AT - 1:.0%} of it: no profit cap"],
                 ["Daily loss brake", f"{s.max_daily_loss_pct:.0%}: no new buys for the rest of the day"],
@@ -503,8 +505,8 @@ class Notes:
             "Upload this folder (or the zip that `/notes` sends on Telegram) to Claude and ask, for example:", "",
             "- \"Read TRADES.md: are the losses small and the winners long? Compare the live record with /trendtest's "
             "replay of the same weeks.\"",
-            "- \"Read STRATEGY.md and DIARY.md: did the desk follow its rule every day (one decision after 00:00 UTC, a "
-            "sale after each close at or below the average, no buy straight back after an emergency stop)?\"",
+            "- \"Read TRADES.md and DIARY.md: does each trade's entry and exit decision match the rule (a buy after a close "
+            "above the average, a sale after a close at or below it, no buy straight back after an emergency stop)?\"",
             "- \"Read PERFORMANCE.md: judged on the profit factor, the worst drop and the result against just holding "
             "the same coins, is there enough evidence yet, and what does it say?\"",
             "- \"Read DIARY.md for the last two weeks. Did anything break, and did the desk recover correctly?\"", "",
@@ -593,7 +595,9 @@ class Notes:
                  "(MAX_POSITION_PCT).",
                  f"- When more coins qualify than there are free positions, the strongest {trend.MOMENTUM_DAYS}-day gain "
                  "goes first.",
-                 f"- An emergency stop {stop_pct:.0%} below the entry price sits on the exchange. After it fires, the coin "
+                 f"- An emergency stop {stop_pct:.0%} below the entry price "
+                 + ("is checked by the desk at every market check (paper trading)." if s.mode == "simulation"
+                    else "sits on the exchange.") + " After it fires, the coin "
                  "is bought again only once it has closed at or below its average and then risen above it again.",
                  "- There is no profit target: the rule expects to win only 20-30% of its trades, and a few long trends "
                  "pay for the many small losses. Binance's protective order pair still needs a take-profit price, so the "
@@ -617,8 +621,9 @@ class Notes:
                       f"TREND_STOP_PCT {s.trend_stop_pct:g}) are outside the allowed ranges (10-400 days, 0.05-2, "
                       "0.05-0.5), so the tested values are used.", ""]
         if s.max_open_positions < len(coins):
-            lines += [f"Only {s.max_open_positions} positions at once for {len(coins)} coins: the rule holds only the "
-                      f"strongest {s.max_open_positions}. It was tested with a position for every coin.", ""]
+            lines += [f"Only {s.max_open_positions} positions at once for {len(coins)} coins: when more coins qualify than "
+                      "there are free positions, the strongest 60-day gain is bought first, and a coin already held is "
+                      "never swapped for a stronger one. It was tested with a position for every coin.", ""]
         rows = []
         for sym in s.symbols:
             r = self.j.db.execute("SELECT ts, action, risk_reason, reasoning FROM decisions WHERE symbol=? AND "
@@ -627,7 +632,11 @@ class Notes:
                 rows.append([sym.removesuffix("USDT"), "-", "no daily decision yet", "", ""])
                 continue
             day = (dt.date.fromisoformat(r["ts"][:10]) - dt.timedelta(days=1)).isoformat()
-            rows.append([sym.removesuffix("USDT"), day, r["action"], r["risk_reason"], r["reasoning"]])
+            action = r["action"]
+            if action == "BUY" and sym not in self.j.positions():   # refused by a limit, or its order did not go through
+                action = "BUY refused" if r["risk_reason"] not in ("within limits", "within limits (half size while "
+                                                                     "recovering)") else "BUY not filled"
+            rows.append([sym.removesuffix("USDT"), day, action, r["risk_reason"], r["reasoning"]])
         lines += ["## Each coin's latest daily decision", "",
                   _table(["Coin", "Day", "Decision", "Risk check", "Why"], rows), "",
                   "_Day: the finished UTC day the decision is based on; the desk decides at its first check after "

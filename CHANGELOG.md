@@ -5,6 +5,25 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.3 - 2026-10-27
+
+Your desk keeps trading exactly as before (the hourly agents) until you choose the daily trend rule in `desk setup`.
+With the daily trend rule:
+- A short summary of each day's decisions arrives on Telegram after 00:00 UTC, silently (no sound at night): what was
+  bought and sold, the coins held with how far they are above their average, coins waiting after a stop, refused buys
+  and the slots used. Messages also say when a winner's take-profit order is raised and when a position bought by the
+  hourly strategy is taken over (with its new emergency stop).
+- `/status`, `/watchlist`, `/strategies`, `/ai`, `/aibudget`, the help, the start message and the daily report
+  describe the trend desk; `/approve` and `/reject` explain that strategy cards wait for the hourly strategy;
+  `desk check` tests the daily history the rule needs instead of the news and forex feeds it does not use.
+- An alert when the day's decisions have not run by 02:00 UTC, and the stuck-rule alarm judges the rule over its own
+  last 7 days.
+- `/review` tells Claude that the desk runs the fixed trend rule; after a switch back to the hourly agents, the weekly
+  lab's lessons leave out the trend rule's trades.
+- The notebook no longer says the emergency stop is "on the exchange" in paper trading, and shows a refused buy as
+  "BUY refused".
+- `/diagnose`'s market data line says when a day's daily prices were incomplete.
+
 ## 1.7.2 - 2026-10-27
 
 Your desk keeps trading exactly as before (the hourly agents) until you choose the daily trend rule in `desk setup`.

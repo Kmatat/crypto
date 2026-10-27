@@ -180,7 +180,7 @@ usually trip (no new buys for 14 days, then half-size buys until the account is 
 include it. When you switch,
 coins you hold that are not in `SYMBOLS` are sold at the first daily decision; coins in the list are kept and follow
 the rule from then on. `/trendtest [days]` on Telegram replays the rule on your coins over any period, also before
-you switch. `MAX_OPEN_POSITIONS` should equal the number of coins: with fewer slots it holds only the strongest coins
+you switch. `MAX_OPEN_POSITIONS` should equal the number of coins: with fewer slots it buys the strongest coins first
 and earned much less in the tests (3 slots: about +70% instead of +192% in Oct 2023 - Apr 2026).
 
 **Two exchange details.** Binance refuses a sell order priced more than twice the current price, and its protective
