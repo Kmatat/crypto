@@ -495,9 +495,53 @@ class Orchestrator:
                 continue
             have = held.get(sym.removesuffix("USDT"), 0.0)
             if have < p["qty"] * 0.99:
-                out.append({"symbol": sym, "stage": "exchange", "error": f"the journal says we hold {p['qty']:.6g} but the exchange only "
-                                                    f"has {have:.6g}. Binance probably reset the demo account. "
-                                                    f"Run `desk reset --force` to start the demo fresh."})
+                out += self._book_unrecorded_sells(sym, p)   # a protective order that filled in parts, unseen
+                p = self.journal.positions().get(sym)
+                if p is None or have >= p["qty"] * 0.99:
+                    continue
+                out.append({"symbol": sym, "stage": "exchange", "error":
+                            f"the journal says we hold {p['qty']:.6g} but the exchange only has {have:.6g}, and the "
+                            "account's recent sales do not explain the difference. "
+                            + ("Binance probably reset the demo account. Run `desk reset --force` to start the demo "
+                               "fresh." if have <= 0 else "The desk keeps checking; if this stays for a day, send /health.")})
+        return out
+
+    def _booked_sells(self, sym: str, order_id: str) -> tuple[float, float]:
+        row = self.journal.db.execute("SELECT COALESCE(SUM(qty), 0), COALESCE(SUM(quote), 0) FROM orders WHERE symbol=? "
+                                      "AND side='SELL' AND ok=1 AND order_id=?", (sym, str(order_id))).fetchone()
+        return float(row[0]), float(row[1])
+
+    def _book_unrecorded_sells(self, sym: str, position: dict) -> list[dict]:
+        """Record the coins the exchange sold for us that the journal never saw: the filled part of a protective
+        order that was then cancelled or replaced, or that is still part-filled. Without this the journal keeps
+        coins that no longer exist (a position that can never be sold, blocking a slot) and misses their money."""
+        broker = self.execution.broker
+        if not hasattr(broker, "sells_since") or not position:
+            return []
+        try:
+            opened = int(dt.datetime.fromisoformat(position["opened_at"]).timestamp() * 1000)
+            sells = broker.sells_since(sym, opened)
+        except Exception as e:  # noqa: BLE001 - try again at the next check
+            log.warning("Could not read the account's sales of %s: %s", sym, e)
+            return []
+        out, step = [], self.execution.step_size(sym)
+        for order_id, s in sells.items():
+            p = self.journal.positions().get(sym)
+            if p is None:
+                break
+            booked_qty, booked_quote = self._booked_sells(sym, order_id)
+            qty = min(s["qty"] - booked_qty, p["qty"])
+            if qty <= max(step or 0, p["qty"] * 1e-6):
+                continue
+            share = qty / s["qty"] if s["qty"] else 1.0
+            quote = max(0.0, s["quote"] - booked_quote) if booked_qty else s["quote"] * share
+            fill = {"ok": True, "status": "FILLED", "order_id": str(order_id), "qty": qty, "avg_price": quote / qty,
+                    "quote": quote, "fee_quote": s["fee_quote"] * share, "market_price": None}
+            reason = "sold on the exchange (part of a protective order, found in the account's sales)"
+            self.journal.log_order(sym, "SELL", fill, reason)
+            trade = self.journal.close_position(sym, fill, reason, step=step)
+            self._exit_event(sym, fill, trade)
+            out.append({"symbol": sym, "action": "SELL", "reason": reason, "order": fill, "trade": trade})
         return out
 
     # ---- master traders' checklist and trailing stops ----
@@ -541,6 +585,9 @@ class Orchestrator:
             if status["state"] == "error":
                 return position, None  # keep the old orders; try again next cycle
             self.journal.set_protection(sym, None, "none")
+            booked = self._book_unrecorded_sells(sym, position)
+            if sym not in self.journal.positions():
+                return None, (booked[0] if booked else None)
         self.journal.update_stop(sym, new_stop, high)
         log.info("%s: trailing stop raised to %.6g (high %.6g)", sym, new_stop, high)
         self._protect(sym, self.journal.positions()[sym])
@@ -582,8 +629,16 @@ class Orchestrator:
             if status["protection"] != prot:
                 self.journal.set_protection(sym, status["protection"], prot["kind"])
             return self.journal.positions()[sym], None
-        if state == "executing":  # one leg is part-filled, the other is gone: desk watches the rest
-            self.journal.set_protection(sym, prot, "partial")
+        if state == "executing":
+            # one leg filled in part and the other was cancelled by the exchange: the coins left have no stop-loss on
+            # the exchange any more. Cancel what is left, record the part that sold, and let this check protect the
+            # rest again with a fresh pair (or sell it at once if the price is already below the stop)
+            if hasattr(self.execution.broker, "cancel_quietly"):
+                self.execution.broker.cancel_quietly(sym, prot)
+            booked = self._book_unrecorded_sells(sym, position)
+            if sym in self.journal.positions():
+                self.journal.set_protection(sym, None, "none")
+            return self.journal.positions().get(sym), (booked[0] if booked else None)
         elif state == "gone":  # cancelled or wiped (Binance resets the testnet now and then): re-protect
             log.warning("Protection for %s disappeared (%s) - placing it again", sym, status.get("detail"))
             if hasattr(self.execution.broker, "cancel_quietly"):
@@ -609,6 +664,16 @@ class Orchestrator:
         prot = status.get("protection") or {}
         intended = prot.get("stop") if status.get("reason") == "stop-loss" else prot.get("take")
         fill = {"ok": True, **status["fill"], "market_price": intended or self.last_price.get(sym)}
+        booked_qty, booked_quote = self._booked_sells(sym, fill.get("order_id", ""))
+        if booked_qty > 0:   # part of this order was already recorded when it was found part-filled
+            whole = fill["qty"]
+            fill["qty"] = max(0.0, whole - booked_qty)
+            fill["fee_quote"] = fill.get("fee_quote", 0.0) * (fill["qty"] / whole if whole else 0.0)
+            fill["quote"] = max(0.0, fill["quote"] - booked_quote)
+            fill["avg_price"] = fill["quote"] / fill["qty"] if fill["qty"] else fill["avg_price"]
+            if fill["qty"] <= (self.execution.step_size(sym) or 0):
+                self.journal.set_protection(sym, None, "none")
+                return {"symbol": sym, "action": "SELL", "reason": status["reason"], "order": fill}
         kind = "exchange" if status["protection"]["kind"] == "exchange" else "emulated"
         reason = f"{status['reason']} ({kind})"
         self.journal.log_order(sym, "SELL", fill, reason)
@@ -636,6 +701,9 @@ class Orchestrator:
                                             f"{status['detail']}")
                 return {"symbol": sym, "action": "SELL", "reason": reason, "order": fill}
             self.journal.set_protection(sym, None, "none")
+            booked = self._book_unrecorded_sells(sym, position)
+            if sym not in self.journal.positions():
+                return booked[0] if booked else {"symbol": sym, "action": "SELL", "reason": reason}
             position = self.journal.positions()[sym]
         real = self._real_price(sym, self.last_price[sym])
         fill = self.execution.execute("SELL", sym, qty=position["qty"])

@@ -126,9 +126,11 @@ class BinanceClient:
     def get_order_by_id(self, symbol: str, order_id: int | str) -> dict:
         return self._request("GET", "/api/v3/order", {"symbol": symbol, "orderId": order_id}, signed=True)
 
-    def my_trades(self, symbol: str, order_id: int | str) -> list[dict]:
-        """The individual fills of one order (needed for exact fees on orders that fill later)."""
-        return self._request("GET", "/api/v3/myTrades", {"symbol": symbol, "orderId": order_id}, signed=True)
+    def my_trades(self, symbol: str, order_id: int | str | None = None, limit: int = 500) -> list[dict]:
+        """The individual fills of one order (needed for exact fees on orders that fill later), or without an order
+        id the account's most recent fills on the pair (to find sales the desk did not see happen)."""
+        params = {"symbol": symbol, "orderId": order_id} if order_id is not None else {"symbol": symbol, "limit": limit}
+        return self._request("GET", "/api/v3/myTrades", params, signed=True)
 
     # ---- protective orders: one-cancels-the-other (OCO) sell pair ---------
     def oco_sell(self, symbol: str, quantity: float, take_profit: float, stop_loss: float, list_client_id: str,

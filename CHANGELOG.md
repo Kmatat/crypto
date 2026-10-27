@@ -5,6 +5,18 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.6 - 2026-10-27
+
+- Fix: a protective order (stop-loss / take-profit pair) that filled only in part on the thin demo order book left
+  the sold part unrecorded when the desk later cancelled or replaced the order (to move the trailing stop, or to
+  sell), or while the order stayed part-filled. The journal then kept coins that no longer existed (the owner's
+  case: 71.6 UNI recorded, 61 on the exchange), missed the money of that sale, and could end with a position that
+  could never be sold, blocking a slot; the warning wrongly advised a full `desk reset`. The desk now reads the
+  account's sales of the coin since the position opened and records any part sold that it has not recorded yet:
+  in the holdings check, when it finds a part-filled order (it then cancels the rest and protects the remaining
+  coins again with a fresh pair), after cancelling an order, and when the exchange reports an exit (only the part not
+  recorded yet). Only a true demo reset (no coins left and no sale found) still suggests `desk reset`.
+
 ## 1.6.5 - 2026-10-27
 
 - `/health` says how long a market check takes on this server ("Server speed: a check takes about 41 s (slowest of the
