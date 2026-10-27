@@ -255,10 +255,22 @@ Send `/setup` to the bot. It shows the settings in force and a menu with buttons
 *"✅ Settings changed from your phone"* and the desk restarts with them (it finishes its current market check first).
 `/cancel`, or 15 minutes without an answer, ends the setup without changing anything.
 
+Good to know (from version 1.7.5):
+- Budgets can be typed the way you write them: `5000`, `$5,000` or `10 000`.
+- Before you confirm, the setup names any coin the desk holds that the trend rule would sell because it is not in the
+  new coin list.
+- The trading mode cannot be changed from the phone while the desk holds coins (the positions live on one account,
+  and the other knows nothing of them): change it on the server with `desk setup`, which offers a fresh record, or wait
+  until nothing is held. For the Binance demo account the setup first checks that Binance accepts the keys saved on
+  the server.
+- A change sent while the update job is busy is not lost: a second `/setup` shows it as waiting and keeps it. A
+  change that reaches the job more than an hour late is not applied (you get a message and can send it again).
+
 How it works, and why keys are not in it: the desk itself is not allowed to change its own settings file (a safety
 rule of the server: nothing that reaches the desk from outside can rewrite its configuration). So the phone sends
 the change to the server's update job, which checks every value again, keeps the previous settings as
-`~/crypto-desk/data/.env.previous`, writes the new ones and restarts the desk. API keys and tokens are never asked for
+`~/crypto-desk/data/.env.previous`, writes the new ones, checks that the desk can start with them (if not, it puts the
+previous file back and tells you) and restarts the desk. API keys and tokens are never asked for
 on Telegram: a chat is stored on Telegram's servers, and the desk never asks for a key there (if a message ever does,
 it is not the desk). Change keys with `desk setup` on the server.
 

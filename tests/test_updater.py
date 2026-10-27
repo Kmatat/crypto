@@ -194,3 +194,95 @@ def test_update_messages_name_the_release_number(repos):
     st = u.run()
     assert st["result"] == "updated" and "Updated to version 9.9.9" in tg.sent[-1] and st["version"] == "9.9.9"
     assert f"updated {__version__}" in st["last_result"] and "9.9.9" in st["last_result"]
+
+
+# ---- 1.7.5: requests from the phone and /update share the job safely ----
+def test_settings_wait_for_an_interrupted_update_to_be_undone(repos):
+    """A job stopped during the tests left the untested code on disk: the settings restart must not start it."""
+    from trader import remote_setup as rs
+    from trader.setup_wizard import write_env
+    dev, server = repos
+    old = git(server, "rev-parse", "HEAD")
+    new = publish(dev, "v2\n", "second version")
+    git(server, "pull", "-q", "--ff-only")
+    data = server / "data"
+    (data / "update-status.json").write_text(json.dumps({"in_progress": {"old": old, "new": new, "step": "tests",
+                                                                         "label": "version 2"}}))
+    (data / "desk-started.json").write_text(json.dumps({"revision": old}))
+    write_env(server / ".env", {"STRATEGY": "hourly"})
+    rs.write_request(data, {"PULSE_HOURS": "12"})
+    request_update(data / "update-requested", purpose="settings")
+    tg = FakeTG()
+    u, _ = make(server, tg, auto=False)
+    heads = []
+    u.restart = lambda: heads.append(git(server, "rev-parse", "HEAD"))
+    u.run()
+    assert heads == [old]                                             # restarted on the code the desk was tested on
+    assert any("interrupted" in t and "undone" in t for t in tg.sent)
+    assert not any("completed" in t for t in tg.sent)
+
+
+def test_a_request_written_while_the_job_runs_is_kept_for_the_next_run(repos):
+    from trader import remote_setup as rs
+    from trader.setup_wizard import write_env
+    _, server = repos
+    data = server / "data"
+    write_env(server / ".env", {"STRATEGY": "hourly"})
+    rs.write_request(data, {"PULSE_HOURS": "12"})
+    request_update(data / "update-requested", purpose="settings")
+    u, _ = make(server, FakeTG())
+    u.restart = lambda: request_update(data / "update-requested")    # the owner sends /update during the restart
+    u.run()
+    assert json.loads((data / "update-requested").read_text())["purpose"] == "update"
+    u.restart = lambda: None
+    u.run()                                                           # the next run answers it and removes it
+    assert not (data / "update-requested").exists()
+
+
+def test_setup_keeps_a_waiting_update_and_check_only_leaves_requests(repos):
+    _, server = repos
+    trigger = server / "data" / "update-requested"
+    request_update(trigger)
+    request_update(trigger, purpose="settings")
+    assert json.loads(trigger.read_text())["purpose"] == "update"
+    u, _ = make(server, FakeTG())
+    u.run(check_only=True)
+    assert trigger.exists()
+
+
+def test_a_trigger_that_is_not_an_object_is_still_answered_and_removed(repos):
+    _, server = repos
+    trigger = server / "data" / "update-requested"
+    trigger.write_text("1")
+    tg = FakeTG()
+    u, _ = make(server, tg)
+    assert u.run()["result"] == "up_to_date"
+    assert not trigger.exists() and any("Already running the latest version" in t for t in tg.sent)
+
+
+def test_status_and_restart_files_replace_a_link_instead_of_writing_through_it(repos, tmp_path):
+    _, server = repos
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("keep\n")
+    (server / "data" / "update-status.json").symlink_to(target)
+    u, _ = make(server, FakeTG())
+    u.run()
+    assert target.read_text() == "keep\n" and not (server / "data" / "update-status.json").is_symlink()
+
+
+def test_a_settings_file_that_does_not_load_keeps_the_update_job_working(tmp_path, monkeypatch):
+    from trader import config
+    from trader import updater as up
+    env = tmp_path / ".env"
+    env.write_text("TRADING_MODE=simulation\nCYCLE_MINUTES=15.0\nTELEGRAM_BOT_TOKEN=t\nTELEGRAM_CHAT_ID=1\nAUTO_UPDATE=false\n")
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(config, "ENV_PATH", env)
+    monkeypatch.setattr(up, "STATUS", tmp_path / "data" / "update-status.json")
+    sent = []
+    monkeypatch.setattr(up.Telegram, "send", lambda self, text, **k: sent.append(text) or True)
+    s = up.fallback_settings(ValueError("invalid literal for int() with base 10: '15.0'"))
+    assert not s.auto_update and s.telegram_chat_id == "1" and len(sent) == 1 and "does not load" in sent[0]
+    up.fallback_settings(ValueError("invalid literal for int() with base 10: '15.0'"))
+    assert len(sent) == 1                                              # told once per problem
+    env.write_text("CYCLE_MINUTES=15.0\n")
+    assert up.fallback_settings(ValueError("x")).auto_update          # the owner's choice; on unless turned off

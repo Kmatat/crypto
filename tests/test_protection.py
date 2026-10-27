@@ -342,3 +342,13 @@ def test_messages_and_status_show_protection():
     assert "desk-side checks only" in status_text(j, {"BTCUSDT": 61000}, ["BTCUSDT"])
     j.set_protection("BTCUSDT", {"kind": "exchange"}, "exchange")
     assert "live on Binance" in status_text(j, {"BTCUSDT": 61000}, ["BTCUSDT"])
+
+
+def test_a_paper_exit_is_recorded_at_the_minute_it_happened():
+    """1.7.5: the minute candles tell when the simulated stop filled (the trend rule's re-entry counts from it)."""
+    minutes = [{"time": 60_000 * i, "low": 100 - i, "high": 101} for i in range(10)]
+    pb = PaperBroker(lambda s: 100.0, range_fn=lambda s, since: (min(r["low"] for r in minutes), 101, 540_000, minutes))
+    prot = pb.protect("BTCUSDT", 1.0, stop=95, take=110)
+    prot["since_ms"] = 0
+    st = pb.protection_status("BTCUSDT", prot)
+    assert st["reason"] == "stop-loss" and st["fill"]["time_ms"] == 300_000   # the first minute whose low reached 95

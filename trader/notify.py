@@ -164,8 +164,8 @@ class Telegram:
             try:
                 # a plain answer (no /command) goes to the conversation in progress, if any (the phone setup)
                 reply = handlers["*"](text) if "*" in handlers and not cmd.startswith("/") else None
-                if reply is None:
-                    handler = handlers.get(cmd) or handlers["/help"]
+                if reply is None:   # (the conversation key "*" is not a command a message can call)
+                    handler = (handlers.get(cmd) if cmd != "*" else None) or handlers["/help"]
                     arg = " ".join(words[1:])
                     reply = handler(arg) if inspect.signature(handler).parameters else handler()
             except Exception as e:
@@ -291,8 +291,8 @@ def _messages(r: dict, trend: bool) -> list[tuple[str, str]]:
                             f"{money(o['quote'])}\nEmergency stop {price_text(r['stop_loss'])}{shield}; no profit target "
                             f"(the take-profit order moves up with the price)\nWhy: {clean(r['reasoning'])}"))
             return out
-        out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
-                        f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}{shield}\n"
+        out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {price_text(o['avg_price'])} = {money(o['quote'])}\n"
+                        f"Stop-loss {price_text(r['stop_loss'])} · Take-profit {price_text(r['take_profit'])}{shield}\n"
                         f"Confidence {r['confidence']:.0%}. Why: {clean(r['reasoning'])}{mentor}"))
     else:
         t = r.get("trade") or {}
@@ -307,7 +307,7 @@ def _messages(r: dict, trend: bool) -> list[tuple[str, str]]:
                    }.get(r.get("reason"), r.get("reason")) or "")
         if why.startswith("trend: "):
             why = "daily trend rule: " + why[len("trend: "):]
-        text = f"🔴 SELL {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\nReason: {why}\n{result}"
+        text = f"🔴 SELL {sym}\n{o['qty']:.6g} at {price_text(o['avg_price'])} = {money(o['quote'])}\nReason: {why}\n{result}"
         if trend and str(r.get("reason") or "").startswith("stop-loss"):
             text += f"\n{TREND_REENTRY}"
         out.append(("", text))
@@ -347,7 +347,9 @@ def trend_lines(coins: dict[str, dict], sma_days: int, positions: dict | None = 
         elif risk == "re-entry rule":
             waiting.append(sym)
         elif risk == "demo exchange price":
-            refused.append(f"{_coin(sym)} (its price on the Binance demo exchange is far from the real market)")
+            refused.append(f"{_coin(sym)} (" + ("the Binance demo exchange gives no price for it: not listed there, or no "
+                                                 "answer" if "gives no price" in str(d.get("why") or "") else
+                                                 "its price on the Binance demo exchange is far from the real market") + ")")
         else:
             refused.append(f"{_coin(sym)} ({clean(risk or d.get('why') or 'not bought', 120)})")
     lines = []

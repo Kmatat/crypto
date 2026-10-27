@@ -79,9 +79,9 @@ class MarketDataAgent:
             price = close
         return out
 
-    def range_since(self, symbol: str, since_ms: int) -> tuple[float, float, int] | None:
-        """(lowest, highest, time of the last minute) traded since `since_ms` - the price path
-        between two checks, used to emulate exchange-side stop orders in paper trading."""
+    def range_since(self, symbol: str, since_ms: int) -> tuple | None:
+        """(lowest, highest, time of the last minute, the minute candles) traded since `since_ms` - the price path
+        between two checks, used to emulate exchange-side stop orders in paper trading (and when they filled)."""
         if self.offline or self.client is None:
             series = self._synthetic.get(symbol)
             if not series:
@@ -91,7 +91,7 @@ class MarketDataAgent:
         rows = self.client.klines(symbol, "1m", limit=1000, start_ms=since_ms)
         if not rows:
             return None
-        return min(r["low"] for r in rows), max(r["high"] for r in rows), rows[-1]["time"]
+        return min(r["low"] for r in rows), max(r["high"] for r in rows), rows[-1]["time"], rows
 
     def _synthetic_candles(self, symbol: str, limit: int) -> list[dict]:
         """Random-walk prices for offline testing. Each call advances one candle."""

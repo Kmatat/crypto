@@ -839,8 +839,8 @@ def start_summary(bot: Orchestrator, s: Settings) -> dict:
         sma, _, stop_pct = trend.params(s)
         strategy = f"daily trend rule ({sma}-day average, {stop_pct:.0%} emergency stop)"
         ai = "none for trading (Claude only for /review)" if s.use_claude else "none (the rule decides alone)"
-        pace = (f"every {s.cycle_minutes} min (prices and exchange protection; the trend decisions once a day after "
-                "00:00 UTC)")
+        watch = "the simulated stop orders" if s.mode == "simulation" or s.offline else "exchange protection"
+        pace = (f"every {s.cycle_minutes} min (prices and {watch}; the trend decisions once a day after 00:00 UTC)")
     else:
         strategy = None
         ais = ([f"free AI {bot.free_ai.label} ({', '.join(bot.free_ai.models)})"] if bot.free_ai else []) \
@@ -906,15 +906,34 @@ def cmd_run(s: Settings, args) -> None:
 
         def setup_now():
             from dotenv import dotenv_values
-            from .remote_setup import PhoneSetup
-            from .setup_wizard import check_demo_prices, check_symbol
-            from .updater import updater_installed
+            from .binance_client import BinanceError
+            from .remote_setup import NAMES, PhoneSetup, describe, pending_request
+            from .setup_wizard import check_binance, check_demo_prices, check_symbol
+            from .updater import DATA, updater_installed
             if not updater_installed():
                 return ("The phone setup needs the server's update job (installed by deploy/setup.sh). On this machine "
                         "run:  python -m trader setup")
-            current = {k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None} if ENV_PATH.exists() else {}
-            phone["session"] = PhoneSetup(current, check_symbol=check_symbol, demo_warnings=check_demo_prices)
-            return phone["session"].start()
+            saved = {k: v for k, v in dotenv_values(ENV_PATH).items() if v is not None} if ENV_PATH.exists() else {}
+            waiting = pending_request(DATA)   # confirmed earlier, not applied yet: shown as the settings now
+
+            def check_keys():
+                try:
+                    check_binance(saved.get("BINANCE_TESTNET_API_KEY", ""), saved.get("BINANCE_TESTNET_API_SECRET", ""))
+                except BinanceError as e:
+                    return str(e)[:150]
+                except Exception:  # noqa: BLE001 - network trouble: not the keys' fault, but not checked either
+                    return "Binance could not be reached to check them; try again later"
+                return None
+            held = with_journal(s, lambda j: list(j.positions()))
+            phone["session"] = PhoneSetup({**saved, **waiting}, check_symbol=check_symbol, demo_warnings=check_demo_prices,
+                                          check_keys=check_keys, held=held)
+            text, buttons = phone["session"].start()
+            if waiting:
+                text = ("⏳ Sent earlier and not applied yet (the update job is busy): "
+                        + "; ".join(f"{NAMES.get(k, k)} → {describe(k, v)}" for k, v in waiting.items())
+                        + ". They are shown below as the settings now, and are kept when you apply more changes.\n\n"
+                        + text)
+            return text, buttons
 
         def phone_answer(text: str):
             """A plain message (not a /command) while /setup is open; None otherwise (then /help answers)."""

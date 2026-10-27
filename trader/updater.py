@@ -45,10 +45,14 @@ class Interrupted(Exception):
 
 
 def read_json(path: Path) -> dict | None:
+    """A JSON object from the data folder (None when missing or not an object). The desk may write that folder, so it
+    is read without following links or waiting on anything that is not a plain file."""
+    from .remote_setup import read_small
     try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
+        data = json.loads(read_small(Path(path)) or "null")
+    except ValueError:
         return None
+    return data if isinstance(data, dict) else None
 
 
 def revision(root: Path = ROOT) -> str | None:
@@ -86,17 +90,19 @@ def test_summary(out: str) -> str:
 
 
 def read_status(path: Path = STATUS) -> dict | None:
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
+    return read_json(path)
 
 
 def request_update(path: Path = REQUEST, purpose: str = "update") -> None:
     """Called by the desk (Telegram /update, or /setup with purpose "settings"): the updater job picks this file up
-    within seconds. A settings request applies the phone's settings; it does not install new code by itself."""
+    within seconds. A settings request applies the phone's settings; it does not install new code by itself. An
+    /update still waiting is kept when /setup asks too (the job applies the settings either way)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"requested_at": now(), "by": "telegram", "purpose": purpose}))
+    if purpose == "settings" and (read_json(path) or {}).get("purpose", "update" if path.exists() else "") == "update":
+        purpose = "update"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"requested_at": now(), "by": "telegram", "purpose": purpose}))
+    os.replace(tmp, path)
 
 
 def updater_installed(status_path: Path = STATUS) -> bool:
@@ -184,8 +190,9 @@ class Updater:
     def _restart_service(self) -> None:
         """Ask root to restart the desk by dropping a flag file; a tiny root-owned systemd path unit
         installed by deploy/setup.sh picks it up. No sudo rights are needed anywhere in this job."""
+        from .remote_setup import private_write
         flag = self.root / "data" / "restart-requested"
-        flag.write_text(now())
+        private_write(flag, now(), 0o644)   # replaced, never written through a link the desk may have put there
         for _ in range(130):  # the desk may take up to 10 min to finish its current market check
             time.sleep(self.poll_seconds)
             if not flag.exists():
@@ -211,10 +218,11 @@ class Updater:
 
     # ---- status / messaging ----
     def _status(self, **fields) -> dict:
+        from .remote_setup import private_write
         st = read_status(self.status_path) or {}
         st.update(fields, checked_at=now(), auto_update=self.s.auto_update)
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
-        self.status_path.write_text(json.dumps(st, indent=1))
+        private_write(self.status_path, json.dumps(st, indent=1), 0o644)
         return st
 
     def _notify(self, text: str) -> None:
@@ -236,13 +244,18 @@ class Updater:
     # ---- the job ----
     def run(self, force: bool = False, check_only: bool = False) -> dict:
         """Every outcome of a requested update reaches the owner, including a crash or the system stopping the job."""
-        requested = self.request_path.exists()
+        from .remote_setup import read_small
+        asked = read_small(self.request_path)   # the request as it is now: a newer one written meanwhile is kept
+        requested = asked is not None
         purpose = (read_json(self.request_path) or {}).get("purpose", "update") if requested else None
         wanted = force or (requested and purpose != "settings")
         self._t0 = self.clock()
         try:
             self._watchdog()
-            if not check_only:
+            prev = (read_status(self.status_path) or {}).get("in_progress")
+            if prev:   # a job stopped half-way: finish or undo it first
+                self._recover(prev)
+            if not check_only:   # after the recovery, so a restart for new settings starts the code that was tested
                 self._apply_settings()
             return self._run_job(wanted, check_only)
         except Interrupted:
@@ -258,7 +271,9 @@ class Updater:
                              "(Details: `desk logs-update` on the server.)")
             return self._status(result="check_failed", last_check_error=msg, notified_error=msg)
         finally:
-            if requested:
+            # A request written while this job ran (an /update during a settings change, a /setup during an install)
+            # stays, so the job runs again for it at once; a check-only run leaves every request for the real job.
+            if requested and not check_only and read_small(self.request_path) == asked:
                 self.request_path.unlink(missing_ok=True)
 
     def _apply_settings(self) -> None:
@@ -365,9 +380,6 @@ class Updater:
 
     def _run_job(self, wanted: bool, check_only: bool) -> dict:
         root = self.root
-        prev = (read_status(self.status_path) or {}).get("in_progress")
-        if prev:
-            self._recover(prev)
         if git(root, "status", "--porcelain", "--untracked-files=no"):
             st = self._status(result="blocked", last_result="blocked: files were changed by hand on the server")
             if wanted:
@@ -481,13 +493,42 @@ class Updater:
                             last_result=f"{now()[:16]} updated {__version__} ({old[:7]}) -> {new_label}")
 
 
+def fallback_settings(error) -> Settings:
+    """The settings file does not load, so the desk cannot start (and cannot answer /update). Keep the update job
+    working with the owner's automatic-update choice and Telegram read from the raw file, so the owner hears about it
+    and a fixed version can still be installed (automatically, or with `desk update`)."""
+    from dotenv import dotenv_values
+    from .config import ENV_PATH
+    raw = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
+    auto = (raw.get("AUTO_UPDATE") or "true").strip().lower() in ("1", "true", "yes", "y", "on")
+    s = Settings(auto_update=auto, telegram_token=(raw.get("TELEGRAM_BOT_TOKEN") or "").strip(),
+                 telegram_chat_id=(raw.get("TELEGRAM_CHAT_ID") or "").strip())
+    why = redact(str(error) or type(error).__name__)[-200:]
+    print(f"The settings file does not load: {why}")
+    st = read_status(STATUS) or {}
+    if st.get("settings_error") != why and STATUS.parent.exists():   # tell the owner once per distinct problem
+        Telegram(s.telegram_token, s.telegram_chat_id).send(
+            f"⚠️ The desk's settings file on the server does not load ({why}), so the desk cannot start. On the server "
+            "run `desk setup` to fix it (a file saved from the phone is kept as data/.env.previous).")
+        from .remote_setup import private_write
+        private_write(STATUS, json.dumps({**st, "settings_error": why}, indent=1), 0o644)
+    return s
+
+
 def main(argv: list[str]) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="trader update")
     ap.add_argument("--check-only", action="store_true", help="report, never install")
     ap.add_argument("--force", action="store_true", help="install even when automatic updates are off")
     args = ap.parse_args(argv)
-    s = Settings.load()
+    try:
+        s = Settings.load()
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - a broken settings file must not stop the updates too
+        s = fallback_settings(e)
+    else:
+        if (st := read_status(STATUS) or {}).get("settings_error"):   # fixed: a new problem is reported again
+            from .remote_setup import private_write
+            private_write(STATUS, json.dumps({k: v for k, v in st.items() if k != "settings_error"}, indent=1), 0o644)
 
     def stopped(*_):
         raise Interrupted()

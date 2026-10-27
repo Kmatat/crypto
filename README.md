@@ -111,8 +111,10 @@ Try it with no setup at all: `python -m trader run --offline --cycles 300 --fast
 `/setup` on Telegram changes the everyday settings with buttons: strategy, coins, risk level, budget, trading mode,
 check interval, daily report hour and pulse. The desk cannot write its own settings file (the server's sandbox forbids
 it, on purpose), so it hands the change to the update job, which checks every value again, keeps the previous file as
-`data/.env.previous`, writes the new one, restarts the desk and reports the result. Keys and tokens are never asked for
-on Telegram; they are changed with `desk setup` on the server.
+`data/.env.previous`, writes the new one, checks that the desk starts with it (else it puts the previous file back),
+restarts the desk and reports the result. Keys and tokens are never asked for on Telegram; they are changed with
+`desk setup` on the server. The update job trusts nothing the desk writes: only the exact values the desk's own
+settings loader reads are accepted, and its files in the data folder are replaced, never written through a link.
 
 ## Updates without a terminal
 

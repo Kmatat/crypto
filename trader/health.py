@@ -596,7 +596,7 @@ def trend_state(bot, j: Journal) -> dict:
         warning = (f"the daily trend decisions for {expected} have not run yet "
                    f"({tries.get('n', 0) if tries.get('day') == expected else 0} tries); the desk retries at every check")
     elif gave_up:
-        warning = f"the daily trend decisions for {day} stayed incomplete after {TREND_TRIES} tries; see /diagnose"
+        warning = f"the daily trend decisions for {day} stayed incomplete after {tries.get('n', TREND_TRIES)} tries; see /diagnose"
     start = j.get("trend_start") or {}
     return {"day": day, "expected": expected, "late": late, "gave_up": gave_up, "held": held,
             "protected": protected, "slots": bot.base.max_open_positions, "coins": list(bot.base.symbols),
@@ -618,7 +618,15 @@ def trend_line(bot, j: Journal) -> str:
     held = ", ".join(s.removesuffix("USDT") for s in t["held"]) or "none"
     head = (f"📈 Daily trend decisions: last for {t['day']}" if t["day"] else "📈 Daily trend decisions: not made yet")
     return (f"{head} (decided once a day after 00:00 UTC) · holding {len(t['held'])} of {len(t['coins'])} coins "
-            f"({held}), {t['protected']} with exchange protection" + (f" · ⚠️ {t['warning']}" if t["warning"] else ""))
+            f"({held}), {t['protected']} " + ("with simulated stop orders (paper trading)" if _paper(bot) else
+                                              "with exchange protection")
+            + (f" · ⚠️ {t['warning']}" if t["warning"] else ""))
+
+
+def _paper(bot) -> bool:
+    """Paper trading: the stop orders are simulated by the desk, no exchange holds them."""
+    base = getattr(bot, "base", None)
+    return getattr(base, "mode", "simulation") == "simulation" or getattr(base, "offline", False)
 
 
 def settings_lines(bot) -> list[str]:

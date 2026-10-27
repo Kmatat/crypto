@@ -466,3 +466,17 @@ def test_the_daily_candle_cache_keeps_one_entry_per_coin():
         m.daily_candles("BTCUSDT", limit)
     assert len(m._daily_candles) == 1 and len(m.daily_candles("BTCUSDT", 130)) == 130
     assert asked[-1] == 199                                             # a shorter request reuses the longer read
+
+
+def test_an_hourly_position_whose_trend_sale_fails_keeps_its_exits_and_is_not_adopted():
+    """1.7.5: the coin the rule tried to sell is sold again at the next try; its tighter hourly stop stays meanwhile."""
+    up = wavy(130, 100, 0.02)
+    bot, j = trend_desk({"AAAUSDT": candles(up + [up[-1] * 0.5])})     # closed far below its average
+    price = up[-1] * 0.5
+    bot.market.prices["AAAUSDT"] = price
+    j.open_position("AAAUSDT", {"qty": 1.0, "avg_price": price, "quote": price}, price * 0.85, price * 1.2)
+    bot.execution.execute = lambda side, sym, qty=0, quote_amount=0: {"ok": False, "error": "exchange busy"}
+    out = bot.run_cycle()
+    assert not [r for r in out if r.get("action") == "ADOPT"] and bot.trend_report["adopted"] == []
+    assert abs(j.positions()["AAAUSDT"]["stop_loss"] - price * 0.85) < 1e-9
+    assert "AAAUSDT" not in (j.get("trend_positions") or {})

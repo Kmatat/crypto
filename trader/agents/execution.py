@@ -35,7 +35,7 @@ def _now_ms() -> int:
 
 
 class PaperBroker:
-    """Simulated exchange. `range_fn(symbol, since_ms)` -> (low, high, last_ms) of prices since a moment,
+    """Simulated exchange. `range_fn(symbol, since_ms)` -> (low, high, last_ms[, minute candles]) of prices since a moment,
     used to emulate stop/take-profit orders that the exchange would have filled between checks."""
 
     def __init__(self, price_fn, range_fn=None):
@@ -70,12 +70,19 @@ class PaperBroker:
         rng = self.range_fn(symbol, protection["since_ms"]) if self.range_fn else None
         if not rng:
             return {"state": "protected", "protection": protection}
-        low, high, last_ms = rng
+        low, high, last_ms = rng[:3]
+        minutes = rng[3] if len(rng) > 3 else ()   # the minute candles, when known: the exit gets its real time
+
+        def touched(hit) -> dict:
+            first = next((r["time"] for r in minutes if hit(r)), None)
+            return {"time_ms": int(first)} if first is not None else {}
         if low <= protection["stop"]:      # a stop-loss market order fills just under the stop in a fall
             fill = self._sell_at(protection["qty"], protection["stop"] * (1 - STOP_SLIPPAGE))
+            fill.update(touched(lambda r: r["low"] <= protection["stop"]))
             return {"state": "exited", "reason": "stop-loss", "fill": fill, "protection": protection}
         if high >= protection["take"]:     # a take-profit limit order fills exactly at its price
             fill = self._sell_at(protection["qty"], protection["take"])
+            fill.update(touched(lambda r: r["high"] >= protection["take"]))
             return {"state": "exited", "reason": "take-profit", "fill": fill, "protection": protection}
         return {"state": "protected", "protection": {**protection, "since_ms": max(protection["since_ms"], last_ms)}}
 
@@ -212,15 +219,16 @@ class TestnetBroker:
 
     def sells_since(self, symbol: str, start_ms: int) -> dict[str, dict]:
         """The account's sales of this coin since `start_ms`, per order: {order_id: {qty, quote (after USDT fees),
-        gross (before fees), fee_quote}}. A protective order can fill in parts on the thin demo book; the parts sold before the desk
+        gross (before fees), fee_quote, time_ms}}. A protective order can fill in parts on the thin demo book; the parts sold before the desk
         cancels or replaces the order are found here."""
         out: dict[str, dict] = {}
         base = symbol.removesuffix("USDT")
         for t in self.client.my_trades(symbol):
             if t.get("isBuyer") or int(t.get("time", 0)) < start_ms:
                 continue
-            o = out.setdefault(str(t["orderId"]), {"qty": 0.0, "quote": 0.0, "gross": 0.0, "fee_quote": 0.0})
+            o = out.setdefault(str(t["orderId"]), {"qty": 0.0, "quote": 0.0, "gross": 0.0, "fee_quote": 0.0, "time_ms": 0})
             qty, price, fee = float(t["qty"]), float(t["price"]), float(t.get("commission", 0) or 0)
+            o["time_ms"] = max(o["time_ms"], int(t.get("time", 0)))   # when its last part sold
             quote = float(t.get("quoteQty") or qty * price)
             o["qty"] += qty
             o["quote"] += quote

@@ -5,6 +5,46 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.5 - 2026-10-27
+
+Fixes from a security and conversation review of the phone setup (`/setup`), each one reproduced first:
+- **The update job no longer trusts what the desk writes.** It accepted values such as `15.0`, `1e1`, `$15` or
+  `50,000` and wrote them as typed, but the desk cannot start with them, and the update job itself then stopped too
+  (only a terminal session could fix it). Now only the exact form the desk's settings loader reads is accepted, coin
+  lists cannot carry a hidden line break, and after writing the file the job checks in a fresh process that the desk
+  can start with it; if not, it puts the previous file back and says so. If the settings file ever does not load
+  (for example after a hand edit), the update job keeps working (so a fixed version can still be installed) and
+  tells you once on Telegram.
+- The copy of the previous settings (`data/.env.previous`, which holds the keys) and the update job's status and
+  restart files are now replaced, never written through a link someone placed in the data folder, so nothing in that
+  folder can make the job copy the keys into, or overwrite, another file. A request that is not a plain file is
+  refused at once instead of making the job wait.
+- Settings sent from the phone are applied only after an interrupted update is finished or undone, so a restart for
+  new settings never starts code whose tests did not finish.
+- `/update` and `/setup` sent close together no longer cancel each other, a request written while the job is busy is
+  kept for its next run (it was deleted unanswered), and a second `/setup` keeps the first one's changes while they
+  wait. A request that reaches the job more than an hour late is not applied (you are told).
+- Phone answers: a budget of `10,000` meant $10 and `1234567` was saved rounded; budgets are now read the way people
+  write them. Re-entering the current check interval or report hour is no longer offered as a change. Choosing the
+  trend rule and then the hourly agents again (or the reverse) in one session now leaves your saved coins, slots and
+  scout alone. The trend coins question takes only its answers (0 goes back). A very long coin message is refused
+  before any Binance lookup, and the lookups stop at the first unknown coin. `Trend` or `Testnet` typed by hand in the
+  settings file is read as the desk reads it. A phone change no longer fills a missing trading mode with the demo
+  account or turns an emptied checklist back on.
+- Before you confirm, the setup names the coins the trend rule would sell because they are not in the new list. The
+  trading mode is not changed from the phone while coins are held, and the demo account's keys are checked first.
+- A message `*` with no setup open gets the help again.
+
+Fixes to the daily trend rule from the same review:
+- An hourly position whose trend sale failed (exchange busy, no price) was "adopted" in the same step: its stop was
+  loosened and you were told it now follows the rule. It now keeps its exits until the next try sells it.
+- In paper trading, a simulated stop is recorded at the minute it was hit (the re-entry rule counts from it), and parts
+  of a protective order that sold on the demo exchange are recorded at their sale time.
+- Sale and hourly buy messages keep the digits of cheap coins' prices.
+- Texts: the start message says "simulated stop orders" in paper trading, the "incomplete after N tries" lines give
+  the real number of tries, a sale with no live price is shown as a sale, and a held coin without enough daily history
+  says so instead of "still above its average".
+
 ## 1.7.4 - 2026-10-27
 
 New: **the setup on your phone.** `/setup` on Telegram changes the strategy, coins, risk level, budget, trading mode,
@@ -53,7 +93,7 @@ With the daily trend rule:
   lab's lessons leave out the trend rule's trades.
 - The notebook no longer says the emergency stop is "on the exchange" in paper trading, and shows a refused buy as
   "BUY refused".
-- `/diagnose`'s market data line says when a day's daily prices were incomplete.
+- (Correction: the line saying when a day's daily prices were incomplete is in `/agents`' Market data row, since 1.7.2.)
 
 ## 1.7.2 - 2026-10-27
 

@@ -512,7 +512,7 @@ class Orchestrator:
             # unprotected, so tries alone could end in a quarter of an hour)
             if complete or (tries["n"] >= TREND_TRIES and time.time() - tries.get("first", 0) >= 3600):
                 if not complete:
-                    text = (f"the decisions for {day} stayed incomplete after {TREND_TRIES} tries (see the errors before "
+                    text = (f"the decisions for {day} stayed incomplete after {tries['n']} tries (see the errors before "
                             "this one); the coins concerned wait until tomorrow")
                     self.journal.event("error", f"Daily trend decisions: {text}")
                     summary.append({"symbol": "TREND", "stage": "trend", "error": text})
@@ -644,11 +644,12 @@ class Orchestrator:
                 why = f"closed at or below its {sma_days}-day average"
             else:
                 continue
+            selling.add(sym)
             if sym not in self.last_price:   # never sell blind: tried again at the next check
                 complete = False
+                decide(sym, "SELL", why, {"approved": False, "reason": "no live price this check"})
                 out.append({"symbol": sym, "stage": "trend", "error": f"not sold ({why}): no live price this check"})
                 continue
-            selling.add(sym)
             try:
                 decision = decide(sym, "SELL", why, {"approved": True, "reason": "closing position"})
                 result = self._result(sym, {"price": self.last_price[sym]}, decision,
@@ -668,7 +669,8 @@ class Orchestrator:
         positions = self.journal.positions()
         managed = {s: o for s, o in managed.items() if s in positions and positions[s]["opened_at"] == o}
         for sym, p in positions.items():
-            if managed.get(sym) == p["opened_at"] or sym not in coins:   # an unsold leftover is retried, not adopted
+            # an unsold leftover, or a coin step 1 tried to sell, is sold again at the next try, never adopted
+            if managed.get(sym) == p["opened_at"] or sym not in coins or sym in selling:
                 continue
             stop = p["entry_price"] * (1 - stop_pct)
             take = max(p["entry_price"], self.last_price.get(sym, 0.0)) * trend.TAKE_MULT
@@ -708,7 +710,8 @@ class Orchestrator:
             g = sigs[sym]
             if sym in held:
                 if sym not in selling:   # a sale that failed stays a SELL in the summary ("sale failed, still held")
-                    decide(sym, "HOLD", "holds: still above its average", {"approved": False, "reason": "holding"})
+                    decide(sym, "HOLD", "holds: still above its average" if g else
+                           "holds: not enough daily history yet to judge it", {"approved": False, "reason": "holding"})
                 continue
             if g is None or not g["on"]:
                 decide(sym, "HOLD", "stays out" if g else "waits for more daily history",
@@ -907,6 +910,8 @@ class Orchestrator:
             fill = {"ok": True, "status": "FILLED", "order_id": str(order_id), "qty": qty,
                     "avg_price": s.get("gross", s["quote"]) / s["qty"], "quote": quote,
                     "fee_quote": s["fee_quote"] * share, "market_price": leg[1] if leg else None}
+            if s.get("time_ms"):   # recorded when it sold, not when the desk noticed
+                fill["time_ms"] = s["time_ms"]
             reason = f"{leg[0]} (exchange)" if leg else \
                 "sold on the exchange (part of a protective order, found in the account's sales)"
             self.journal.log_order(sym, "SELL", fill, reason)

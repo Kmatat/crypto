@@ -53,7 +53,7 @@ def test_the_start_messages_name_the_trend_rule_and_keep_the_hourly_wording(monk
     info = main.start_summary(bot, t)
     assert info["strategy"] == "daily trend rule (50-day average, 20% emergency stop)"
     assert info["ai"] == "none (the rule decides alone)"
-    assert info["pace"] == ("every 15 min (prices and exchange protection; the trend decisions once a day after "
+    assert info["pace"] == ("every 15 min (prices and the simulated stop orders; the trend decisions once a day after "
                             "00:00 UTC)")
     monkeypatch.setattr(Settings, "use_claude", property(lambda self: True))
     assert main.start_summary(bot, t)["ai"] == "none for trading (Claude only for /review)"
@@ -390,3 +390,11 @@ def test_the_hourly_desk_starts_and_rolls_back_as_before(tmp_path, monkeypatch):
     assert any(t.startswith("⏪ Strategy rolled back to the previous champion") for t, _ in tg.sent)
     assert not any(t.startswith("📈 Daily trend decisions") for t, _ in tg.sent)
     assert tg.handlers["/help"]() == main.HELP_TEXT
+
+
+def test_paper_trading_is_never_said_to_have_exchange_protection():
+    from trader.health import trend_line
+    bot, j = trend_desk(series())
+    bot.run_cycle()
+    line = trend_line(bot, j)
+    assert "simulated stop orders (paper trading)" in line and "exchange protection" not in line
