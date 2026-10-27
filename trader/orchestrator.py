@@ -525,19 +525,34 @@ class Orchestrator:
             log.warning("Could not read the account's sales of %s: %s", sym, e)
             return []
         out, step = [], self.execution.step_size(sym)
+        # an order placed before the buy that opened this position is not this position's (Binance numbers a pair's
+        # orders in sequence): e.g. a protective order an earlier record left live after `desk reset --force`
+        row = self.journal.db.execute("SELECT order_id FROM orders WHERE symbol=? AND side='BUY' AND ok=1 "
+                                      "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+        first = int(row[0]) if row and str(row[0]).isdigit() else None
+        # the position's own protective orders give the sale its real reason and the price it was set at
+        prot = position.get("protection") or {}
+        legs = {str(prot.get("sl_order_id")): ("stop-loss", prot.get("stop")),
+                str(prot.get("tp_order_id")): ("take-profit", prot.get("take"))}
         for order_id, s in sells.items():
             p = self.journal.positions().get(sym)
             if p is None:
                 break
+            if first is not None and str(order_id).isdigit() and int(order_id) < first:
+                continue
             booked_qty, booked_quote = self._booked_sells(sym, order_id)
             qty = min(s["qty"] - booked_qty, p["qty"])
-            if qty <= max(step or 0, p["qty"] * 1e-6):
+            if qty < max((step or 0) / 2, p["qty"] * 1e-6):   # nothing left of it (exchange amounts are whole steps)
                 continue
             share = qty / s["qty"] if s["qty"] else 1.0
-            quote = max(0.0, s["quote"] - booked_quote) if booked_qty else s["quote"] * share
-            fill = {"ok": True, "status": "FILLED", "order_id": str(order_id), "qty": qty, "avg_price": quote / qty,
-                    "quote": quote, "fee_quote": s["fee_quote"] * share, "market_price": None}
-            reason = "sold on the exchange (part of a protective order, found in the account's sales)"
+            quote = max(0.0, s["quote"] - booked_quote) * qty / (s["qty"] - booked_qty) if booked_qty \
+                else s["quote"] * share
+            leg = legs.get(str(order_id))
+            fill = {"ok": True, "status": "FILLED", "order_id": str(order_id), "qty": qty,
+                    "avg_price": s.get("gross", s["quote"]) / s["qty"], "quote": quote,
+                    "fee_quote": s["fee_quote"] * share, "market_price": leg[1] if leg else None}
+            reason = f"{leg[0]} (exchange)" if leg else \
+                "sold on the exchange (part of a protective order, found in the account's sales)"
             self.journal.log_order(sym, "SELL", fill, reason)
             trade = self.journal.close_position(sym, fill, reason, step=step)
             self._exit_event(sym, fill, trade)
@@ -633,8 +648,11 @@ class Orchestrator:
             # one leg filled in part and the other was cancelled by the exchange: the coins left have no stop-loss on
             # the exchange any more. Cancel what is left, record the part that sold, and let this check protect the
             # rest again with a fresh pair (or sell it at once if the price is already below the stop)
-            if hasattr(self.execution.broker, "cancel_quietly"):
-                self.execution.broker.cancel_quietly(sym, prot)
+            res = self.execution.unprotect(sym, prot)
+            if res["state"] == "exited":             # the rest filled meanwhile
+                return self.journal.positions().get(sym), self._record_exchange_exit(sym, res)
+            if res["state"] == "error":              # the rest still works and locks the coins: keep it, retry
+                return position, None
             booked = self._book_unrecorded_sells(sym, position)
             if sym in self.journal.positions():
                 self.journal.set_protection(sym, None, "none")
@@ -658,7 +676,7 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - a measurement, never a reason to skip an order
             return fallback
 
-    def _record_exchange_exit(self, sym: str, status: dict) -> dict:
+    def _record_exchange_exit(self, sym: str, status: dict) -> dict | None:
         # the exchange filled a stop-loss or a take-profit at some moment since the last check: judge the fill against
         # the price the order was set at, not against the price now (that would count the market's later moves)
         prot = status.get("protection") or {}
@@ -670,10 +688,10 @@ class Orchestrator:
             fill["qty"] = max(0.0, whole - booked_qty)
             fill["fee_quote"] = fill.get("fee_quote", 0.0) * (fill["qty"] / whole if whole else 0.0)
             fill["quote"] = max(0.0, fill["quote"] - booked_quote)
-            fill["avg_price"] = fill["quote"] / fill["qty"] if fill["qty"] else fill["avg_price"]
-            if fill["qty"] <= (self.execution.step_size(sym) or 0):
-                self.journal.set_protection(sym, None, "none")
-                return {"symbol": sym, "action": "SELL", "reason": status["reason"], "order": fill}
+            if fill["qty"] < (self.execution.step_size(sym) or 0) / 2:   # all of it was already recorded
+                if sym in self.journal.positions():
+                    self.journal.set_protection(sym, None, "none")
+                return None
         kind = "exchange" if status["protection"]["kind"] == "exchange" else "emulated"
         reason = f"{status['reason']} ({kind})"
         self.journal.log_order(sym, "SELL", fill, reason)
@@ -693,7 +711,7 @@ class Orchestrator:
         if position.get("protection"):  # free the coins first: open orders lock them
             status = self.execution.unprotect(sym, position["protection"])
             if status["state"] == "exited":
-                return self._record_exchange_exit(sym, status)
+                return self._record_exchange_exit(sym, status) or {"symbol": sym, "action": "SELL", "reason": reason}
             if status["state"] == "error":
                 fill = {"ok": False, "error": status["detail"], "market_price": self.last_price[sym]}
                 self.journal.log_order(sym, "SELL", fill, reason)

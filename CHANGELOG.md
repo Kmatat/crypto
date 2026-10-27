@@ -5,6 +5,25 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.6.7 - 2026-10-27
+
+Fixes found by an independent review of 1.6.6:
+- A stop-loss or take-profit that filled completely between two checks was recorded as "sold on the exchange" instead
+  of "stop-loss (exchange)" / "take-profit (exchange)", because the new holdings check found the sale first. Money and
+  results were right, but the desk's "no re-buy within 24 hours after a stop-loss" check did not see the stop (it
+  could buy the coin straight back), and the reports' exit counts and price-gap measurement left these exits out.
+  Sales of the position's own protective orders are now recorded under their real reason and at the price they were
+  set at.
+- A part-filled protective order whose cancel got no answer from Binance (a timeout) was forgotten although its rest
+  still held the coins: the coins stayed locked on the exchange with no stop-loss. The desk now keeps the order on
+  record and tries again at the next check.
+- A last sale of exactly one step (the smallest amount the exchange trades) was skipped as rounding noise, leaving a
+  coin in the journal that the exchange no longer held.
+- A sale by an order placed before the position's own buy (for example a protective order an earlier record left
+  live after `desk reset --force`) could be counted as this position's sale; such orders are now left out.
+- Prices of these recorded sales are the price before fees, as for every other order, so the price-gap figure no
+  longer shows a 0.1% gap that did not happen.
+
 ## 1.6.6 - 2026-10-27
 
 - Fix: a protective order (stop-loss / take-profit pair) that filled only in part on the thin demo order book left

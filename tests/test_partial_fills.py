@@ -12,14 +12,14 @@ MS = int(OPENED.timestamp() * 1000)
 
 class Exchange:
     """The few Binance calls the broker makes, with the account's fills on the pair."""
-    def __init__(self, trades, held):
-        self.trades, self.held, self.cancelled = trades, held, []
+    def __init__(self, trades, held, step="0.01"):
+        self.trades, self.held, self.cancelled, self.step = trades, held, [], step
 
     def my_trades(self, symbol, order_id=None, limit=500):
         return [t for t in self.trades if order_id is None or str(t["orderId"]) == str(order_id)]
 
     def symbol_filters(self, symbol):
-        return {"step_size": "0.01", "min_notional": 5.0, "oco_allowed": True}
+        return {"step_size": self.step, "min_notional": 5.0, "oco_allowed": True}
 
     def balances_total(self):
         return dict(self.held)
@@ -38,11 +38,11 @@ def fill(order_id, qty, price, minutes=60, fee_asset="USDT", buyer=False):
             "isBuyer": buyer}
 
 
-def desk(trades, held, qty=71.6):
+def desk(trades, held, qty=71.6, step="0.01"):
     """A desk on the demo account holding 71.6 UNI bought at 8.00, as the owner's journal does."""
     j = Journal(":memory:", 5000)
     bot = Orchestrator(Settings(offline=True, symbols=["UNIUSDT"], starting_balance=5000), j)
-    ex = Exchange(trades, held)
+    ex = Exchange(trades, held, step)
     bot.execution = ExecutionAgent(TestnetBroker(ex))
     bot.testnet = ex
     j.open_position("UNIUSDT", {"qty": qty, "avg_price": 8.0, "quote": qty * 8.0}, 7.6, 8.8)
@@ -110,3 +110,54 @@ def test_a_sale_hidden_in_a_cancelled_order_is_found_when_the_desk_sells():
     bot.last_price["UNIUSDT"] = 8.1
     bot._sell("UNIUSDT", j.positions()["UNIUSDT"], "signal")
     assert abs(sold[0] - 61.0) < 1e-6 and "UNIUSDT" not in j.positions()    # sells what is really there, closes clean
+
+
+# ---- 1.6.7: what the review of 1.6.6 found ----
+PAIR = {"kind": "exchange", "list_client_id": "L1", "sl_order_id": 42, "tp_order_id": 43, "stop": 7.6, "take": 8.8}
+
+
+def test_a_stop_loss_found_in_the_sales_is_recorded_as_a_stop_loss():
+    from trader.report import performance
+    bot, j, ex = desk([fill(42, 71.6, 7.6)], {})
+    j.set_protection("UNIUSDT", PAIR, "exchange")
+    out = bot.reconcile()                                      # the stop filled completely between two checks
+    assert out[0]["reason"] == "stop-loss (exchange)" and "UNIUSDT" not in j.positions()
+    assert j.last_stop_loss_ms("UNIUSDT") is not None          # the no-re-buy-after-a-stop check sees it
+    row = j.db.execute("SELECT avg_price, market_price FROM orders WHERE side='SELL'").fetchone()
+    assert row["market_price"] == 7.6 and abs(row["avg_price"] - 7.6) < 1e-9   # the price before fees, as Binance's
+    assert performance(j, {})["exits_by_exchange_orders"] == 1
+
+
+def test_a_last_sale_of_exactly_one_step_is_recorded():
+    bot, j, ex = desk([fill(41, 99, 8.8)], {"UNI": 1.0}, qty=100.0, step="1")
+    bot.reconcile()
+    assert abs(j.positions()["UNIUSDT"]["qty"] - 1.0) < 1e-9
+    ex.trades.append(fill(41, 1, 8.8, minutes=90))
+    ex.held = {}
+    assert bot.reconcile()[0]["action"] == "SELL" and "UNIUSDT" not in j.positions()   # not a phantom coin left
+
+
+def test_a_sale_from_before_the_positions_buy_is_not_its_sale():
+    bot, j, ex = desk([fill(41, 61.0, 8.8)], {"UNI": 50.0}, qty=50.0)   # order 41: left live by an earlier record
+    j.log_order("UNIUSDT", "BUY", {"ok": True, "order_id": "50", "qty": 50.0, "avg_price": 8.0, "quote": 400.0}, "signal")
+    j.set_protection("UNIUSDT", {**PAIR, "sl_order_id": 51, "tp_order_id": 52}, "exchange")
+    bot.execution.broker.unprotect = lambda sym, prot: {"state": "cancelled"}
+    sold = []
+    bot.execution.execute = lambda side, sym, qty=0, quote_amount=0: sold.append(qty) or {
+        "ok": True, "status": "FILLED", "order_id": "60", "qty": qty, "avg_price": 8.1, "quote": qty * 8.1, "fee_quote": 0}
+    bot.last_price["UNIUSDT"] = 8.1
+    bot._sell("UNIUSDT", j.positions()["UNIUSDT"], "signal")
+    assert sold == [50.0]                                      # the desk really sells its 50 coins
+
+
+def test_a_part_filled_order_that_cannot_be_cancelled_is_kept():
+    import requests
+    bot, j, ex = desk([fill(43, 10.6, 8.8)], {"UNI": 61.0})
+    j.set_protection("UNIUSDT", PAIR, "exchange")
+    bot.execution.broker.protection_status = lambda sym, prot: {"state": "executing", "protection": prot}
+
+    def no_answer(sym, prot):
+        raise requests.ConnectionError("timeout")
+    bot.execution.broker.unprotect = no_answer
+    position, result = bot._sync_protection("UNIUSDT", j.positions()["UNIUSDT"])
+    assert result is None and j.positions()["UNIUSDT"]["protection"] == PAIR   # still known: cancelled next time

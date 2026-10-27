@@ -197,18 +197,19 @@ class TestnetBroker:
 
     def sells_since(self, symbol: str, start_ms: int) -> dict[str, dict]:
         """The account's sales of this coin since `start_ms`, per order: {order_id: {qty, quote (after USDT fees),
-        fee_quote}}. A protective order can fill in parts on the thin demo book; the parts sold before the desk
+        gross (before fees), fee_quote}}. A protective order can fill in parts on the thin demo book; the parts sold before the desk
         cancels or replaces the order are found here."""
         out: dict[str, dict] = {}
         base = symbol.removesuffix("USDT")
         for t in self.client.my_trades(symbol):
             if t.get("isBuyer") or int(t.get("time", 0)) < start_ms:
                 continue
-            o = out.setdefault(str(t["orderId"]), {"qty": 0.0, "quote": 0.0, "fee_quote": 0.0})
+            o = out.setdefault(str(t["orderId"]), {"qty": 0.0, "quote": 0.0, "gross": 0.0, "fee_quote": 0.0})
             qty, price, fee = float(t["qty"]), float(t["price"]), float(t.get("commission", 0) or 0)
             quote = float(t.get("quoteQty") or qty * price)
             o["qty"] += qty
             o["quote"] += quote
+            o["gross"] += quote          # before fees: the price the order really sold at
             if t.get("commissionAsset") == "USDT":
                 o["quote"] -= fee
                 o["fee_quote"] += fee
