@@ -246,6 +246,10 @@ class Settings:
             out.append(f"FREE_AI_PROVIDER={self.free_ai_provider} needs {need} (desk setup): no free AI is used")
         if self.strategy not in ("hourly", "trend"):
             out.append(f"STRATEGY={self.strategy!r} must be hourly or trend: using hourly")
+        if not self.trend and (self.max_open_positions > 3 or self.max_position_pct > 0.10 + 1e-9):
+            out.append(f"MAX_OPEN_POSITIONS {self.max_open_positions} / MAX_POSITION_PCT {self.max_position_pct:g}: the hourly "
+                       "strategy uses at most 3 positions of at most 10% each (its tested limits), so it trades with those "
+                       "(the daily trend rule's one slot per coin applies only with STRATEGY=trend)")
         elif self.trend:
             if self.max_open_positions < len(self.symbols):
                 out.append(f"STRATEGY=trend with {len(self.symbols)} coins but MAX_OPEN_POSITIONS {self.max_open_positions}: "

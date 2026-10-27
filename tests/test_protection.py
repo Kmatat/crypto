@@ -302,7 +302,9 @@ def test_offline_simulation_uses_emulated_exchange_orders():
                 reasons.add(t["exit_reason"])
     for p in b.journal.positions().values():
         assert p["protected"] == "emulated"
-    assert reasons and all(r.endswith("(emulated)") or r == "signal" for r in reasons)
+    # a trailing stop moved above the price after a quick fall is refused, as Binance refuses it, and the desk sells at
+    # the market price ("stop-loss") instead of a simulated fill at the higher stop (1.7.1)
+    assert reasons and all(r.endswith("(emulated)") or r in ("signal", "stop-loss", "take-profit") for r in reasons)
     assert any(r.endswith("(emulated)") for r in reasons)
 
 

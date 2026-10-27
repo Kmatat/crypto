@@ -58,7 +58,11 @@ class PaperBroker:
                 "avg_price": price, "quote": gross * (1 - PAPER_FEE), "fee_quote": gross * PAPER_FEE}
 
     # ---- protection ----
-    def protect(self, symbol: str, qty: float, stop: float, take: float) -> dict:
+    def protect(self, symbol: str, qty: float, stop: float, take: float, strict: bool = False) -> dict:
+        price = self.price_fn(symbol)
+        if not take > price > stop:   # as Binance: the pair must sit on both sides of the price
+            raise BinanceError(f"stop {stop:,.6g} and take-profit {take:,.6g} must lie below and above the price "
+                               f"{price:,.6g}: the order would trigger immediately")
         return {"kind": "emulated", "qty": qty, "stop": stop, "take": take, "since_ms": _now_ms(),
                 "placed_at": _now_ms()}
 
@@ -149,10 +153,19 @@ class TestnetBroker:
         return float(self.client.symbol_filters(symbol)["step_size"])
 
     # ---- protection: OCO pair on the exchange ----
-    def protect(self, symbol: str, qty: float, stop: float, take: float) -> dict:
+    def protect(self, symbol: str, qty: float, stop: float, take: float, strict: bool = False) -> dict:
+        """`strict` (the daily trend rule: a stop far below, a take-profit far above): only a stop-market leg, and the
+        take-profit no higher than Binance accepts (its percent-price rule judges a sell limit against its average
+        price of the last minutes); the protection returned holds the take-profit really placed."""
         f = self.client.symbol_filters(symbol)
         if not f["oco_allowed"]:
             raise BinanceError(f"{symbol} does not support OCO orders on this exchange")
+        if strict:
+            if "STOP_LOSS" not in f["order_types"]:
+                raise BinanceError(f"{symbol} offers only stop-limit orders on Binance, which refuses one this far below "
+                                   "the price; the desk holds this stop itself")
+            if f.get("ask_up"):
+                take = min(take, f["ask_up"] * self.client.avg_price(symbol) * 0.98)
         base = symbol.removesuffix("USDT")
         free = self.client.balances().get(base, 0.0)
         qty = round_step(min(qty, free), f["step_size"])
@@ -277,10 +290,12 @@ class ExecutionAgent:
             log.warning("Could not read the step size of %s: %s", symbol, e)
             return None
 
-    def protect(self, symbol: str, qty: float, stop: float, take: float) -> dict:
+    def protect(self, symbol: str, qty: float, stop: float, take: float, strict: bool = False) -> dict:
         """Returns {"ok": True, "protection": {...}} or {"ok": False, "error": "..."}."""
         try:
-            return {"ok": True, "protection": self.broker.protect(symbol, qty, stop, take)}
+            placed = self.broker.protect(symbol, qty, stop, take, strict=True) if strict else \
+                self.broker.protect(symbol, qty, stop, take)
+            return {"ok": True, "protection": placed}
         except (BinanceError, requests.RequestException, KeyError) as e:
             log.warning("Could not protect %s on the exchange: %s", symbol, e)
             return {"ok": False, "error": str(e)}

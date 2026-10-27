@@ -93,8 +93,13 @@ class StrategyCard:
         return cls(name=name, buy_threshold=dmod.BUY_THRESHOLD, stop_loss_atr=s.stop_loss_atr,
                    take_profit_atr=s.take_profit_atr, trail_atr=s.trail_atr, checks=tuple(s.mentor_checks),
                    cooldown_hours=s.cooldown_hours, min_reward_risk=s.min_reward_risk,
-                   risk_per_trade_pct=s.risk_per_trade_pct, max_position_pct=s.max_position_pct,
-                   max_open_positions=s.max_open_positions, interval=s.interval, weights=dict(dmod.WEIGHTS),
+                   # the owner's limits, within the card bounds (the trend rule's one slot per coin, or a larger
+                   # position size, would make a card that can never be valid)
+                   risk_per_trade_pct=s.risk_per_trade_pct,
+                   max_position_pct=min(max(s.max_position_pct, BOUNDS["max_position_pct"][0]), BOUNDS["max_position_pct"][1]),
+                   max_open_positions=min(max(s.max_open_positions, BOUNDS["max_open_positions"][0]),
+                                          BOUNDS["max_open_positions"][1]),
+                   interval=s.interval, weights=dict(dmod.WEIGHTS),
                    coin_thresholds=dict(dmod.COIN_THRESHOLDS), source="owner")
 
     # ---- validation ----

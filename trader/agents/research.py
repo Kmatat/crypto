@@ -100,6 +100,14 @@ NEIGHBOUR_MOVES = [
     ("add over-extension check", {"checks": "+overextended"}),
     ("half the risk per trade", {"risk_per_trade_pct": 0.005}),
 ]
+REVIEW_TREND = (
+    "\n\nThis desk now trades a fixed daily trend rule (STRATEGY=trend): hold a coin while its daily close is above its "
+    "50-day average, an emergency stop 25% below the entry, no profit target, decisions once a day, no AI in the "
+    "decisions. It wins only 20-30% of its trades by design (a few long trends pay for many small losses) and is judged "
+    "after 26 weeks and 30 trades on its profit factor, its worst drop and its result against just holding the coins. "
+    "The laboratory is paused. Judge whether the desk follows the rule and how its live record compares with its replay; "
+    "put suggestions about its settings (average days, volatility target, stop distance, coins) under "
+    "corrections_within_bounds, and never suggest raising risk to make up for losses.")
 
 
 class ResearchAgent:
@@ -110,9 +118,12 @@ class ResearchAgent:
 
     # ---- lessons from the recent trades ----
     @staticmethod
-    def lessons(journal, days: int = 30) -> dict:
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
-        rows = [dict(r) for r in journal.db.execute("SELECT * FROM closed_trades WHERE closed_at >= ?", (since,))]
+    def lessons(journal, days: int = 30, since: str | None = None) -> dict:
+        """What the last `days` of trades teach; `since` (an ISO time) leaves out trades opened before it, e.g. those
+        of the daily trend rule before a switch back to the hourly agents."""
+        start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        rows = [dict(r) for r in journal.db.execute("SELECT * FROM closed_trades WHERE closed_at >= ? AND opened_at >= ?",
+                                                    (start, since or ""))]
         losers = [r for r in rows if r["pnl"] <= 0]
         quick = 0
         for r in losers:
@@ -222,25 +233,28 @@ class ResearchAgent:
         return cards
 
     # ---- plain-language review of the notebook (Telegram /review, weekly snapshot) ----
-    def review(self, notebook: str) -> dict | None:
+    def review(self, notebook: str, trend: bool = False) -> dict | None:
         """Claude reads the notebook digest and answers in the REVIEW_SCHEMA shape; None without Claude or on failure."""
         if not self.llm or not notebook:
             return None
-        data = self.llm.ask(REVIEW_SYSTEM, f"The desk's notebook:\n<data>\n{notebook}\n</data>\n\nWrite the review.",
+        system = REVIEW_SYSTEM + (REVIEW_TREND if trend else "")
+        data = self.llm.ask(system, f"The desk's notebook:\n<data>\n{notebook}\n</data>\n\nWrite the review.",
                             REVIEW_SCHEMA, effort="medium", caller="review")   # Claude only: the notebook is private
         if data:
             data.pop("_ai", None)
         return data
 
 
-def review_text(d: dict) -> str:
+def review_text(d: dict, trend: bool = False) -> str:
     def block(title: str, items: list) -> list[str]:
         return [f"\n{title}:"] + [f"• {x}" for x in items[:6]] if items else []
     lines = ["🧠 Claude's review of the notebook", d.get("summary", ""), f"Evidence: {d.get('evidence_quality', '')}"]
     lines += block("Working", d.get("working", []))
     lines += block("Failing", d.get("failing", []))
-    lines += block("For the laboratory to test next (within the bounds)", d.get("corrections_within_bounds", []))
+    lines += block("Worth checking (settings you can change in desk setup, after a /trendtest replay)" if trend else
+                   "For the laboratory to test next (within the bounds)", d.get("corrections_within_bounds", []))
     lines += block("Would need new code", d.get("ideas_needing_code", []))
     lines += block("Risks", d.get("risks", []))
-    lines.append("\nNothing changes from this review by itself: the lab tests, you approve.")
+    lines.append("\nNothing changes from this review by itself: " + ("the rule is fixed; you decide in desk setup." if trend
+                                                                    else "the lab tests, you approve."))
     return "\n".join(lines)

@@ -113,7 +113,8 @@ class Lab:
         if d:
             return StrategyCard.from_dict(d["card"])
         card = StrategyCard.from_settings(self.s)
-        self.set_champion(card, by="owner settings", note="first run")
+        if not self.s.trend:   # the daily trend rule runs no card: nothing is recorded as champion while it trades
+            self.set_champion(card, by="owner settings", note="first run")
         return card
 
     def set_champion(self, card: StrategyCard, by: str, note: str = "") -> None:
@@ -282,6 +283,8 @@ class Lab:
 
     # ---- the weekly run ----
     def run_week(self, proposals: list[StrategyCard]) -> dict:
+        if self.s.trend:
+            raise RuntimeError("the strategy lab is paused while the desk trades the daily trend rule (STRATEGY=trend)")
         champ = self.champion()
         champ_eval = self.evaluate(champ)
         self.journal.set("strategy_champion_eval", champ_eval)
@@ -330,6 +333,8 @@ class Lab:
 
     # ---- promotion, rollback, live watch ----
     def promote(self, card_id: str, by: str) -> StrategyCard | None:
+        if self.s.trend:   # cards belong to the hourly strategy; nothing is promoted while the trend rule trades
+            return None
         for entry in self.challengers():
             if entry["card"]["id"] == card_id and entry["status"] in ("ready", "lab_passed", "promoted"):
                 card = StrategyCard.from_dict(entry["card"])
@@ -354,6 +359,8 @@ class Lab:
         return False
 
     def rollback(self, reason: str) -> StrategyCard | None:
+        if self.s.trend:
+            return None
         state = self.journal.get("strategy_champion") or {}
         prev = state.get("previous")
         card = StrategyCard.from_dict(prev) if prev else StrategyCard.from_settings(self.s, "owner settings")
@@ -365,7 +372,10 @@ class Lab:
         return card
 
     def watch_live(self) -> str | None:
-        """Roll back when the champion's live trades turn clearly bad. Returns the reason, or None."""
+        """Roll back when the champion's live trades turn clearly bad. Returns the reason, or None. Never while the
+        daily trend rule trades: its trades say nothing about a card that is not running."""
+        if self.s.trend:
+            return None
         state = self.journal.get("strategy_champion") or {}
         if not state.get("previous") or state.get("by") in ("owner settings", "rollback"):
             return None

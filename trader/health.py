@@ -24,6 +24,11 @@ from .strategy import StrategyCard, thresholds_line
 
 CHECKLIST = "master traders' checklist:"
 STUCK_MIN_SIGNALS = 20
+STUCK_MIN_TREND = 3      # the daily trend rule makes at most one buy signal per coin a day
+TREND_RULE = "Trend rule"
+TREND_UNUSED = ("Not used by the daily trend rule, so not listed: technical analysis, prediction, the mentor's "
+                "checklist, news, forex, the market scout, the head trader, the research agent, the laboratory and the "
+                "AI's trade decisions. No AI decides a trade; /review can still ask Claude about the notebook.")
 
 
 def now_utc() -> dt.datetime:
@@ -142,21 +147,35 @@ def funnel_text(f: dict) -> str:
     return "\n".join(lines)
 
 
-def judged_since(j: Journal, hours: float = 24) -> str:
+def judged_since(j: Journal, hours: float = 24, trend: bool = False) -> str:
     """The stuck-rule alarm judges only decisions made under the strategy and settings now in force: refusals from
-    before a correction (for example the old take-profit fixed at start) say nothing about the corrected desk."""
+    before a correction (for example the old take-profit fixed at start) say nothing about the corrected desk.
+    The daily trend rule (`trend`) makes a few buy signals a week: it is judged on the last 7 days, never before the
+    day it started (nothing yet before its first daily decisions)."""
+    if trend:
+        start = (j.get("trend_start") or {}).get("ts") or now_utc().isoformat(timespec="seconds")
+        return max(since_iso(7 * 24), start)
     state = j.get("strategy_champion") or {}
     return max(since_iso(hours), state.get("since") or "")
 
 
-def stuck_rule(f: dict) -> tuple[str, int] | None:
+def stuck_rule(f: dict, minimum: int = STUCK_MIN_SIGNALS) -> tuple[str, int] | None:
     """A single refusal reason that blocked every buy signal (with enough signals to mean something)."""
-    if f["buy_signals"] < STUCK_MIN_SIGNALS or f["approved"]:
+    if f["buy_signals"] < minimum or f["approved"]:
         return None
     for label, n in f["refused"].items():
         if n >= f["buy_signals"]:
             return label, n
     return None
+
+
+def stuck_rule_for(bot, j: Journal, f: dict | None = None) -> tuple[str, int] | None:
+    """The stuck-rule alarm for the strategy in force: the hourly agents over the last 24 hours (20 signals at least),
+    the daily trend rule over its last 7 days (3 signals at least). `f`: the funnel already read for that period."""
+    trend = bot.base.trend
+    if f is None:
+        f = funnel(j, judged_since(j, trend=trend))
+    return stuck_rule(f, STUCK_MIN_TREND if trend else STUCK_MIN_SIGNALS)
 
 
 # ---------------------------------------------------------------- strategies created, examined, promoted, removed
@@ -236,6 +255,8 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
     def row(name, role, status, detail, error=None):
         return {"name": name, "role": role, "status": "failing" if error else status,
                 "detail": clean(error, 160) if error else detail}
+    if bot.base.trend:   # the daily trend rule uses no AI, scout, news, forex or lab: only the agents it uses
+        return _trend_rows(bot, j, hours, fresh, beat, err, row)
     rows = []
     coins = len(bot.last_price)
     rows.append(row("Market data", "real Binance prices for every watched coin", "working" if fresh else "idle",
@@ -308,6 +329,50 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
     return rows
 
 
+def _trend_rows(bot, j: Journal, hours: float, fresh: bool, beat: dict, err, row) -> list[dict]:
+    """The roster of the daily trend rule (STRATEGY=trend). It decides once a day, so the rows that act at the daily
+    decisions look back a full day even in a shorter pulse."""
+    from .trend import params
+    window = max(hours, 24)
+    since = since_iso(window)
+    f = funnel(j, since)
+    t = trend_state(bot, j)
+    positions = j.positions()
+    rows = [row("Market data", "real Binance prices: the live price every check, finished daily candles once a day",
+                "working" if fresh else "idle",
+                f"{len(bot.last_price)} coins, last check {ago(beat.get('ts'))}; daily candles "
+                + (f"read for {t['day']}" if t["day"] else "not read yet"), err("market data"))]
+    role = "buys, holds and sells on the finished daily close, once a day after 00:00 UTC (no AI)"
+    held = f"holding {len(t['held'])} of {len(t['coins'])} coins"
+    if t["warning"]:
+        # the last reason a try failed (a coin's daily prices, say), not the give-up notice that repeats the warning
+        why = [e["text"] for e in j.events(since=since) if e["kind"] == "error"
+               and e["text"].lower().startswith("trend ") and "stayed incomplete" not in e["text"]]
+        rows.append({"name": TREND_RULE, "role": role, "status": "failing",
+                     "detail": clean(t["warning"] + (f"; last error: {why[-1]}" if why else ""), 240)})
+    elif t["day"] == t["expected"]:
+        rows.append(row(TREND_RULE, role, "working",
+                        f"decided {t['day']}; in the last {window:g} h: buy signals {f['buy_signals']}, approved "
+                        f"{f['approved']}, sells {f['sells']}; {held}"))
+    else:   # early in the day: the first check after 00:00 UTC decides
+        rows.append(row(TREND_RULE, role, "idle",
+                        f"decides {t['expected']} at the first check after 00:00 UTC (last: {t['day'] or 'not yet'}); {held}"))
+    rows.append(row("Risk manager", f"position size, limits, loss brakes, the emergency stop {params(bot.base)[2]:.0%} "
+                                    "below the entry", "working" if f["decisions"] else "idle",
+                    f"approved {f['approved']} buys; " + (", ".join(f"{k} {n}" for k, n in f["refused"].items())
+                                                          or "no limit refusals")))
+    filled = f["orders"].get("BUY:filled", 0) + f["orders"].get("SELL:filled", 0)
+    failed = f["orders"].get("BUY:failed", 0) + f["orders"].get("SELL:failed", 0)
+    protected = sum(1 for p in positions.values() if p.get("protected") in ("exchange", "emulated"))
+    raised = sum(1 for e in j.events(since=since) if e["kind"] == "protection" and "take-profit order raised" in e["text"])
+    rows.append(row("Execution", "orders on Binance, the emergency stop and take-profit on the exchange (the take-profit "
+                                 "moved up as the price rises)",
+                    "working" if filled or failed or raised or (fresh and positions) else "idle",
+                    f"{filled} orders filled, {failed} failed; {protected}/{len(positions)} positions protected; "
+                    f"take-profit raised {raised} time{'' if raised == 1 else 's'}", err("buy ") or err("sell ")))
+    return rows
+
+
 def roster_text(rows: list[dict]) -> str:
     counts: dict[str, int] = {}
     for r in rows:
@@ -319,6 +384,17 @@ def roster_text(rows: list[dict]) -> str:
 
 
 def agents_text(bot, j: Journal, days: float = 7) -> str:
+    if bot.base.trend:   # no strategy cards, lab or scout: the rule in force and the agents it does not use
+        from .trend import params
+        sma_days, _, stop_pct = params(bot.base)
+        start = (j.get("trend_start") or {}).get("ts")
+        return "\n\n".join([
+            roster_text(roster(bot, j, hours=24)),
+            "📈 Strategy in force: the daily trend rule (STRATEGY=trend) "
+            + (f"since {start[:10]}" if start else "(its first daily decisions are made at the next check)")
+            + f": hold a coin while its daily close is above its {sma_days}-day average, emergency stop {stop_pct:.0%} "
+              "below the entry, decisions once a day after 00:00 UTC",
+            TREND_UNUSED])
     state = j.get("strategy_champion") or {}
     champ = StrategyCard.from_dict(state["card"]) if state else None
     parts = [roster_text(roster(bot, j, hours=24))]
@@ -357,6 +433,11 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
                             if slow else "; plenty of time to spare, the server is not holding the desk back"))
     else:
         lines.append("⏳ No market check finished yet since the start")
+    trend = bot.base.trend
+    warning = None
+    if trend:   # the daily trend rule decides once a day: when it last did, and whether today's decisions are late
+        warning = trend_state(bot, j)["warning"]
+        lines.append(trend_line(bot, j))
     problems = bot.base.problems()
     for p in problems:
         lines.append(f"🛑 Settings problem: {p}")
@@ -364,13 +445,17 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
         lines.append(f"🔧 Corrected at start: {m}")
     f = funnel(j, since_iso(24))
     lines.append("\nLast 24 hours:\n" + funnel_text(f))
-    since = judged_since(j)
-    current = funnel(j, since) if since > since_iso(24) else f
-    if since > since_iso(24):
+    since = judged_since(j, trend=trend)
+    current = funnel(j, since) if trend or since > since_iso(24) else f
+    if trend:   # a few buy signals a week: one day alone says little
+        lines.append(f"Daily trend rule since {since[:10]} (the last 7 days at most): {current['buy_signals']} buy signals, "
+                     f"{current['approved']} approved" + ("; refused: " + ", ".join(f"{k} {n}" for k, n in current["refused"].items())
+                                                         if current["refused"] else ""))
+    elif since > since_iso(24):
         lines.append(f"Since the strategy in force took effect ({since[11:16]} UTC): {current['buy_signals']} buy signals, "
                      f"{current['approved']} approved" + ("; refused: " + ", ".join(f"{k} {n}" for k, n in current["refused"].items())
                                                          if current["refused"] else ""))
-    if (stuck := stuck_rule(current)):
+    if (stuck := stuck_rule_for(bot, j, current)):
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal ({stuck[1]} of {stuck[1]}): check the settings")
     if (bp := j.get("budget_problem")):
         lines.append(f"🛑 Budget: {clean(bp, 400)}")
@@ -379,9 +464,10 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
     if bot.llm:
         budget = bot.llm.effective_daily_budget()
         lines.append(f"Claude: ${bot.llm.spent_today:.2f} spent today" + (f" of ${budget:.2f}" if budget else "")
-                     + (" (budget used up until 00:00 UTC)" if bot.llm.budget_hit else ""))
+                     + (" (budget used up until 00:00 UTC)" if bot.llm.budget_hit else "")
+                     + (" (trend mode: only /review uses Claude)" if trend else ""))
     if getattr(bot, "free_ai", None):
-        lines.append(free_ai_line(bot.free_ai))
+        lines.append(free_ai_line(bot.free_ai) + (" (not used for trades in trend mode)" if trend else ""))
     st = update_status or {}
     if st:
         lines.append(f"Updates: last check {ago(st.get('checked_at'))}, " + (st.get("last_result") or st.get("result") or "no result yet")
@@ -393,7 +479,10 @@ def health_text(bot, j: Journal, version: str, started_at: str, update_status: d
     bad = [r for r in roster_rows if r["status"] == "failing"]
     lines.append(f"Agents: {sum(r['status'] == 'working' for r in roster_rows)} of {len(roster_rows)} working"
                  + (" · failing: " + ", ".join(r["name"] for r in bad) if bad else "") + " (details: /agents)")
-    verdict = "🛑 Needs attention" if (problems or late or bad or stuck_rule(current)) else "✅ All systems working"
+    # late or incomplete daily trend decisions are a warning, not a fault: the desk retries them by itself
+    serious = problems or late or stuck or [r for r in bad if not (warning and r["name"] == TREND_RULE)]
+    verdict = ("🛑 Needs attention" if serious else "⚠️ Working, with a warning (📈 below)" if warning
+               else "✅ All systems working")
     return verdict + "\n" + "\n".join(lines)
 
 
@@ -404,7 +493,9 @@ def pulse_text(bot, j: Journal, hours: float, version: str) -> str:
     errors = sum(1 for e in j.events(since=since_iso(hours)) if e["kind"] == "error")
     lines = [f"💓 Desk pulse, last {hours:g} h · version {version}", funnel_text(f),
              f"Agents working: {working} of {len(rows)} · errors: {errors}"]
-    if (stuck := stuck_rule(funnel(j, judged_since(j)))):
+    if bot.base.trend:   # most pulses fall between two daily decisions: say when the rule last decided
+        lines.insert(2, trend_line(bot, j))
+    if (stuck := stuck_rule_for(bot, j)):
         lines.append(f"🛑 '{stuck[0]}' refused every buy signal: send /health")
     lines.append(f"Next check in about {(bot.pace or {}).get('minutes', bot.s.cycle_minutes)} min. /health for details.")
     return "\n".join(lines)
@@ -483,7 +574,7 @@ def trend_state(bot, j: Journal) -> dict:
     """The daily trend decisions at a glance (STRATEGY=trend): the last day decided, whether today's decisions are
     late or gave up, and how many coins are held. `warning` is a sentence for the owner, or None when all is well."""
     from .orchestrator import TREND_TRIES
-    now = dt.datetime.now(dt.timezone.utc)
+    now = now_utc()
     expected = (now.date() - dt.timedelta(days=1)).isoformat()   # the last finished day
     day = j.get("trend_day")
     tries = j.get("trend_tries") or {}
@@ -619,6 +710,16 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
                  + (" · order failures: " + "; ".join(f"{f['symbol']} x{f['n']}: {clean(f['error'], 80)}" for f in failed)
                     if failed else ""))
     totals = {"buy_signals": 0, "approved": 0, "claude": 0, "news": 0, "tilted": 0, "refused": {}}
+    trend = bot.base.trend
+    if trend:   # the rule's own measure per coin (its close against its average) and its last daily decision
+        from .trend import params
+        sma_days = params(bot.base)[0]
+        top = {x[0]: x[1] for x in j.db.execute(
+            "SELECT symbol, MAX(combined_score) FROM decisions WHERE source='trend' AND ts >= ? AND reports != ? "
+            "GROUP BY symbol", (since, json.dumps({"trend": None})))}   # a coin without enough history has no average
+        last = {x["symbol"]: (x["action"], x["risk_reason"]) for x in j.db.execute(
+            "SELECT symbol, action, risk_reason FROM decisions WHERE id IN "
+            "(SELECT MAX(id) FROM decisions WHERE source='trend' GROUP BY symbol)")}
     lines.append("\nPer coin (buy signals → approved; what stopped the rest):")
     for sym, c in sorted(coins.items(), key=lambda x: -x[1]["buy_signals"]):
         stops = sorted(c["refused"].items(), key=lambda x: -x[1])
@@ -630,6 +731,12 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
         if c["tilted"]:
             extra.append(f"portfolio tilt {c['tilted']}")
         best = f", best score {c['best_score']:+.2f}" if c["best_score"] is not None else ""
+        if trend:
+            x = top.get(sym)
+            best = ("" if x is None else f", furthest above its {sma_days}-day average {x:+.1%}" if x > 0
+                    else f", never above its {sma_days}-day average (closest {x:+.1%})")
+            if sym in last:
+                best += f"; last daily decision: {last[sym][0]} ({last[sym][1]})"
         lines.append(f"• {sym.removesuffix('USDT')}: {c['buy_signals']} → {c['approved']}"
                      + (f" ({'; '.join(extra)})" if extra else "") + best)
         for k in ("buy_signals", "approved", "claude", "news", "tilted"):
@@ -639,7 +746,9 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
     if not coins:
         lines.append("• no decisions recorded in this period")
     r = None
-    if replay is not None and coins:
+    if trend and days < 2:
+        lines.append("\n(the trend rule decides once a day: a replay needs at least 2 finished days)")
+    elif replay is not None and coins:
         try:
             r = replay(sorted(coins), days)
         except Exception as e:  # noqa: BLE001 - the replay needs the network; the rest of the report stands alone
@@ -650,7 +759,9 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
         lines.append(f"\n{what}: {r['trades']} trades, {r['return_pct']:+.2f}% (holding the coins: "
                      + (f"{r['basket_hold_pct']:+.1f}%)" if r.get("basket_hold_pct") is not None else "n/a)"))
         gap = r["trades"] - opened
-        if gap > max(2, r["trades"] * 0.3):
+        if trend:   # one or two trades a week: compare what each holds, not how often each traded
+            lines += _trend_replay_lines(bot, j, r, closed[0], last)
+        elif gap > max(2, r["trades"] * 0.3):
             causes = sorted([("AI vetoes", totals["claude"]), ("bad-news blocks", totals["news"]),
                              ("the head trader's portfolio tilt", totals["tilted"])]
                             + [(k, n) for k, n in totals["refused"].items()], key=lambda x: -x[1])
@@ -662,3 +773,32 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
             lines.append("✅ The live desk traded about as often as its rules: no hidden blocker. Fewer trades mean the "
                          "market gave fewer signals that pass the rules.")
     return "\n".join(lines)
+
+
+def _trend_replay_lines(bot, j: Journal, r: dict, live_closed: int, last: dict) -> list[str]:
+    """The replayed daily trend rule against the live desk: trades closed, and the coins each holds at the end.
+    `last`: each coin's latest daily decision (action, risk reason)."""
+    out = [f"Closed trades: {r['trades']} in the replay, {live_closed} live"]
+    if r.get("holding") is None:
+        return out
+    positions = j.positions()
+    rule = set(r["holding"])
+    desk = {s for s in positions if s in bot.base.symbols}
+
+    def names(syms):
+        return ", ".join(s.removesuffix("USDT") for s in sorted(syms))
+    if rule == desk:
+        out.append(f"✅ The desk holds what its rule would hold ({names(desk) or 'no coins'})")
+        return out
+    start = (j.get("trend_start") or {}).get("ts") or ""
+    for sym in sorted(rule - desk):
+        why = last.get(sym)
+        out.append(f"⚠️ The rule would hold {sym.removesuffix('USDT')} but the desk does not"
+                   + (f": its last daily decision was {why[0]} ({why[1]})" if why else ""))
+    for sym in sorted(desk - rule):
+        adopted = start and positions[sym]["opened_at"] < start
+        out.append(f"⚠️ The desk holds {sym.removesuffix('USDT')} but the replayed rule would not: "
+                   + ("it was bought by the hourly strategy and taken over by the rule" if adopted else
+                      "the replay sold it or did not buy it (the replay starts the period with cash only and trades at "
+                      "each day's opening price, the desk at its first check of the day)"))
+    return out

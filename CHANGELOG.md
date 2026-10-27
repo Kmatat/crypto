@@ -5,6 +5,32 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.1 - 2026-10-27
+
+The daily trend strategy, finished and made safer (independent reviews of 1.7.0 by subsystem):
+- Orders: a coin whose live price could not be read no longer stops the day's decisions at every check; a take-profit
+  raise that Binance refuses puts the previous protective pair back (the coin is never left without its stop), and is
+  announced only when it really happened; a position taken over from the hourly strategy is marked as taken over only
+  once its new stop is really in place; the take-profit placed is what Binance accepts (at most twice its recent
+  average price); a coin that offers only stop-limit orders gets a clear message instead of a refused order at every
+  check (the desk watches its stop itself); between checks the desk sells a trend position only at its emergency stop,
+  never at the take-profit placeholder; a sale filled in part is tried again; the daily step is retried for at least
+  an hour.
+- `/health`, `/agents`, the pulse and `/diagnose` describe the trend desk: the date of the last daily decision (with
+  a warning when it has not run or gave up), the agents that work in trend mode, and `/diagnose` compares what the
+  desk holds with what the rule, replayed on the same days, would hold. The notebook (STRATEGY, README, TRADES,
+  PERFORMANCE and the digest `/review` reads) is written for the trend rule. The remaining Telegram commands and the
+  daily summary of the trend decisions follow in the next release.
+- The weekly lab can no longer promote, roll back or record a strategy card while the trend rule trades (`/approve`
+  no longer fails in trend mode, it finds nothing to approve), nor judge an
+  hourly card on the trend rule's trades after a switch back (its record restarts at the switch, its lessons leave out
+  the trend trades, and challengers approved before the trend period are tested again).
+- Both strategies: paper trading no longer fills a stop that was moved above the price at that higher price (Binance
+  refuses such an order; the desk now sells at the market price), so paper results in fast falls were slightly too
+  good; a stop-loss that filled in part and then expired on the thin demo book is recorded as a stop-loss at once.
+- Settings: an hourly desk with more than 3 positions or more than 10% per position is told that the hourly strategy
+  trades within those limits.
+
 ## 1.7.0 - 2026-10-27
 
 New: **the daily trend strategy** (`STRATEGY=trend`, chosen in `desk setup` step 5; README "The daily trend

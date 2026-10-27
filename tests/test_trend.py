@@ -226,9 +226,10 @@ def test_after_an_emergency_stop_the_coin_is_not_bought_straight_back():
 def test_unreadable_daily_prices_are_retried_then_left_for_tomorrow():
     bot, j = trend_desk({"AAAUSDT": candles(wavy(130, 100, 0.02))}, symbols=["AAAUSDT", "ZZZUSDT"])
     bot.market.prices["ZZZUSDT"] = 1.0
-    for _ in range(3):
+    for _ in range(4):
         bot.run_cycle()
-        assert j.get("trend_day") is None
+        assert j.get("trend_day") is None                 # 4 tries, but not yet an hour of retrying
+    j.set("trend_tries", {**j.get("trend_tries"), "first": j.get("trend_tries")["first"] - 3700})
     bot.run_cycle()
     assert j.get("trend_day") is not None and "AAAUSDT" in j.positions()
 
@@ -327,6 +328,7 @@ def test_a_retried_step_records_each_decision_once():
     bot, j = trend_desk({"AAAUSDT": candles(wavy(130, 100, 0.02))}, symbols=["AAAUSDT", "ZZZUSDT"])
     bot.market.prices["ZZZUSDT"] = 1.0
     bot.run_cycle()                                   # buys AAA; ZZZ's prices cannot be read: tried again
+    j.set("trend_tries", {**j.get("trend_tries"), "first": j.get("trend_tries")["first"] - 3700})
     out = []
     for _ in range(3):
         out += bot.run_cycle()
@@ -346,3 +348,49 @@ def test_a_coin_priced_far_off_on_the_demo_exchange_is_not_bought():
     assert list(j.positions()) == ["AAAUSDT"]
     why = j.db.execute("SELECT reasoning FROM decisions WHERE symbol='BBBUSDT' ORDER BY id DESC").fetchone()[0]
     assert "demo exchange prices it" in why and "-50.0%" in why
+
+
+def test_the_lab_never_promotes_rolls_back_or_records_a_card_in_trend_mode():
+    from trader.lab import Lab
+    from trader.strategy import StrategyCard
+    j = Journal(":memory:", 10_000)
+    s = Settings(offline=True, strategy="trend", symbols=list(trend.TESTED_COINS), max_open_positions=8)
+    lab = Lab(s, j, client=None)
+    card = lab.champion()
+    assert j.get("strategy_champion") is None and not card.violations()   # positions clamped to the card bound (3)
+    assert card.max_open_positions == 3
+    j.set("strategy_challengers", [{"card": StrategyCard(name="x").to_dict(), "status": "ready"}])
+    assert lab.promote(StrategyCard(name="x").id, by="owner") is None and lab.rollback("r") is None
+    assert lab.watch_live() is None and j.get("strategy_champion") is None
+
+
+def test_switching_back_to_hourly_restarts_the_cards_record():
+    from trader.strategy import StrategyCard
+    j = Journal(":memory:", 10_000)
+    card = StrategyCard(name="approved")
+    j.set("strategy_champion", {"card": card.to_dict(), "since": "2026-01-01T00:00:00+00:00", "by": "owner",
+                                "previous": StrategyCard(name="old").to_dict()})
+    j.set("strategy_challengers", [{"card": StrategyCard(name="c").to_dict(), "status": "ready"}])
+    j.set("strategy_mode", "trend")
+    msg = Orchestrator(Settings(offline=True, symbols=["BTCUSDT"]), j).note_strategy_mode()
+    assert "trailing stop" in msg[0]
+    assert j.get("strategy_champion")["since"] > "2026-10-01" and j.get("strategy_challengers")[0]["status"] == "lab_passed"
+    assert j.get("strategy_history")[-1]["note"].startswith("STRATEGY=hourly again")
+
+
+def test_the_lessons_leave_out_trades_from_before_a_switch():
+    from trader.agents.research import ResearchAgent
+    j = Journal(":memory:", 10_000)
+    now = dt.datetime.now(dt.timezone.utc)
+    for days, pnl in ((5, -1.0), (1, 2.0)):
+        t = (now - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        j.db.execute("INSERT INTO closed_trades (symbol, opened_at, closed_at, entry_price, exit_price, qty, cost, pnl, "
+                     "pnl_pct, exit_reason) VALUES ('BTCUSDT', ?, ?, 1, 1, 1, 100, ?, 0, 'signal')", (t, t, pnl))
+    j.db.commit()
+    since = (now - dt.timedelta(days=3)).isoformat(timespec="seconds")
+    assert ResearchAgent.lessons(j)["trades"] == 2 and ResearchAgent.lessons(j, since=since)["trades"] == 1
+
+
+def test_hourly_limits_above_the_card_bounds_are_reported():
+    assert any("at most 3 positions" in p for p in Settings(offline=True, max_open_positions=8).problems())
+    assert not any("at most 3 positions" in p for p in Settings(offline=True).problems())

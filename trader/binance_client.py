@@ -92,6 +92,8 @@ class BinanceClient:
             sym = info["symbols"][0]
             f = {x["filterType"]: x for x in sym["filters"]}
             notional = f.get("NOTIONAL") or f.get("MIN_NOTIONAL") or {}
+            side = f.get("PERCENT_PRICE_BY_SIDE") or {}
+            plain = f.get("PERCENT_PRICE") or {}
             self._filters[symbol] = {
                 "step_size": f.get("LOT_SIZE", {}).get("stepSize", "0.00000100"),
                 "min_qty": float(f.get("LOT_SIZE", {}).get("minQty", 0)),
@@ -99,8 +101,15 @@ class BinanceClient:
                 "tick_size": f.get("PRICE_FILTER", {}).get("tickSize", "0.00000001"),
                 "oco_allowed": bool(sym.get("ocoAllowed", False)),
                 "order_types": list(sym.get("orderTypes", [])),
+                # a sell limit must lie within these multiples of the exchange's recent average price (0 = no rule)
+                "ask_up": float(side.get("askMultiplierUp") or plain.get("multiplierUp") or 0),
+                "ask_down": float(side.get("askMultiplierDown") or plain.get("multiplierDown") or 0),
             }
         return self._filters[symbol]
+
+    def avg_price(self, symbol: str) -> float:
+        """The exchange's average price of the last few minutes, which its percent-price rules judge orders by."""
+        return float(self._request("GET", "/api/v3/avgPrice", {"symbol": symbol})["price"])
 
     # ---- account / orders (signed) -------------------------------------
     def balances(self) -> dict[str, float]:

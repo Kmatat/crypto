@@ -13,6 +13,9 @@ by hand, and nothing in it can change how the desk trades.
   data/notes/DIARY.md            the notable moments in order: starts, trades, brakes, scout, lab, promotions
   data/notes/PERFORMANCE.md      results, goals, the week-by-week learning curve, the Claude scorecard
   data/notes/weekly/<week>.md    one snapshot a week, written once: what was known and decided at the time
+
+With the daily trend rule (STRATEGY=trend, trader/trend.py) STRATEGY.md describes the rule, its settings and each
+coin's latest daily decision instead; the hourly strategy's cards are kept as they were, for STRATEGY=hourly.
 """
 from __future__ import annotations
 
@@ -21,7 +24,9 @@ import json
 import logging
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
+from . import trend
 from .ai_router import effective_order
 from .config import Settings
 from .journal import Journal
@@ -53,6 +58,9 @@ STATUS_WORDS = {"proposed": "proposed, not yet examined", "lab_passed": "passed 
                 "lab_failed": "failed the exam", "ready": "passed exam and forward test: awaiting the owner",
                 "forward_failed": "failed the forward test", "promoted": "promoted to champion",
                 "rejected": "rejected"}
+TREND_LABEL = "daily trend rule"
+ADOPTED = "{}: the position opened by the hourly strategy now follows the trend rule"   # the orchestrator's diary line
+SWITCHED_BACK = "The owner switched the desk back to the hourly agents"
 
 
 # ---------------------------------------------------------------- small helpers
@@ -107,6 +115,11 @@ def _loads(text):
         return json.loads(text) if text else {}
     except (TypeError, ValueError):
         return {}
+
+
+def _in_era(era: tuple[str, str | None] | None, ts: str) -> bool:
+    """Is the ISO time `ts` inside the (start, end-or-None) period?"""
+    return era is not None and era[0] <= ts and (era[1] is None or ts < era[1])
 
 
 # ---------------------------------------------------------------- strategy helpers
@@ -353,21 +366,66 @@ class Notes:
             return None
         return dict(r)
 
+    # ---- the daily trend strategy (STRATEGY=trend) ----
+    def trend_since(self) -> str:
+        """The day the daily trend rule's record began (its first decisions), for the owner's texts."""
+        start = (self.j.get("trend_start") or {}).get("ts")
+        return start[:10] if start else "its first check"
+
+    def trend_era(self) -> tuple[str, str | None] | None:
+        """(start, end or None) of the daily trend rule's latest record: from its first decisions until the owner
+        switched back to the hourly strategy. None before the rule has decided anything."""
+        start = (self.j.get("trend_start") or {}).get("ts")
+        if not start:
+            return None
+        end = self.j.db.execute("SELECT ts FROM events WHERE kind='strategy' AND text LIKE ? AND ts >= ? ORDER BY id "
+                                "LIMIT 1", (SWITCHED_BACK + "%", start)).fetchone()
+        return start, end[0] if end else None
+
+    def _taken_over(self, symbol: str, opened_at: str, closed_at: str | None = None) -> str | None:
+        """When the daily trend rule took over a position the hourly strategy had opened, or None. An open position
+        counts only while the desk trades the rule and the rule still manages it (trend_positions)."""
+        start = (self.j.get("trend_start") or {}).get("ts")
+        if not start or opened_at >= start:   # never traded the rule, or opened under it: nothing was taken over
+            return None
+        if closed_at is None and not (self.s.trend and (self.j.get("trend_positions") or {}).get(symbol) == opened_at):
+            return None
+        row = self.j.db.execute("SELECT ts FROM events WHERE kind='strategy' AND text LIKE ? AND ts >= ? AND ts <= ? "
+                                "ORDER BY id LIMIT 1", (ADOPTED.format(symbol) + "%", opened_at, closed_at or "9999")).fetchone()
+        return row[0] if row else (None if closed_at else start)
+
+    def _strategy_label(self, symbol: str, opened_at: str, hist: list[dict], entry: dict | None,
+                        closed_at: str | None = None) -> str:
+        """Which strategy a position or trade belongs to: the daily trend rule's own buys (`entry` is the decision
+        logged for the buy), a position of the hourly strategy the rule took over, or the hourly champion in force."""
+        if (entry and entry.get("source") == "trend") or (entry is None and _in_era(self.trend_era(), opened_at)):
+            return TREND_LABEL
+        who = champion_at(hist, opened_at)
+        label = f"{who.get('name')} [{who.get('id')}]" if who else "owner settings"
+        if since := self._taken_over(symbol, opened_at, closed_at):
+            return f"{label}, managed by the daily trend rule since {since[:10]}"
+        return label
+
     # ---- README ----
     def readme_md(self) -> str:
         s = self.s
         now = dt.datetime.now(dt.timezone.utc).strftime(STAMP)
         mode = {"testnet": "Binance demo exchange (testnet, fake money)", "simulation": "paper trading at real prices"}
-        rows = [["Trading mode", mode.get(s.mode, s.mode) + (" - offline test" if s.offline else "")],
-                ["Starting balance", f"${s.starting_balance:,.0f}"],
+        ai_cap = (f"${s.ai_daily_budget_usd:.2f} a day"
+                  + (f" and at most {s.ai_pct_month():g}% of the account a month" if s.ai_pct_month()
+                     else " (no percentage cap on demo money; the owner's /aibudget changes it)"))
+        account = [["Trading mode", mode.get(s.mode, s.mode) + (" - offline test" if s.offline else "")],
+                   ["Starting balance", f"${s.starting_balance:,.0f}"]]
+        updates = ["Code updates", "tested before they restart the desk; rolled back if they fail" +
+                   ("" if s.auto_update else " (installed only when the owner sends /update)")]
+        if s.trend:
+            return self._trend_readme(now, account, ai_cap, updates)
+        rows = [*account,
                 ["Position cap", f"{s.max_position_pct:.0%} of equity, at most {s.max_open_positions} positions"],
                 ["Daily loss brake", f"{s.max_daily_loss_pct:.0%}: no new buys for the rest of the day"],
                 ["Overall loss brake", f"{s.max_drawdown_pct:.0%} below the start: pause {s.brake_pause_days} days, "
                                        f"then half size until half the loss is recovered"],
-                ["AI budget", f"${s.ai_daily_budget_usd:.2f} a day"
-                              + (f" and at most {s.ai_pct_month():g}% of the account a month" if s.ai_pct_month()
-                                 else " (no percentage cap on demo money; the owner's /aibudget changes it)")
-                              + "; the free rules take over when it is spent"],
+                ["AI budget", ai_cap + "; the free rules take over when it is spent"],
                 ["Free AI", (f"{s.free_ai_provider} ({', '.join(s.free_ai_models) or 'its recommended models'})"
                              + (f", {effective_order(s, self.j)}" if s.use_claude else "")
                              + ": it costs nothing and is rationed by the provider's daily allowance"
@@ -376,8 +434,7 @@ class Notes:
                 ["Strategy changes", f"at most {MAX_CHANGES} parameters at a time, inside the bounds, after the exam and "
                                      f"the forward test, " + ("promoted automatically" if s.auto_promote else
                                                              "and only with the owner's /approve")],
-                ["Code updates", "tested before they restart the desk; rolled back if they fail" +
-                                 ("" if s.auto_update else " (installed only when the owner sends /update)")]]
+                updates]
         files = [["README.md", "this file"],
                  ["STRATEGY.md", "the champion strategy, its exam, every challenger and why it passed or failed, the lineage"],
                  ["strategies/<id>.md", "one file per strategy card, with the exact command that replicates its backtest"],
@@ -404,8 +461,63 @@ class Notes:
             params_table(StrategyCard.from_settings(self.s)),
             "", "_The 'Value' column shows the owner's settings; a champion may differ within the allowed range._"])
 
+    def _trend_readme(self, now: str, account: list[list], ai_cap: str, updates: list) -> str:
+        """README for the daily trend rule: no laboratory, no champion; the rule is fixed in code."""
+        s = self.s
+        sma_days, vol_target, stop_pct = trend.params(s)
+        rows = [*account,
+                ["Strategy", "the daily trend rule (STRATEGY=trend): one decision a day, at the first check after 00:00 "
+                             "UTC, on finished daily closes; no AI in the decisions"],
+                ["Position cap", f"each coin gets an equal share of the account (1/{max(1, len(s.symbols))}), made smaller "
+                                 f"for coins that swing more than {vol_target:.0%} a year, and never more than "
+                                 f"{s.max_position_pct:.0%} of equity; at most {s.max_open_positions} positions"],
+                ["Emergency stop", f"{stop_pct:.0%} below the entry, on the exchange; after it fires the coin is bought "
+                                   "again only once its trend has reset"],
+                ["Take-profit", f"an order at {trend.TAKE_MULT:g}x the price (Binance's protective pair needs one), raised "
+                                f"whenever the price comes within {trend.RAISE_AT - 1:.0%} of it: no profit cap"],
+                ["Daily loss brake", f"{s.max_daily_loss_pct:.0%}: no new buys for the rest of the day"],
+                ["Overall loss brake", f"{s.max_drawdown_pct:.0%} below the start: no new buys for {s.brake_pause_days} "
+                                       "days, then half size until half the loss is recovered; coins already held ride "
+                                       "on with their emergency stop"],
+                ["AI budget", ai_cap + "; no AI takes part in the trading decisions"],
+                ["Free AI", f"{s.free_ai_provider}: not asked about trades under the daily trend rule"
+                            if s.use_free_ai else "not configured"],
+                ["Strategy changes", "none by the desk: the rule is fixed in code (trader/trend.py); only the owner's "
+                                     "TREND_SMA_DAYS, TREND_VOL_TARGET and TREND_STOP_PCT (desk setup) change it"],
+                updates]
+        files = [["README.md", "this file"],
+                 ["STRATEGY.md", "the daily trend rule, its settings, each coin's latest daily decision, its live record"],
+                 ["strategies/<id>.md", "the hourly strategy's cards, kept unchanged for STRATEGY=hourly (not used now)"],
+                 ["TRADES.md", "every trade: the decision at entry, the exit, which strategy it belonged to"],
+                 ["DIARY.md", "the notable moments in order (starts, trades, brakes, take-profit raises, strategy switches)"],
+                 ["PERFORMANCE.md", "results, the trend rule's goals (counted from its start), the week-by-week record"],
+                 ["weekly/<week>.md", "the hourly strategy's weekly pages, never rewritten (the trend rule adds none)"]]
+        return "\n".join([
+            "# Trading desk notebook", "",
+            f"_Generated {now} UTC by the desk itself from its trade journal, after every market check. "
+            f"Nothing here is written by hand. Running version: {self.version()}._", "",
+            f"The desk trades the daily trend rule (STRATEGY=trend) since {self.trend_since()}. There is no laboratory "
+            "and no AI in the decisions: the rule is fixed, and it is expected to win only 20-30% of its trades, with a "
+            "few long winners paying for many small losses.", "",
+            "## How to use this with Claude", "",
+            "Upload this folder (or the zip that `/notes` sends on Telegram) to Claude and ask, for example:", "",
+            "- \"Read TRADES.md: are the losses small and the winners long? Compare the live record with /trendtest's "
+            "replay of the same weeks.\"",
+            "- \"Read STRATEGY.md and DIARY.md: did the desk follow its rule every day (one decision after 00:00 UTC, a "
+            "sale after each close at or below the average, no buy straight back after an emergency stop)?\"",
+            "- \"Read PERFORMANCE.md: judged on the profit factor, the worst drop and the result against just holding "
+            "the same coins, is there enough evidence yet, and what does it say?\"",
+            "- \"Read DIARY.md for the last two weeks. Did anything break, and did the desk recover correctly?\"", "",
+            "Claude can comment; it cannot change anything. Only the owner changes the rule's settings (desk setup). The "
+            "guardrails below are fixed in code and in the owner's settings; no AI answer and no note in this folder can "
+            "change them.", "",
+            "## Files", "", _table(["File", "What it holds"], files), "",
+            "## Fixed guardrails", "", _table(["Rule", "Setting"], rows)])
+
     # ---- STRATEGY ----
     def strategy_md(self, trades: list[dict], hist: list[dict]) -> str:
+        if self.s.trend:
+            return self.trend_strategy_md(trades)
         state = self.j.get("strategy_champion")
         lines = ["# Strategy", ""]
         if not state:
@@ -463,11 +575,84 @@ class Notes:
         lines.append(f"_Last laboratory run: {_ts(last) + ' UTC' if last else 'never'}._")
         return "\n".join(lines)
 
+    def trend_strategy_md(self, trades: list[dict]) -> str:
+        """STRATEGY.md for the daily trend rule: the rule, its settings, and what it last decided for each coin."""
+        from .health import trend_line
+        s = self.s
+        sma_days, vol_target, stop_pct = trend.params(s)
+        coins = [c.removesuffix("USDT") for c in s.symbols]
+        lines = [f"# Strategy: the daily trend rule (STRATEGY=trend), in force since {self.trend_since()}", "",
+                 trend_line(SimpleNamespace(base=s), self.j), "",
+                 "## The rule", "",
+                 "- Once a day, at the first check after the daily close (00:00 UTC), the desk reads each coin's finished "
+                 "daily closes. No AI takes part in any decision.",
+                 f"- It holds a coin while its close is above its {sma_days}-day average, and sells it after a close at or "
+                 "below the average.",
+                 f"- A coin it buys gets an equal share of the account (1/{max(1, len(coins))}), made smaller when the "
+                 f"coin swings more than {vol_target:.0%} a year, and never more than {s.max_position_pct:.0%} "
+                 "(MAX_POSITION_PCT).",
+                 f"- When more coins qualify than there are free positions, the strongest {trend.MOMENTUM_DAYS}-day gain "
+                 "goes first.",
+                 f"- An emergency stop {stop_pct:.0%} below the entry price sits on the exchange. After it fires, the coin "
+                 "is bought again only once it has closed at or below its average and then risen above it again.",
+                 "- There is no profit target: the rule expects to win only 20-30% of its trades, and a few long trends "
+                 "pay for the many small losses. Binance's protective order pair still needs a take-profit price, so the "
+                 f"desk places it at {trend.TAKE_MULT:g}x the price and raises it whenever the price comes within "
+                 f"{trend.RAISE_AT - 1:.0%} of it.",
+                 "- The rule is fixed in code (trader/trend.py). Only the owner changes its settings, with desk setup.", "",
+                 "## Settings", "",
+                 _table(["Setting", "In force", "As tested"], [
+                     ["Average the close is compared with (TREND_SMA_DAYS)", f"{sma_days} days", f"{trend.TESTED[0]} days"],
+                     ["Yearly swing above which a coin's share is cut (TREND_VOL_TARGET)", f"{vol_target:.0%}",
+                      f"{trend.TESTED[1]:.0%}"],
+                     ["Emergency stop below the entry (TREND_STOP_PCT)", f"{stop_pct:.0%}", f"{trend.TESTED[2]:.0%}"],
+                     ["Positions at once (MAX_OPEN_POSITIONS)", f"{s.max_open_positions}",
+                      f"one per coin ({len(trend.TESTED_COINS)})"],
+                     ["Coins (SYMBOLS)", ", ".join(coins) or "none",
+                      ", ".join(c.removesuffix("USDT") for c in trend.TESTED_COINS)],
+                     ["Take-profit order", f"{trend.TAKE_MULT:g}x the price, raised within {trend.RAISE_AT - 1:.0%}",
+                      f"{trend.TAKE_MULT:g}x the price, raised within {trend.RAISE_AT - 1:.0%}"]]), ""]
+        if (s.trend_sma_days, s.trend_vol_target, s.trend_stop_pct) != (sma_days, vol_target, stop_pct):
+            lines += [f"Your settings (TREND_SMA_DAYS {s.trend_sma_days}, TREND_VOL_TARGET {s.trend_vol_target:g}, "
+                      f"TREND_STOP_PCT {s.trend_stop_pct:g}) are outside the allowed ranges (10-400 days, 0.05-2, "
+                      "0.05-0.5), so the tested values are used.", ""]
+        if s.max_open_positions < len(coins):
+            lines += [f"Only {s.max_open_positions} positions at once for {len(coins)} coins: the rule holds only the "
+                      f"strongest {s.max_open_positions}. It was tested with a position for every coin.", ""]
+        rows = []
+        for sym in s.symbols:
+            r = self.j.db.execute("SELECT ts, action, risk_reason, reasoning FROM decisions WHERE symbol=? AND "
+                                  "source='trend' ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
+            if r is None:
+                rows.append([sym.removesuffix("USDT"), "-", "no daily decision yet", "", ""])
+                continue
+            day = (dt.date.fromisoformat(r["ts"][:10]) - dt.timedelta(days=1)).isoformat()
+            rows.append([sym.removesuffix("USDT"), day, r["action"], r["risk_reason"], r["reasoning"]])
+        lines += ["## Each coin's latest daily decision", "",
+                  _table(["Coin", "Day", "Decision", "Risk check", "Why"], rows), "",
+                  "_Day: the finished UTC day the decision is based on; the desk decides at its first check after "
+                  "00:00 UTC the next day._", ""]
+        era = self.trend_era()
+        lines += [f"## Live record (trades the rule opened since {self.trend_since()})", "",
+                  live_record_text(live_record(trades, [era] if era else [])), "",
+                  "Compare it with the replay: /trendtest on Telegram replays the same rule on past daily prices with "
+                  "these settings.", ""]
+        cards = self.cards()
+        if cards:
+            champ = next((c for c, e in cards if e is None), None)
+            lines += ["## The hourly strategy's cards", "",
+                      f"{len(cards)} card(s) of the hourly strategy"
+                      + (f" (champion {champ.name} [{champ.id}])" if champ else "")
+                      + " are kept unchanged in strategies/ for STRATEGY=hourly; they are not used while STRATEGY=trend.", ""]
+        return "\n".join(lines)
+
     def card_md(self, card: StrategyCard, entry: dict | None, trades: list[dict], hist: list[dict]) -> str:
         state = self.j.get("strategy_champion") or {}
         champ = StrategyCard.from_dict(state["card"]) if state else None
         is_champ = champ is not None and champ.id == card.id
         status = "champion" if is_champ else STATUS_WORDS.get(entry["status"], entry["status"]) if entry else "known"
+        if is_champ and self.s.trend:
+            status = "champion of the hourly strategy (not in force while STRATEGY=trend)"
         lines = [f"# {card.name} [{card.id}]", "",
                  f"Status: **{status}**. Source: {card.source or 'owner'}. Created {_ts(card.created_at)} UTC"
                  + (f", proposed to the laboratory {_ts(entry.get('proposed_at'))} UTC." if entry else "."), ""]
@@ -519,15 +704,19 @@ class Notes:
                  f"{sum(t['pnl'] for t in trades):+,.2f} USDT · profit factor "
                  f"{round(gross_win / gross_loss, 2) if gross_loss else 'n/a'} · fees paid {fees:,.2f} USDT", ""]
         lines += ["## Open positions", ""]
-        rows = []
+        rows, ruled_any = [], False
+        managed = (self.j.get("trend_positions") or {}) if self.s.trend else {}
         for sym, p in self.j.positions().items():
             px = prices.get(sym, p["entry_price"])
-            who = champion_at(hist, p["opened_at"])
+            ruled = managed.get(sym) == p["opened_at"]   # the rule's exits: an emergency stop, a take-profit it raises
+            ruled_any |= ruled
             rows.append([sym, _ts(p["opened_at"]), _px(p["entry_price"]), _px(px), f"{px * p['qty'] - p['cost']:+,.2f}",
-                         _px(p["stop_loss"]), _px(p["take_profit"]), p.get("protected") or "none",
-                         f"{who.get('name')} [{who.get('id')}]" if who else "owner settings"])
-        lines += [_table(["Coin", "Opened (UTC)", "Entry", "Now", "P&L USDT", "Stop", "Target", "Protection", "Strategy"],
-                         rows), ""]
+                         f"emergency stop {_px(p['stop_loss'])}" if ruled else _px(p["stop_loss"]),
+                         f"take-profit order {_px(p['take_profit'])} (raised as the price rises; no target)" if ruled
+                         else _px(p["take_profit"]), p.get("protected") or "none",
+                         self._strategy_label(sym, p["opened_at"], hist, self.entry_decision(sym, p["opened_at"]))])
+        lines += [_table(["Coin", "Opened (UTC)", "Entry", "Now", "P&L USDT", "Stop", "Take-profit" if ruled_any else "Target",
+                          "Protection", "Strategy"], rows), ""]
         lines += ["## Closed trades (newest first)", ""]
         if not trades:
             lines.append("_none yet_")
@@ -541,16 +730,17 @@ class Notes:
 
     def _trade_block(self, t: dict, hist: list[dict]) -> list[str]:
         coin = t["symbol"].removesuffix("USDT")
-        who = champion_at(hist, t["opened_at"])
+        d = self.entry_decision(t["symbol"], t["opened_at"])
         head = (f"### {_ts(t['closed_at'], '%Y-%m-%d')} {coin} {t['pnl_pct']:+.2f}% ({t['pnl']:+,.2f} USDT) · "
                 f"{t['exit_reason']}")
         out = [head, "",
                f"- Opened {_ts(t['opened_at'])} at {_px(t['entry_price'])}, closed {_ts(t['closed_at'])} at "
                f"{_px(t['exit_price'])} after {_hours(t['opened_at'], t['closed_at']):.1f} h · quantity {t['qty']:.6g} · "
                f"cost {t['cost']:,.2f} USDT",
-               f"- Strategy: {who.get('name') + ' [' + str(who.get('id')) + ']' if who else 'owner settings'}"]
-        d = self.entry_decision(t["symbol"], t["opened_at"])
-        if d:
+               f"- Strategy: {self._strategy_label(t['symbol'], t['opened_at'], hist, d, t['closed_at'])}"]
+        if d and d.get("source") == "trend":   # the rule has no confidence and no agents' reports
+            out.append(f"- Decision at entry: BUY (daily trend rule): {_esc(d.get('reasoning'))}")
+        elif d:
             out.append(f"- Decision at entry: BUY, confidence {d['confidence']:.0%} ({d.get('source') or 'rules'}"
                        + (f", rules said {d['rules_action']}" if d.get("rules_action") and d["rules_action"] != "BUY" else "")
                        + f"): {_esc(d.get('reasoning'))}")
@@ -575,9 +765,11 @@ class Notes:
                 out.append(f"- Why this coin was watched: {_esc(rep['watchlist']['why_watched'])[:160]}")
         else:
             out.append("- Decision at entry: not found in the journal (older record)")
-        if t["exit_reason"].startswith("signal"):
+        if t["exit_reason"].startswith(("signal", "trend:")):
             x = self.exit_decision(t["symbol"], t["closed_at"])
-            if x:
+            if x and x.get("source") == "trend":
+                out.append(f"- Decision at exit: SELL (daily trend rule): {_esc(x.get('reasoning'))}")
+            elif x:
                 out.append(f"- Decision at exit: SELL, confidence {x['confidence']:.0%} ({x.get('source') or 'rules'}): "
                            f"{_esc(x.get('reasoning'))}")
         out.append("")
@@ -618,7 +810,7 @@ class Notes:
             cell["trades"] += 1
             cell["wins"] += t["pnl"] > 0
             cell["pnl"] += t["pnl"]
-        rows = []
+        rows, trend_weeks, era = [], False, self.trend_era()
         gw = gl = 0.0
         for w in sorted(weeks):
             c = weeks[w]
@@ -627,12 +819,14 @@ class Notes:
                     gw += max(t["pnl"], 0)
                     gl += max(-t["pnl"], 0)
             who = champion_at(hist, c["last_ts"])
+            ruled = _in_era(era, c["last_ts"])   # the week ended under the daily trend rule
+            trend_weeks |= ruled
             rows.append([w, f"{c['equity']:,.2f}" if c["equity"] is not None else "n/a",
                          _pct((c["equity"] / start - 1) * 100) if c["equity"] else "n/a", c["trades"], c["wins"],
                          f"{c['pnl']:+,.2f}", f"{gw / gl:.2f}" if gl else ("n/a" if not gw else "∞"),
-                         f"{who.get('name')} [{who.get('id')}]" if who else "owner settings"])
+                         TREND_LABEL if ruled else f"{who.get('name')} [{who.get('id')}]" if who else "owner settings"])
         return _table(["Week", "Equity at end", "Return to date", "Trades closed", "Wins", "P&L in week",
-                       "Profit factor to date", "Champion"], rows)
+                       "Profit factor to date", "Strategy" if trend_weeks else "Champion"], rows)
 
     def performance_md(self, trades: list[dict], hist: list[dict], prices: dict[str, float], scorecard: str) -> str:
         perf = performance(self.j, prices)
@@ -640,7 +834,7 @@ class Notes:
         lines = ["# Performance", "", f"_Figures as of {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC. Open positions "
                  "are valued at the latest prices the desk saw._", "",
                  "## Now", "", "```", report_text(perf, title="Performance"), "", goals_text(g, perf), "```", ""]
-        if scorecard:
+        if scorecard and not self.s.trend:   # the stored scorecard judges the hourly agents; the trend rule asks no AI
             lines += ["## The AI versus the free rules (computed from real later prices)", "", "```", scorecard, "```", ""]
         lines += ["## Week by week (the learning curve)", "", self.weekly_table(trades, hist), ""]
         ai_total = float(self.j.get("ai_spend_total") or 0)
@@ -657,6 +851,11 @@ class Notes:
         hist = self.j.get("strategy_history") or []
         trades = [dict(r) for r in self.j.db.execute("SELECT * FROM closed_trades ORDER BY id")]
         parts = [self.strategy_md(trades, hist), self.performance_md(trades, hist, prices, scorecard)]
+        if self.s.trend:   # the frame for the review: a fixed rule to audit, not a laboratory to steer
+            parts.insert(0, f"The desk runs the fixed daily trend rule (STRATEGY=trend) since {self.trend_since()}: no "
+                            "laboratory, no AI in the decisions; the rule is expected to win 20-30% of its trades with a "
+                            "few large winners. Judge whether it follows its rule and how its live record compares with "
+                            "its replay.")
         recent = ["# Recent trades (newest first)", ""]
         for t in trades[::-1][:trades_limit]:
             recent += self._trade_block(t, hist)

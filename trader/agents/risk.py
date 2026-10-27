@@ -109,6 +109,12 @@ class RiskManagerAgent:
         return new_stop if new_stop >= position["stop_loss"] + 0.25 * atr else None
 
     @staticmethod
+    def trend_exit(position: dict, price: float) -> str | None:
+        """The daily trend rule's own safety net: its emergency stop only (its take-profit is a placeholder that is
+        raised with the price, never a reason to sell)."""
+        return "stop-loss" if price <= position["stop_loss"] else None
+
+    @staticmethod
     def exit_signal(position: dict, price: float) -> str | None:
         if price <= position["stop_loss"]:
             return "stop-loss"

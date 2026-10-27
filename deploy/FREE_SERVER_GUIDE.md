@@ -157,7 +157,7 @@ Messages also arrive automatically:
 - every buy, sell or failed order;
 - when the scout changes the coin list;
 - when the AI changes how often it checks;
-- with the daily trend rule (from version 1.7.1): a short summary of each day's decisions just after 00:00 UTC (sent silently, so it
+- with the daily trend rule (from version 1.7.2): a short summary of each day's decisions just after 00:00 UTC (sent silently, so it
   does not wake you), and a message when a winner's take-profit order is moved up or a position bought by the
   hourly strategy is taken over;
 - a daily report.
@@ -197,7 +197,7 @@ working"* or *"🛑 Needs attention"* with the reason. `/agents` shows each agen
 and the risk limits all agree; in a falling market (Bitcoin under its 200-day average) that can mean days in
 cash. `/health` shows why each buy signal was refused. If one rule refused all of them, that is the
 case to look at. With the daily trend rule a quiet week is normal too: it decides once a day and trades 1-2 times a
-week; `/diagnose` shows the date of its last daily decision (from 1.7.1 `/health` too, with a warning if it has not run).
+week; `/health` shows the date of its last daily decision and warns if it has not run.
 
 ## If the desk says your starting balance is small
 
@@ -263,7 +263,7 @@ trend strategy" has the replays and the risks). To switch:
 
 What to expect: 1-2 trades a week, most of them small losses (1 trade in 4 or 5 wins), and now and then a winner held
 for weeks or months that pays for them. `/report` shows the trend goals: 26 weeks, 30 trades, profit factor 1.5,
-worst drop at most 30%, next to "just holding" the same coins. `/diagnose` shows the date of the last daily decision.
+worst drop at most 30%, next to "just holding" the same coins. `/health` shows the date of the last daily decision.
 To go back, run `desk setup` again and choose **2) Hourly agents**.
 
 ## One-time upgrade of a server installed before automatic updates
