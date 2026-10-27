@@ -636,7 +636,7 @@ class Notes:
 
     def performance_md(self, trades: list[dict], hist: list[dict], prices: dict[str, float], scorecard: str) -> str:
         perf = performance(self.j, prices)
-        g = goals(self.j, perf, prices)
+        g = goals(self.j, perf, prices, trend=getattr(self.s, "trend", False))
         lines = ["# Performance", "", f"_Figures as of {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC. Open positions "
                  "are valued at the latest prices the desk saw._", "",
                  "## Now", "", "```", report_text(perf, title="Performance"), "", goals_text(g, perf), "```", ""]

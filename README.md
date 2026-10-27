@@ -126,6 +126,63 @@ to be notified about new versions instead of installing them automatically. Anyo
 the GitHub repository can change what the server runs, so protect that account with two-factor
 authentication (see the security checklist in the server guide).
 
+## The daily trend strategy (recommended since 1.7.0)
+
+**What it is.** One plain rule instead of the hourly agents: the desk holds a coin while its **daily closing price
+is above its 50-day average**, and sells it the day after it closes below. It decides once a day, at the first
+check after the daily close (00:00 UTC), on finished days only. Each coin gets an equal share of the account
+(1 / number of coins), made smaller when the coin swings wildly (more than 50% a year), and never more than
+`MAX_POSITION_PCT`. A 25% **emergency stop** sits on Binance for every position; after it fires, the coin is bought
+again only once its trend has reset (a close below the average, then above it again). There is **no profit
+target**: the strategy lives on a few long trends that pay for many small losses, so a winner is never cut short.
+No AI decides anything, so it costs nothing to run. Switch it on with `desk setup` (step 5: strategy), or see
+[deploy/FREE_SERVER_GUIDE.md](deploy/FREE_SERVER_GUIDE.md) "Switch to the daily trend strategy".
+
+**Why.** Every replay of the hourly agents on two years of prices lost money after fees (about 200 variants, profit
+factor 0.66-0.73): 4 to 11 small trades a week, each paying 0.2% in fees against a tiny edge. The daily trend rule
+was the only idea that held up in every test the research ran: older years that were never used to choose it,
+coins that were never used to choose it, and the most recent six months.
+
+**What the replays showed** (real Binance daily prices; 8 coins BTC ETH SOL BNB XRP ADA DOGE LINK; one slot per
+coin, at most 10% each when bought, the 25% stop and the desk's loss brakes; 0.1% fee per order plus slippage):
+
+| Period | Trend rule | Just holding the 8 coins | Worst drop (rule) | Trades a week | Winners | Profit factor |
+|---|---|---|---|---|---|---|
+| Jan 2021 - Oct 2023 (boom and crash) | **+334%** | +390% | 40% | 1.7 | 23% | 1.9 |
+| Nov 2021 - Dec 2022 (the crash alone) | **-22%** | -76% | 28% | 1.8 | - | 0.1 |
+| Oct 2023 - Apr 2026 | **+192%** | +127% | 28% | 1.9 | 22% | 1.9 |
+| Last 180 days (to Oct 2026) | **+19%** | +3% | 10% | 1.3 | 30% | 5.1 |
+| Last 365 days (to Oct 2026) | **-4%** | -47% | 17% | 1.4 | 20% | 0.8 |
+
+**How to read it (the business case).**
+- It is a **crash-avoider that rides the long rises**, not a money machine. In a falling year it loses a little while
+  holding loses half; in a strong boom it can trail holding (it sells on every dip below the average and buys back
+  later, a little higher).
+- It **wins only 1 trade in 4 or 5.** That is the design: a losing trade is a small step out; a winner is a trend
+  held for weeks or months. Expect long runs of small losses; judge it on the profit factor and the result against
+  holding, never on the win rate.
+- **The worst drop is real money in a live account**: 28-40% in the replays (the hourly strategy's goal was 10%).
+  The **Calmer** risk level in `desk setup` (`TREND_VOL_TARGET=0.25`) roughly halves the drops (17-24%) and keeps about
+  two thirds of the gain.
+- **Evidence comes slowly**: 1-2 trades a week means about 30 trades in 26 weeks. The trend goals below reflect that.
+- Replays are history, not a promise. The research tested about 200 hourly variants and a handful of daily ones; the
+  daily rule's results held across periods and coins, which is the best protection against a lucky fit that this
+  kind of testing offers, and still no guarantee.
+
+**What changes on the desk.** No market scout (the rule trades your `SYMBOLS` only), no news, forex, Claude or free-AI
+opinions on trades, no head trader and no weekly strategy lab (they work on the hourly strategy). The desk still
+checks every `CYCLE_MINUTES` to look after the protective orders, records everything, reports on Telegram and keeps
+every risk limit (position slots, the daily-loss limit, the 10% overall brake with its 14-day pause). When you switch,
+coins you hold that are not in `SYMBOLS` are sold at the first daily decision; coins in the list are kept and follow
+the rule from then on. `/trendtest [days]` on Telegram replays the rule on your coins over any period, also before
+you switch. `MAX_OPEN_POSITIONS` should equal the number of coins: with fewer slots it holds only the strongest coins
+and earned much less in the tests (3 slots: about +70% instead of +192% in Oct 2023 - Apr 2026).
+
+**Two exchange details.** Binance refuses a sell order priced more than twice the current price, and its protective
+pair always needs a take-profit price; so the desk sets it at 1.9x the price and **moves it up** whenever the price
+comes within 30% of it. It is a placeholder, not a target. And if a coin only supports stop-limit orders, Binance
+also refuses a stop that far below the price; the desk then watches that position itself every 5 minutes.
+
 ## Measuring the strategy before trusting it
 
 `python -m trader backtest --days 180` replays the desk's rule-based decision logic (indicators,
@@ -359,6 +416,11 @@ never raise confidence to recover losses).
 | Worst drop from a peak | ≤ 10% | the pain you would have to stomach with real money |
 | Orders filled | 100% | technical reliability of the Binance connection |
 | Return net of AI cost | > 0 | the AI bill is a real cost: $150/month is 1.5% of a $10,000 account every month |
+
+**With the daily trend strategy** (`STRATEGY=trend`) the gates are those of a slow strategy, counted from the day it
+started (the hourly strategy's earlier trades do not count): at least **26 weeks** and **30 closed trades**, a profit
+factor of at least **1.5**, a worst drop of at most **30%**, every order filled, and a positive return. Compare it
+above all with "just holding" over the same weeks, shown in the same report.
 
 The report also shows what simply holding would have done over the same period: Bitcoin, your watched
 coins, and a "fair blend" that matches the desk's actual exposure (it is in cash most of the time, so 100%

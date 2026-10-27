@@ -26,7 +26,7 @@ import datetime as dt
 import logging
 import time
 
-from . import free_ai
+from . import free_ai, trend
 from .agents.decision import NEWS_VETO, DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
@@ -47,6 +47,8 @@ from .notes import Notes, default_dir
 from .strategy import StrategyCard, summary_line
 
 log = logging.getLogger("orchestrator")
+TREND_TRIES = 4   # checks in a row the daily trend step is tried when a coin's prices or a sale fail
+DEMO_GAP = 0.03   # the demo exchange's price may differ this much from the real market before a buy is refused
 
 
 class Orchestrator:
@@ -77,13 +79,14 @@ class Orchestrator:
             if s.mode == "testnet" and not s.offline else None
         self.testnet = testnet
         self.market = MarketDataAgent(public, s.interval, offline=s.offline)
-        self.scout = MarketScoutAgent(public, testnet, self.ai, s) if public and s.auto_coins else None
+        # the daily trend strategy trades the owner's coins on a measured rule: no scout, head trader or AI decisions
+        self.scout = MarketScoutAgent(public, testnet, self.ai, s) if public and s.auto_coins and not s.trend else None
         self.technical = TechnicalAnalysisAgent()
         self.prediction = PredictionAgent()
         self.news = NewsAgent(self.ai, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
         self.forex = ForexAgent(offline=s.offline)
         self.decision = DecisionAgent(self.ai)
-        self.head = HeadTraderAgent(s, self.journal, self.ai) if s.head_trader else None
+        self.head = HeadTraderAgent(s, self.journal, self.ai) if s.head_trader and not s.trend else None
         self.risk = RiskManagerAgent(s)
         self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
         self.last_price: dict[str, float] = {}
@@ -93,6 +96,8 @@ class Orchestrator:
         self.protect_errors: dict[str, str] = {}  # symbol -> last reason protection could not be placed
         self.pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         self.scout_update: dict | None = None  # set when the watchlist changed this cycle
+        self.trend_report: dict | None = None  # set when the daily trend decisions ran this cycle (Telegram summary)
+        self._trend_logged: set = set()        # (day, coin, action, reason) already recorded: retries add no duplicates
         self.champion_note: str | None = None    # set when the strategy in force was replaced at start (see apply_champion)
         self._scout_retry_at = 0.0
 
@@ -155,6 +160,30 @@ class Orchestrator:
                 f"loss brakes and reports use ${new:,.0f} from now on. (For a completely fresh record instead: "
                 f"`desk reset --force` on the server.)"]
 
+    def note_strategy_mode(self) -> list[str]:
+        """Remember which strategy the record runs. When the owner switches into the daily trend rule, its own record
+        starts afresh: its goals, its re-entry rule after a stop and its first daily decisions count from now."""
+        j, mode = self.journal, ("trend" if self.base.trend else "hourly")
+        was = j.get("strategy_mode")
+        if was is None:   # records from before 1.7.0 never stored it: any non-trend decision means the hourly agents
+            older = j.db.execute("SELECT 1 FROM decisions WHERE source IS NULL OR source != 'trend' LIMIT 1").fetchone()
+            was = "hourly" if older else mode
+        j.set("strategy_mode", mode)
+        if was == mode:
+            return []
+        if mode == "trend":
+            for key in ("trend_day", "trend_tries", "trend_start", "trend_positions"):
+                j.set(key, None)
+            stop = trend.params(self.base)[2]
+            j.event("strategy", "The owner switched the desk to the daily trend rule (STRATEGY=trend)")
+            return [f"🔁 Strategy switched to the daily trend rule. Its first decisions are made at this check, then once a "
+                    f"day after 00:00 UTC. Coins you hold that are in SYMBOLS stay, with a {stop:.0%} emergency stop, while "
+                    f"they close above their average; coins not in SYMBOLS are sold. Its goals count from today; "
+                    f"/trendtest shows the rule on past prices."]
+        j.event("strategy", "The owner switched the desk back to the hourly agents (STRATEGY=hourly)")
+        return ["🔁 Strategy switched back to the hourly agents. Positions the trend rule bought keep their emergency stop "
+                "until the hourly rules sell them or the stop or take-profit fires."]
+
     def portfolio(self) -> dict:
         eq = self.equity()
         start = float(self.journal.get("starting_balance") or eq)
@@ -204,8 +233,12 @@ class Orchestrator:
                                {"added": self.scout_update["added"], "removed": self.scout_update["removed"]})
 
     # ---- strategy card ----
-    def apply_champion(self) -> StrategyCard:
-        """Run whatever strategy card is champion (set by the lab, the owner's /approve, or a rollback)."""
+    def apply_champion(self) -> StrategyCard | None:
+        """Run whatever strategy card is champion (set by the lab, the owner's /approve, or a rollback). The daily trend
+        strategy runs no card: a card's position limit and ATR exits belong to the hourly strategy."""
+        if self.base.trend:
+            self.s = self.base
+            return None
         state = self.journal.get("strategy_champion")
         if state:
             card = StrategyCard.from_dict(state["card"])
@@ -254,6 +287,8 @@ class Orchestrator:
 
     # ---- the cycle ----
     def run_cycle(self) -> list[dict]:
+        if self.base.trend:
+            return self._trend_cycle()
         summary: list[dict] = []
         self.apply_champion()
         try:
@@ -302,15 +337,8 @@ class Orchestrator:
                 log.exception("Market data failed for %s", sym)
                 summary.append({"symbol": sym, "stage": "market data", "error": str(e)})
 
-        if ctx and not self.journal.get("benchmark_start"):  # first cycle: remember where the market was
-            prices = {sym: c["price"] for sym, c in ctx.items() if sym in self.s.symbols}
-            if "BTCUSDT" not in prices and self.market.client is not None:
-                try:
-                    prices["BTCUSDT"] = self.market.client.price("BTCUSDT")
-                except Exception as e:
-                    log.warning("Could not record the Bitcoin benchmark price: %s", e)
-            self.journal.set("benchmark_start", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                                                 "prices": prices})
+        if ctx:
+            self._remember_benchmark({sym: c["price"] for sym, c in ctx.items() if sym in self.s.symbols})
 
         # 3. news (with a market snapshot, so the AI can set the pace) and forex
         positions = self.journal.positions()
@@ -393,10 +421,7 @@ class Orchestrator:
         for sym, c, reports, decision in buys:
             try:
                 verdict = self.risk.review(decision, sym, c["price"], c["technical"]["atr"], self.portfolio())
-                if verdict.get("trip"):
-                    self.journal.set("brake_tripped_at", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
-                    self.journal.event("brake", f"Overall loss brake tripped: {verdict['reason']}. No new buys for "
-                                                f"{self.s.brake_pause_days} days, then half size until half the loss is back.")
+                self._note_brake(verdict)
                 review = c.get("mentor")
                 if verdict["approved"] and review and not review["pass"]:
                     names = ", ".join(review["failed"])
@@ -406,26 +431,7 @@ class Orchestrator:
                 if review:
                     result["mentor"] = MentorAgent.summary(review)
                 if verdict["approved"]:
-                    real = self._real_price(sym, c["price"])   # the real market just before the order
-                    fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
-                    fill["market_price"] = real
-                    self.journal.log_order(sym, "BUY", fill, "signal")
-                    if not fill["ok"]:
-                        self.journal.event("order", f"BUY {sym} failed: {fill.get('error')}")
-                    if fill["ok"]:
-                        self.journal.open_position(sym, fill, verdict["stop_loss"], verdict["take_profit"])
-                        self.journal.event("trade", f"BUY {sym}: {fill['qty']:.6g} at {fill['avg_price']:,.6g} = "
-                                                    f"{fill['quote']:,.2f} USDT · stop {verdict['stop_loss']:,.6g} · target "
-                                                    f"{verdict['take_profit']:,.6g} · confidence {decision['confidence']:.0%} "
-                                                    f"({decision.get('source') or 'rules'}): {str(decision['reasoning'])[:240]}")
-                        position = self.journal.positions()[sym]
-                        if err := self._protect(sym, position):
-                            result["protect_error"] = err
-                            if why := self.risk.exit_signal(position, self.last_price[sym]):
-                                result.update(self._sell(sym, position, why))  # already past an exit level
-                        else:
-                            result["protected"] = self.journal.positions()[sym]["protected"]
-                    result.update(order=fill, stop_loss=verdict["stop_loss"], take_profit=verdict["take_profit"])
+                    result.update(self._buy(sym, decision, verdict))
                 summary.append(result)
             except Exception as e:
                 log.exception("Buy failed for %s", sym)
@@ -437,11 +443,279 @@ class Orchestrator:
         self.notes.refresh(self.last_price, scorecard=self.journal.get("scorecard_text") or "")
         return summary
 
+    # ---- the daily trend strategy (STRATEGY=trend, trader/trend.py) ----
+    def _trend_cycle(self) -> list[dict]:
+        """Every check: the holdings check, exchange exits, the take-profit moved up as prices rise, and the desk's own
+        safety net for a position without exchange orders. Once a day, at the first check after the daily close
+        (00:00 UTC): the rule's sells and buys on the day that just finished."""
+        self.s = self.base
+        self.trend_report = None
+        summary = self.reconcile()
+        coins = list(self.s.symbols)
+        for sym in dict.fromkeys(coins + list(self.journal.positions())):
+            try:
+                price = self.market.price(sym)
+                self.last_price[sym] = price
+                position = self.journal.positions().get(sym)
+                if position is None:
+                    continue
+                position, exit_result = self._sync_protection(sym, position)
+                if exit_result:
+                    summary.append(exit_result)
+                if position is None:
+                    continue
+                position, exit_result = self._raise_take(sym, position, price)
+                if exit_result:
+                    summary.append(exit_result)
+                if position is None:
+                    continue
+                if not self._is_protected(position):
+                    if why := self.risk.exit_signal(position, price):  # desk-side backup
+                        summary.append(self._sell(sym, position, why))
+                        continue
+                    if err := self._protect(sym, position):
+                        summary.append({"symbol": sym, "protect_error": err})
+            except Exception as e:  # one bad coin must not stop the others
+                log.exception("Market data failed for %s", sym)
+                summary.append({"symbol": sym, "stage": "market data", "error": str(e)})
+        self._remember_benchmark({sym: self.last_price[sym] for sym in coins if sym in self.last_price})
+        day = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)).isoformat()  # the last finished day
+        if self.journal.get("trend_day") != day:
+            entries, complete = self._trend_step(coins)
+            summary += entries
+            tries = self.journal.get("trend_tries") or {}
+            tries = {"day": day, "n": (tries.get("n", 0) if tries.get("day") == day else 0) + 1}
+            if complete or tries["n"] >= TREND_TRIES:
+                if not complete:
+                    text = (f"the decisions for {day} stayed incomplete after {TREND_TRIES} tries (see the errors before "
+                            "this one); the coins concerned wait until tomorrow")
+                    self.journal.event("error", f"Daily trend decisions: {text}")
+                    summary.append({"symbol": "TREND", "stage": "trend", "error": text})
+                self.journal.set("trend_day", day)
+                if self.trend_report is not None:
+                    self.trend_report["final"] = True
+            self.journal.set("trend_tries", tries)
+            if self.trend_report is not None:
+                self.trend_report.update(day=day, complete=complete, tries=tries["n"])
+        self.pace = self._next_pace(None, {})
+        self.journal.log_equity(self.equity())
+        self.notes.refresh(self.last_price, scorecard=self.journal.get("scorecard_text") or "")
+        return summary
+
+    def _demo_price_problem(self, sym: str, price: float) -> str | None:
+        """On the Binance demo exchange a coin may be missing or priced far from the real market. The desk values its
+        coins at real prices, so a demo fill at half the real price would show twice the money: such buys are refused
+        (the market scout filters the same way)."""
+        if self.testnet is None:
+            return None
+        try:
+            demo = float(self.testnet.price(sym))
+        except Exception as e:  # noqa: BLE001 - not listed there, or no answer: no buy this time
+            return f"the Binance demo exchange gives no price for it ({e})"
+        if not demo or abs(demo / price - 1) > DEMO_GAP:
+            return (f"the Binance demo exchange prices it at {demo:,.6g}, {demo / price - 1:+.1%} from the real market "
+                    f"({price:,.6g}); paper trading has no such limit")
+        return None
+
+    def _raise_take(self, sym: str, position: dict, price: float) -> tuple[dict | None, dict | None]:
+        """The rule has no profit target, but Binance's protective pair needs one and refuses a sell more than twice
+        the price: once the price is within 30% of the take-profit, move it up to 1.9x the price (stop unchanged)."""
+        if price < position["take_profit"] / trend.RAISE_AT:
+            return position, None
+        take = price * trend.TAKE_MULT
+        log.info("%s: take-profit moved up to %.6g (price %.6g)", sym, take, price)
+        moved, exit_result = self._move_exits(sym, position, position["stop_loss"], take)
+        if moved is not None and exit_result is None and abs(moved["take_profit"] - take) < 1e-9 * take:
+            self.journal.event("protection", f"{sym}: take-profit order raised to {take:,.6g} (price {price:,.6g}, "
+                                             f"{price / position['entry_price'] - 1:+.0%} since the buy) so the trend is not "
+                                             f"cut short; the emergency stop stays at {position['stop_loss']:,.6g}")
+            return moved, {"symbol": sym, "action": "RAISE", "price": price, "entry_price": position["entry_price"],
+                           "take_profit": take, "stop_loss": position["stop_loss"]}
+        return moved, exit_result
+
+    def _trend_step(self, coins: list[str]) -> tuple[list[dict], bool]:
+        """The rule's decisions on the day that just finished: sells first, then buys (strongest 60-day gain first).
+        Returns (summary entries, complete). Not complete when a coin's daily prices or a sale failed: the next check
+        tries again (the step can run twice safely: it only sells what it holds and buys what it does not)."""
+        sma_days, vol_target, stop_pct = trend.params(self.s)
+        now = dt.datetime.now(dt.timezone.utc)
+        if not (start := self.journal.get("trend_start")):
+            # the trend rule's own record starts here: its goals, return and benchmark count from this moment
+            prices = {sym: self.last_price[sym] for sym in coins if sym in self.last_price}
+            if "BTCUSDT" not in prices:   # the reports compare with Bitcoin too
+                try:
+                    prices["BTCUSDT"] = self.market.price("BTCUSDT")
+                except Exception as e:  # noqa: BLE001 - a benchmark, never a reason to stop
+                    log.warning("Could not record the Bitcoin benchmark price: %s", e)
+            start = {"ts": now.isoformat(timespec="seconds"), "equity": round(self.equity(), 2), "prices": prices}
+            self.journal.set("trend_start", start)
+            self.journal.event("strategy", f"The desk now trades the daily trend rule on {', '.join(c.removesuffix('USDT') for c in coins)}: "
+                                           f"hold a coin while its daily close is above its {sma_days}-day average, emergency "
+                                           f"stop {stop_pct:.0%} below the entry, decisions once a day after 00:00 UTC.")
+        since_ms = int(dt.datetime.fromisoformat(start["ts"]).timestamp() * 1000)
+        now_ms = int(now.timestamp() * 1000)
+        out, complete, sigs, days = [], True, {}, {}
+        for sym in coins:
+            try:
+                days[sym] = trend.finished(self.market.daily_candles(sym, trend.history_days(sma_days) + 1), now_ms)
+                sigs[sym] = trend.signal([c["close"] for c in days[sym]], sma_days)
+            except Exception as e:  # noqa: BLE001 - this coin waits; the step runs again at the next check
+                log.warning("Daily prices unavailable for %s: %s", sym, e)
+                complete = False
+                out.append({"symbol": sym, "stage": "trend", "error": f"daily prices unavailable: {e}"})
+
+        day = (now.date() - dt.timedelta(days=1)).isoformat()
+        report = {"coins": {}, "adopted": [], "slots": self.s.max_open_positions}
+        self.trend_report = report
+
+        def decide(sym: str, action: str, why: str, verdict: dict) -> dict:
+            g = sigs.get(sym)
+            decision = {"action": action, "confidence": 1.0, "source": "trend", "rules_action": action,
+                        "combined_score": round(g["close"] / g["sma"] - 1, 4) if g else 0.0,
+                        "reasoning": f"{why} · {trend.describe(sym, g, sma_days)}" if sym in sigs else why}
+            key = (day, sym, action, verdict.get("reason"))
+            if key not in self._trend_logged:   # a retry of the day's step records only what is new
+                self._trend_logged = {k for k in self._trend_logged if k[0] == day} | {key}
+                self.journal.log_decision(sym, decision, verdict, {"trend": g})
+            report["coins"][sym] = {"action": action, "why": why, "approved": verdict.get("approved"),
+                                    "risk": verdict.get("reason"),
+                                    "gap": round(g["close"] / g["sma"] - 1, 4) if g else None}
+            return decision
+
+        # 1. sells: a coin that closed at or below its average, and coins the owner no longer lists
+        for sym, p in self.journal.positions().items():
+            g = sigs.get(sym)
+            if sym not in coins:
+                why = "not one of the coins in SYMBOLS any more"
+            elif g is not None and not g["on"]:
+                why = f"closed at or below its {sma_days}-day average"
+            else:
+                continue
+            decision = decide(sym, "SELL", why, {"approved": True, "reason": "closing position"})
+            result = self._result(sym, {"price": self.last_price.get(sym, p["entry_price"])}, decision,
+                                  {"approved": True, "reason": "closing position"})
+            result.update(self._sell(sym, p, f"trend: {why}"))
+            if not (result.get("order") or {}).get("ok", True):
+                complete = False
+            out.append(result)
+
+        # 2. positions the hourly strategy opened on a coin the rule holds: the rule's emergency stop, no profit cap
+        managed = self.journal.get("trend_positions") or {}
+        positions = self.journal.positions()
+        managed = {s: o for s, o in managed.items() if s in positions and positions[s]["opened_at"] == o}
+        for sym, p in positions.items():
+            if managed.get(sym) == p["opened_at"] or sym not in coins:   # an unsold leftover is retried, not adopted
+                continue
+            stop = p["entry_price"] * (1 - stop_pct)
+            take = max(p["entry_price"], self.last_price.get(sym, 0.0)) * trend.TAKE_MULT
+            self.journal.event("strategy", f"{sym}: the position opened by the hourly strategy now follows the trend "
+                                           f"rule (emergency stop {stop:,.6g}, held while the coin stays above its "
+                                           f"{sma_days}-day average)")
+            moved, exit_result = self._move_exits(sym, p, stop, take)
+            if exit_result:
+                out.append(exit_result)
+            if sym in self.journal.positions():
+                managed[sym] = self.journal.positions()[sym]["opened_at"]
+                row = {"symbol": sym, "action": "ADOPT", "old_stop": p["stop_loss"], "stop_loss": stop,
+                       "take_profit": take, "entry_price": p["entry_price"], "sma_days": sma_days}
+                out.append(row)
+                report["adopted"].append(sym)
+
+        # 3. buys: coins above their average that the desk does not hold, strongest 60-day gain first
+        held = self.journal.positions()
+        wanted = []
+        for sym in coins:
+            if sym not in sigs:
+                continue
+            g = sigs[sym]
+            if sym in held:
+                decide(sym, "HOLD", "holds: still above its average", {"approved": False, "reason": "holding"})
+                continue
+            if g is None or not g["on"]:
+                decide(sym, "HOLD", "stays out" if g else "waits for more daily history",
+                       {"approved": False, "reason": "no buy signal"})
+                continue
+            stop_ms = self.journal.last_stop_loss_ms(sym)
+            if stop_ms is not None and stop_ms >= since_ms and not trend.armed(days[sym], sma_days, stop_ms):
+                decide(sym, "HOLD", "waits: its emergency stop fired; it is bought again once it has closed at or "
+                                    "below its average and risen above it again", {"approved": False, "reason": "re-entry rule"})
+                continue
+            wanted.append(sym)
+        for sym in sorted(wanted, key=lambda x: -sigs[x]["momentum"]):
+            try:
+                price = self.last_price.get(sym)
+                if price is None:
+                    raise RuntimeError("no live price this check")
+                if why := self._demo_price_problem(sym, price):
+                    decide(sym, "HOLD", f"not bought: {why}", {"approved": False, "reason": "demo exchange price"})
+                    continue
+                share = trend.share(sigs[sym], len(coins), vol_target, self.s.max_position_pct)
+                verdict = self.risk.review_trend(sym, price, share, self.portfolio())
+                self._note_brake(verdict)
+                decision = decide(sym, "BUY", f"buys {share:.1%} of the account", verdict)
+                result = self._result(sym, {"price": price}, decision, verdict)
+                if verdict["approved"]:
+                    result.update(self._buy(sym, decision, verdict))
+                    if sym in self.journal.positions():
+                        managed[sym] = self.journal.positions()[sym]["opened_at"]
+                out.append(result)
+            except Exception as e:
+                log.exception("Trend buy failed for %s", sym)
+                out.append({"symbol": sym, "stage": "buy", "error": str(e)})
+        self.journal.set("trend_positions", managed)
+        return out, complete
+
     @staticmethod
     def _result(sym: str, c: dict, decision: dict, verdict: dict) -> dict:
         return {"symbol": sym, "price": c["price"], "action": decision["action"], "confidence": decision["confidence"],
                 "score": decision["combined_score"], "approved": verdict["approved"], "risk": verdict["reason"],
                 "reasoning": decision["reasoning"], "source": decision.get("source")}
+
+    def _buy(self, sym: str, decision: dict, verdict: dict) -> dict:
+        """Place an approved buy, record it and put its stop-loss / take-profit on the exchange at once.
+        Returns the fields for this check's summary entry."""
+        out: dict = {}
+        real = self._real_price(sym, self.last_price[sym])   # the real market just before the order
+        fill = self.execution.execute("BUY", sym, quote_amount=verdict["quote_amount"])
+        fill["market_price"] = real
+        self.journal.log_order(sym, "BUY", fill, "signal")
+        if not fill["ok"]:
+            self.journal.event("order", f"BUY {sym} failed: {fill.get('error')}")
+        if fill["ok"]:
+            self.journal.open_position(sym, fill, verdict["stop_loss"], verdict["take_profit"])
+            how = "daily trend rule" if decision.get("source") == "trend" else \
+                f"confidence {decision['confidence']:.0%} ({decision.get('source') or 'rules'})"
+            self.journal.event("trade", f"BUY {sym}: {fill['qty']:.6g} at {fill['avg_price']:,.6g} = "
+                                        f"{fill['quote']:,.2f} USDT · stop {verdict['stop_loss']:,.6g} · target "
+                                        f"{verdict['take_profit']:,.6g} · {how}: {str(decision['reasoning'])[:240]}")
+            position = self.journal.positions()[sym]
+            if err := self._protect(sym, position):
+                out["protect_error"] = err
+                if why := self.risk.exit_signal(position, self.last_price[sym]):
+                    out.update(self._sell(sym, position, why))  # already past an exit level
+            else:
+                out["protected"] = self.journal.positions()[sym]["protected"]
+        out.update(order=fill, stop_loss=verdict["stop_loss"], take_profit=verdict["take_profit"])
+        return out
+
+    def _note_brake(self, verdict: dict) -> None:
+        if verdict.get("trip"):
+            self.journal.set("brake_tripped_at", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+            self.journal.event("brake", f"Overall loss brake tripped: {verdict['reason']}. No new buys for "
+                                        f"{self.s.brake_pause_days} days, then half size until half the loss is back.")
+
+    def _remember_benchmark(self, prices: dict[str, float]) -> None:
+        """First check: remember where the market was, so the reports can compare with just holding."""
+        if self.journal.get("benchmark_start") or not prices:
+            return
+        prices = dict(prices)
+        if "BTCUSDT" not in prices and self.market.client is not None:
+            try:
+                prices["BTCUSDT"] = self.market.client.price("BTCUSDT")
+            except Exception as e:
+                log.warning("Could not record the Bitcoin benchmark price: %s", e)
+        self.journal.set("benchmark_start", {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                                             "prices": prices})
 
     @staticmethod
     def _snapshot(c: dict, holding: bool) -> dict:
@@ -592,9 +866,16 @@ class Orchestrator:
             if high != position.get("high_water"):
                 self.journal.set_high_water(sym, high)
             return self.journal.positions()[sym], None
+        log.info("%s: trailing stop raised to %.6g (high %.6g)", sym, new_stop, high)
+        return self._move_exits(sym, position, new_stop, position["take_profit"], high)
+
+    def _move_exits(self, sym: str, position: dict, stop: float, take: float,
+                    high: float | None = None) -> tuple[dict | None, dict | None]:
+        """Move a position's stop-loss / take-profit: cancel the exchange pair, record what it sold meanwhile, place
+        a new pair at the new prices. Returns (position or None if it turned out to be closed, exit entry or None)."""
         if position.get("protection"):
             status = self.execution.unprotect(sym, position["protection"])
-            if status["state"] == "exited":  # it filled while we were about to move the stop
+            if status["state"] == "exited":  # it filled while we were about to move it
                 exit_result = self._record_exchange_exit(sym, status)
                 return self.journal.positions().get(sym), exit_result
             if status["state"] == "error":
@@ -603,8 +884,9 @@ class Orchestrator:
             booked = self._book_unrecorded_sells(sym, position)
             if sym not in self.journal.positions():
                 return None, (booked[0] if booked else None)
-        self.journal.update_stop(sym, new_stop, high)
-        log.info("%s: trailing stop raised to %.6g (high %.6g)", sym, new_stop, high)
+        self.journal.update_exits(sym, stop, take)
+        if high is not None:
+            self.journal.set_high_water(sym, high)
         self._protect(sym, self.journal.positions()[sym])
         return self.journal.positions()[sym], None
 

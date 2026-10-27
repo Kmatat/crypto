@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import fcntl
 import logging
@@ -52,6 +53,7 @@ HELP_TEXT = (
     "/health - is everything working? last check, errors, settings problems, updates, and why buys were refused\n"
     "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
     "/diagnose [days] - the desk's records versus its own rules replayed on the same prices: what stopped each buy signal\n"
+    "/trendtest [days] - the daily trend rule replayed on real prices over the last days (default 365), with the desk's limits\n"
     "/aibudget [usd] - Claude's daily budget and where it went today; /aibudget 3 sets $3 a day, /aibudget default resets\n"
     "/ai [free-first|claude-first|default] - which AI answers first (the free AI or Claude), and the free AI's day\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
@@ -188,7 +190,7 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     perf = performance(bot.journal, bot.last_price)
     text = report_text(perf, title=f"☀️ Daily report {today}")
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
-    text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
+    text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=s.trend), perf)
     if card := scorecard_block(bot, bot.journal):
         text += "\n\n" + card
     bot.notes.refresh(bot.last_price, scorecard=card)  # the notebook's PERFORMANCE.md carries today's scorecard
@@ -333,7 +335,7 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         # the week's page in the notebook: what was known and decided, written once and kept
         scorecard = bot.journal.get("scorecard_text") or ""
         perf = performance(bot.journal, bot.last_price)
-        perf_text = report_text(perf, title="Performance") + "\n" + goals_text(goals(bot.journal, perf, bot.last_price), perf)
+        perf_text = report_text(perf, title="Performance") + "\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=bot.base.trend), perf)
         review = None
         if bot.llm:
             data = research.review(bot.notes.digest(bot.last_price, scorecard=scorecard))
@@ -356,7 +358,7 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
 
 
 def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: threading.Lock, should_stop=None) -> None:
-    if not s.lab_enabled or s.offline:
+    if not s.lab_enabled or s.offline or s.trend:   # the lab tests and promotes hourly strategy cards only
         return
     now = dt.datetime.now(dt.timezone.utc)
     week = now.strftime("%G-W%V")
@@ -481,6 +483,8 @@ def ai_command(bot: Orchestrator, j: Journal, arg: str = "") -> str:
 
 
 WARMUP_DAYS = 230   # history before a replayed period: the 200-day average plus a margin
+TREND_NO_LAB = ("The weekly strategy lab is not used with the daily trend rule (STRATEGY=trend): it tests and "
+                "promotes hourly strategies only. To measure the trend rule on more history, send /trendtest 1000.")
 
 
 def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict | None:
@@ -491,6 +495,12 @@ def rules_replay(bot: Orchestrator, symbols: list[str], period: float) -> dict |
     client = bot.market.client
     if client is None:
         return None
+    if bot.base.trend:   # the daily trend rule on the owner's coins (its shares depend on how many there are)
+        from . import trend
+        now_ms = int(time.time() * 1000)
+        need = trend.window(trend.params(bot.base)[0]) + 2
+        hist = {sym: trend.fetch_daily(client, sym, int(period) + need, now_ms) for sym in bot.base.symbols}
+        return trend.backtest(bot.base, hist, start_ms=now_ms - int(period * trend.DAY_MS))
     # the checklist's 200-day average and the indicators need history before the period: without it the replay's
     # rules are looser than the live desk's (a check without enough history is "unknown" and does not block)
     n = int(period) + WARMUP_DAYS
@@ -555,6 +565,7 @@ def start_checks(bot: Orchestrator, s: Settings) -> list[str]:
         out.append(f"🔧 Settings corrected at start: {m}. Nothing for you to do; `desk setup` saves it to the file.")
         bot.journal.event("strategy", f"Settings corrected at start: {m}")
     out += bot.apply_budget_change()
+    out += bot.note_strategy_mode()
     bot.apply_champion()
     if bot.champion_note:
         out.append(f"🔧 Strategy in force updated because {bot.champion_note}.")
@@ -635,6 +646,8 @@ def cmd_run(s: Settings, args) -> None:
             return "Rejected." if ok else "No such challenger (or it is already the champion). See /strategies."
 
         def lab_now() -> str:
+            if s.trend:
+                return TREND_NO_LAB
             if not s.lab_enabled:
                 return "The strategy lab is switched off (LAB_ENABLED=false)."
             def lab_thread():
@@ -649,6 +662,9 @@ def cmd_run(s: Settings, args) -> None:
             return "🔬 Lab started: downloading history and testing challengers. Results arrive here in a few minutes."
 
         def playbook_now() -> str:
+            if s.trend:
+                return ("The head trader is not used by the daily trend rule (STRATEGY=trend): no AI decides a trade, "
+                        "so there is no AI budget to pace and no threshold to tilt.")
             if not bot.head:
                 return "The head trader is switched off (HEAD_TRADER=false)."
             text = with_journal(s, lambda j: HeadTraderAgent(bot.base, j, bot.ai).playbook(private=True))
@@ -688,6 +704,32 @@ def cmd_run(s: Settings, args) -> None:
             threading.Thread(target=work, daemon=True).start()
             return (f"🔎 Reading the last {days:g} days of the desk's records and replaying its rules on the same prices. "
                     "The report arrives here in a minute or two.")
+
+        def trendtest_now(arg: str = "") -> str:
+            from . import trend
+            try:
+                days = int(max(30, min(1500, float(arg)))) if arg.strip() else 365
+            except ValueError:
+                days = 365
+            if bot.market.client is None:
+                return "The replay needs Binance's public prices, which offline mode does not read."
+            ts = trend.preview_settings(bot.base)
+            ts = dataclasses.replace(ts, starting_balance=float(bot.journal.get("starting_balance") or ts.starting_balance))
+
+            def work() -> None:
+                try:
+                    now_ms = int(time.time() * 1000)
+                    need = trend.window(trend.params(ts)[0]) + 2
+                    hist = {sym: trend.fetch_daily(bot.market.client, sym, days + need, now_ms) for sym in ts.symbols}
+                    r = trend.backtest(ts, hist, start_ms=now_ms - days * trend.DAY_MS)
+                    tg.send(trend.result_text(r, ts, days) + ("" if s.trend else
+                            "\n\nThe desk trades the hourly strategy now. To switch: `desk setup` on the server, "
+                            "strategy question: choose the daily trend rule."))
+                except Exception as e:  # noqa: BLE001 - a report must never take the desk down
+                    log.exception("Trend replay failed")
+                    tg.send(f"⚠️ The trend replay failed: {e}")
+            threading.Thread(target=work, daemon=True).start()
+            return f"📈 Replaying the daily trend rule over the last {days} days. The result arrives here in a minute."
 
         def aibudget_now(arg: str = "") -> str:
             return with_journal(s, lambda j: ai_budget(bot, j, arg))
@@ -744,10 +786,11 @@ def cmd_run(s: Settings, args) -> None:
             "/agents": agents_now,
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
+            "/trendtest": trendtest_now,
             "/ai": ai_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
-                                            + goals_text(goals(j, performance(j, bot.last_price), bot.last_price),
+                                            + goals_text(goals(j, performance(j, bot.last_price), bot.last_price, trend=s.trend),
                                                          performance(j, bot.last_price))
                                             + (("\n\n" + scorecard_block(bot, j)) if scorecard_block(bot, j) else "")),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
@@ -878,7 +921,7 @@ def main() -> None:
             px = live_prices(s, j)
             perf = performance(j, px)
             print_report(perf)
-            print(goals_text(goals(j, perf, px), perf))
+            print(goals_text(goals(j, perf, px, trend=s.trend), perf))
         with_journal(s, show)
         return
     if args.cmd == "notes":

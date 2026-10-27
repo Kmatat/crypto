@@ -65,12 +65,16 @@ ENV_KEYS = (
     "SETTINGS_VERSION",
     "STARTING_BALANCE_USDT",
     "STOP_LOSS_ATR",
+    "STRATEGY",
     "SYMBOLS",
     "TAKE_PROFIT_ATR",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "TRADING_MODE",
     "TRAIL_ATR",
+    "TREND_SMA_DAYS",
+    "TREND_STOP_PCT",
+    "TREND_VOL_TARGET",
 )
 
 SETTINGS_VERSION = "3"
@@ -120,6 +124,10 @@ def check_minutes(value: str | None, settings_version: str | None) -> int:
 class Settings:
     mode: str = "simulation"
     offline: bool = False
+    strategy: str = "hourly"         # hourly: the agents' hourly signals; trend: the daily trend rule (see trader/trend.py)
+    trend_sma_days: int = 50         # trend: hold a coin while its daily close is above this average
+    trend_vol_target: float = 0.5    # trend: a coin's share is scaled down when it swings more than this a year (0.5 = 50%)
+    trend_stop_pct: float = 0.25     # trend: emergency stop this far below the entry (the exchange holds it)
     api_key: str = field(default="", repr=False)      # repr=False: never printed if Settings is ever logged
     api_secret: str = field(default="", repr=False)
     anthropic_key: str = field(default="", repr=False)
@@ -177,6 +185,10 @@ class Settings:
     migrations: tuple = ()           # settings corrected at load time (old defaults), reported once on Telegram
 
     @property
+    def trend(self) -> bool:
+        return self.strategy == "trend"
+
+    @property
     def use_claude(self) -> bool:
         return bool(self.anthropic_key) and not self.offline
 
@@ -203,13 +215,17 @@ class Settings:
     def problems(self) -> list[str]:
         """Settings that make the desk unable to do its job. Reported at start and in /health."""
         out = []
-        if self.stop_loss_atr <= 0 or self.take_profit_atr <= 0:
+        if self.trend:
+            pass   # the daily trend rule has its own exits (TREND_STOP_PCT); the ATR exits and checklist are not used
+        elif self.stop_loss_atr <= 0 or self.take_profit_atr <= 0:
             out.append("STOP_LOSS_ATR and TAKE_PROFIT_ATR must be above 0")
         elif "reward" in self.mentor_checks and self.take_profit_atr / self.stop_loss_atr < self.min_reward_risk - 1e-9:
             out.append(f"TAKE_PROFIT_ATR {self.take_profit_atr:g} / STOP_LOSS_ATR {self.stop_loss_atr:g} = "
                        f"{self.take_profit_atr / self.stop_loss_atr:.2f}:1 is below MIN_REWARD_RISK {self.min_reward_risk:g}: "
                        "the checklist's reward rule will refuse every buy")
         position = self.starting_balance * self.max_position_pct
+        if self.trend and self.symbols:   # each coin's share is at most 1 / number of coins (less for wild coins)
+            position = self.starting_balance * min(self.max_position_pct, 1 / len(self.symbols))
         if self.max_open_positions < 1 or self.max_position_pct <= 0:
             out.append("MAX_OPEN_POSITIONS and MAX_POSITION_PCT must allow at least one position")
         elif position < 10:
@@ -228,6 +244,17 @@ class Settings:
                     "FREE_AI_BASE_URL with your Cloudflare account id" if self.free_ai_provider == "cloudflare"
                     and not self.free_ai_base_url else "FREE_AI_API_KEY")
             out.append(f"FREE_AI_PROVIDER={self.free_ai_provider} needs {need} (desk setup): no free AI is used")
+        if self.strategy not in ("hourly", "trend"):
+            out.append(f"STRATEGY={self.strategy!r} must be hourly or trend: using hourly")
+        elif self.trend:
+            if self.max_open_positions < len(self.symbols):
+                out.append(f"STRATEGY=trend with {len(self.symbols)} coins but MAX_OPEN_POSITIONS {self.max_open_positions}: "
+                           f"the rule was tested with a slot for every coin (MAX_OPEN_POSITIONS {len(self.symbols)}); with "
+                           f"fewer it holds only the strongest {self.max_open_positions} and earned much less in the tests")
+            if not 10 <= self.trend_sma_days <= 400 or not 0.05 <= self.trend_vol_target <= 2 \
+                    or not 0.05 <= self.trend_stop_pct <= 0.5:
+                out.append("TREND_SMA_DAYS must be 10-400, TREND_VOL_TARGET 0.05-2 and TREND_STOP_PCT 0.05-0.5: "
+                           "the tested values (50, 0.5, 0.25) are used instead")
         if self.ai_order not in ("free-first", "claude-first"):
             out.append(f"AI_ORDER={self.ai_order!r} must be free-first or claude-first: using free-first")
         pct = self.ai_pct_month()
@@ -258,6 +285,10 @@ class Settings:
             migrations=(note,) if note else (),
             mode=mode,
             offline=offline,
+            strategy=os.getenv("STRATEGY", "hourly").strip().lower() or "hourly",
+            trend_sma_days=int(float(os.getenv("TREND_SMA_DAYS") or 50)),
+            trend_vol_target=_f("TREND_VOL_TARGET", 0.5),
+            trend_stop_pct=_f("TREND_STOP_PCT", 0.25),
             api_key=os.getenv("BINANCE_TESTNET_API_KEY", ""),
             api_secret=os.getenv("BINANCE_TESTNET_API_SECRET", ""),
             anthropic_key=os.getenv("ANTHROPIC_API_KEY", ""),

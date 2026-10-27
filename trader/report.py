@@ -7,14 +7,20 @@ from .journal import Journal
 from .notify import clean
 
 
-def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
+def performance(j: Journal, prices: dict[str, float] | None = None, since: str | None = None,
+                start_equity: float | None = None) -> dict:
+    """The record's results; with `since` (an ISO time) and the equity then, only that era's: the daily trend strategy
+    is judged from the day it started on the trades it opened itself, not with the trades of the strategy before it
+    (nor the positions of that strategy it sold or took over when it started)."""
     prices = prices or {}
-    orders = j.db.execute("SELECT ok, COUNT(*) n FROM orders GROUP BY ok").fetchall()
+    after = since or ""
+    orders = j.db.execute("SELECT ok, COUNT(*) n FROM orders WHERE ts >= ? GROUP BY ok", (after,)).fetchall()
     ok = sum(r["n"] for r in orders if r["ok"])
     total_orders = sum(r["n"] for r in orders)
     gaps = [abs(r["avg_price"] / r["market_price"] - 1) * 100 for r in j.db.execute(
-        "SELECT avg_price, market_price FROM orders WHERE ok=1 AND market_price > 0 AND avg_price > 0")]
-    trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades ORDER BY id")]
+        "SELECT avg_price, market_price FROM orders WHERE ok=1 AND market_price > 0 AND avg_price > 0 AND ts >= ?",
+        (after,))]
+    trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades WHERE opened_at >= ? ORDER BY id", (after,))]
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
     positions = j.positions()
@@ -22,8 +28,12 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
     start = float(j.get("starting_balance"))
     equity = j.cash + sum(prices.get(s, p["entry_price"]) * p["qty"] for s, p in positions.items())
 
-    since = ((j.get("budget_changes") or [{}])[-1]).get("ts", "")   # a budget change is not a gain or a loss
-    curve = [r["equity"] for r in j.db.execute("SELECT equity FROM equity WHERE ts >= ? ORDER BY rowid", (since,))] \
+    changes = j.get("budget_changes") or []
+    base = start
+    if since and start_equity:   # the era's start, moved by the budget changes since then (deposits, not gains)
+        base = start_equity + sum(c["to"] - c["from"] for c in changes if c["ts"] >= since)
+    flat = max((changes or [{}])[-1].get("ts", ""), after)   # a budget change is not a gain or a loss
+    curve = [r["equity"] for r in j.db.execute("SELECT equity FROM equity WHERE ts >= ? ORDER BY rowid", (flat,))] \
         + [equity]
     peak, max_dd = curve[0], 0.0
     for e in curve:
@@ -32,16 +42,16 @@ def performance(j: Journal, prices: dict[str, float] | None = None) -> dict:
 
     gross_win = sum(t["pnl"] for t in wins)
     gross_loss = -sum(t["pnl"] for t in losses)
-    decisions = j.db.execute("SELECT action, COUNT(*) n FROM decisions GROUP BY action").fetchall()
+    decisions = j.db.execute("SELECT action, COUNT(*) n FROM decisions WHERE ts >= ? GROUP BY action", (after,)).fetchall()
     overrides = j.db.execute("SELECT COUNT(*) FROM decisions WHERE (source LIKE 'claude%' OR source LIKE 'ai:%') "
                              "AND rules_action IS NOT NULL "
-                             "AND action != rules_action").fetchone()[0]
-    fees = j.db.execute("SELECT COALESCE(SUM(fee), 0) FROM orders WHERE ok=1").fetchone()[0]
+                             "AND action != rules_action AND ts >= ?", (after,)).fetchone()[0]
+    fees = j.db.execute("SELECT COALESCE(SUM(fee), 0) FROM orders WHERE ok=1 AND ts >= ?", (after,)).fetchone()[0]
     exchange_exits = sum(1 for t in trades if "(exchange)" in t["exit_reason"] or "(emulated)" in t["exit_reason"])
     return {
         "starting_balance": start,
         "equity": round(equity, 2),
-        "return_pct": round((equity / start - 1) * 100, 2),
+        "return_pct": round((equity / base - 1) * 100, 2),
         "realized_pnl": round(sum(t["pnl"] for t in trades), 2),
         "unrealized_pnl": round(unrealized, 2),
         "orders_sent": total_orders,
@@ -96,6 +106,16 @@ GOALS = {
     "max_drawdown_pct": 10,   # worst drop from a peak
     "execution_pct": 100,     # every order confirmed filled
 }
+# The daily trend strategy (STRATEGY=trend) trades 1-2 times a week and lives on a few long trends, so its evidence
+# takes longer and its result swings more: in the replays (2021-2026, 8 coins) it closed about 1.3-1.9 trades a week,
+# kept a profit factor of 1.9 or more, and its worst drop was 28-40% while just holding the coins fell 60-80%.
+GOALS_TREND = {
+    "weeks": 26,
+    "closed_trades": 30,
+    "profit_factor": 1.5,
+    "max_drawdown_pct": 30,
+    "execution_pct": 100,
+}
 
 
 def wilson(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -108,14 +128,20 @@ def wilson(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return round(max(0, centre - half) * 100, 1), round(min(1, centre + half) * 100, 1)
 
 
-def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
-    """Progress against the demo-phase goals, plus the benchmarks a fair judgement needs."""
+def goals(j: Journal, p: dict, prices: dict[str, float] | None = None, trend: bool = False) -> dict:
+    """Progress against the demo-phase goals (those of the daily trend strategy when `trend`), plus the benchmarks a
+    fair judgement needs."""
+    GOALS = GOALS_TREND if trend else globals()["GOALS"]
     prices = prices or {}
-    first = j.db.execute("SELECT ts FROM equity ORDER BY rowid LIMIT 1").fetchone()
+    era = j.get("trend_start") if trend else None   # the trend rule is judged from the day it started
+    after = era["ts"] if era else ""
+    if era:
+        p = performance(j, prices, since=after, start_equity=era.get("equity"))
+    first = j.db.execute("SELECT ts FROM equity WHERE ts >= ? ORDER BY rowid LIMIT 1", (after,)).fetchone()
     weeks = 0.0
     if first:
         weeks = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(first[0])).total_seconds() / (7 * 86400)
-    trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades")]
+    trades = [dict(r) for r in j.db.execute("SELECT * FROM closed_trades WHERE opened_at >= ?", (after,))]
     wins = sum(1 for t in trades if t["pnl"] > 0)
     lo, hi = wilson(wins, len(trades))
     start = float(j.get("starting_balance"))
@@ -128,11 +154,11 @@ def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
         exposure_hours += t["cost"] / start * h
     now = dt.datetime.now(dt.timezone.utc)
     for pos in j.positions().values():
-        h = (now - dt.datetime.fromisoformat(pos["opened_at"])).total_seconds() / 3600
+        h = (now - dt.datetime.fromisoformat(max(pos["opened_at"], after))).total_seconds() / 3600
         exposure_hours += pos["cost"] / start * h
     exposure_pct = min(100.0, exposure_hours / hours_total * 100)
 
-    bench = j.get("benchmark_start") or {}
+    bench = era or j.get("benchmark_start") or {}
     moves = {sym: (prices[sym] / px - 1) * 100 for sym, px in bench.get("prices", {}).items() if prices.get(sym)}
     btc = moves.get("BTCUSDT")
     basket = sum(v for s, v in moves.items() if s != "BTCUSDT" or len(moves) == 1) / max(1, len([s for s in moves if s != "BTCUSDT" or len(moves) == 1])) if moves else None
@@ -157,7 +183,8 @@ def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
                        else None)
     verdict = ("collecting evidence" if not evidence_ready else
                "PASS - demo goals met" if all(c[2] for c in checks.values()) else "FAIL - demo goals not met")
-    return {"checks": checks, "verdict": verdict, "win_rate_range": (lo, hi), "exposure_pct": round(exposure_pct, 1),
+    return {"checks": checks, "verdict": verdict, "trend": trend, "since": after or None, "perf": p,
+            "win_rate_range": (lo, hi), "exposure_pct": round(exposure_pct, 1),
             "trades_per_week": round(pace, 1) if pace else None, "weeks_to_sample": weeks_to_sample,
             "vs_btc_pct": None if btc is None else round(btc, 2), "vs_basket_pct": None if basket is None else round(basket, 2),
             "vs_blended_pct": None if blended is None else round(blended, 2), "ai_cost_pct": round(ai_cost_pct, 2),
@@ -166,8 +193,10 @@ def goals(j: Journal, p: dict, prices: dict[str, float] | None = None) -> dict:
 
 def goals_text(g: dict, p: dict) -> str:
     c = g["checks"]
+    p = g.get("perf") or p   # the trend rule's own era when it is judged from its start
     mark = lambda ok: "✓" if ok else "…"
-    lines = [f"🎯 Demo goals: {g['verdict']}",
+    lines = [f"🎯 Demo goals{' (daily trend rule' + (', since ' + g['since'][:10] if g.get('since') else '') + ')' if g.get('trend') else ''}: "
+             f"{g['verdict']}",
              f"{mark(c['weeks'][2])} {c['weeks'][0]} of {c['weeks'][1]} weeks · "
              f"{mark(c['closed_trades'][2])} {c['closed_trades'][0]} of {c['closed_trades'][1]} trades needed"
              + (f" (at {g['trades_per_week']:g} a week, complete in about week {g['weeks_to_sample']})"
@@ -177,6 +206,9 @@ def goals_text(g: dict, p: dict) -> str:
              f"{mark(c['execution_pct'][2])} orders filled {_pct(c['execution_pct'][0])}",
              f"Win rate so far {_pct(p['win_rate_pct'])}, likely true range {g['win_rate_range'][0]}-{g['win_rate_range'][1]}%",
              f"Return {p['return_pct']:+.2f}% · AI cost {g['ai_cost_pct']:.2f}% · net {g['net_return_pct']:+.2f}% (vs cash)"]
+    if g.get("trend"):
+        lines.insert(4, "The rule is built to win only 20-30% of its trades: a few long trends pay for many small losses. "
+                        "Judge it on the profit factor, the worst drop and the result against holding, not the win rate.")
     bench = []
     if g["vs_btc_pct"] is not None:
         bench.append(f"Bitcoin {g['vs_btc_pct']:+.1f}%")
@@ -227,7 +259,8 @@ def watchlist_text(wl: dict) -> str:
     return "\n".join(lines)
 
 
-def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra: list[str] | None = None) -> str:
+def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra: list[str] | None = None,
+                trend: bool = False) -> str:
     """Open positions plus the latest decision (and its reason) for each coin."""
     lines = ["📌 Status", *(extra or []), f"Free cash: ${j.cash:,.2f}"]
     positions = j.positions()
@@ -237,19 +270,24 @@ def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra:
         shield = {"exchange": "🛡️ stop & target live on Binance", "emulated": "🛡️ simulated exchange orders",
                   "partial": "⚠️ partly filled on Binance, desk watching the rest",
                   }.get(pos.get("protected"), "⚠️ desk-side checks only (exchange orders not placed yet)")
+        exits = (f"emergency stop ${pos['stop_loss']:,.4g} · take-profit order ${pos['take_profit']:,.4g} (moved up as the "
+                 f"price rises, no profit target)") if trend else \
+            f"stop ${pos['stop_loss']:,.4g} · target ${pos['take_profit']:,.4g}"
         lines.append(f"• {sym}: bought ${pos['entry_price']:,.4g}, now ${price:,.4g} ({pnl:+,.2f} USDT) "
-                     f"· stop ${pos['stop_loss']:,.4g} · target ${pos['take_profit']:,.4g} · {shield}")
+                     f"· {exits} · {shield}")
     if not positions:
         lines.append("No open positions.")
     lines.append("")
     lines.append("Latest decisions:")
     found = False
     for sym in symbols:
-        r = j.db.execute("SELECT ts, action, confidence, reasoning, risk_reason FROM decisions WHERE symbol=? "
+        r = j.db.execute("SELECT ts, action, confidence, source, reasoning, risk_reason FROM decisions WHERE symbol=? "
                          "ORDER BY id DESC LIMIT 1", (sym,)).fetchone()
         if r:
             found = True
-            lines.append(f"• {sym} {r['action']} ({r['confidence']:.0%}) at {r['ts'][11:16]} UTC: "
+            when = f"{r['ts'][:10]} {r['ts'][11:16]}" if r["source"] == "trend" else r["ts"][11:16]
+            how = "" if r["source"] == "trend" else f" ({r['confidence']:.0%})"   # the rule has no confidence
+            lines.append(f"• {sym} {r['action']}{how} at {when} UTC: "
                          f"{clean(r['reasoning'], 300)} [risk: {r['risk_reason']}]")
     if not found:
         lines.append("None yet - the first check is still running. Try again in a minute.")

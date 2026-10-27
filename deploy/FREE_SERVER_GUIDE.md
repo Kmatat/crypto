@@ -145,6 +145,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/playbook` | What the head trader tells every agent (strategy, thresholds, lessons, verdicts) and how it spent the AI budget at the last check |
 | `/health` | Is everything working? Version, last market check, errors, settings problems, updates, and what happened to every buy signal in the last 24 hours |
 | `/agents` | How many agents are working and what each did; strategies created, promoted, rejected or rolled back; coins added or removed (`/agents 30` for 30 days) |
+| `/trendtest` | The daily trend rule replayed on real prices with the desk's limits: result, worst drop and trades against just holding the coins (`/trendtest 1000` for 1,000 days). Works before you switch to it too |
 | `/diagnose` | "Check the logs" from your phone: the settings in force, every buy signal per coin and what stopped it, order failures, hours the desk was not checking, and how many trades its own rules would have made on the same prices (`/diagnose 3` for 3 days) |
 | `/ai` | Which AI answers first (the free AI or Claude), the free AI's questions used today and when its allowance restarts. `/ai free-first` saves money, `/ai claude-first` uses Claude's judgement while its budget lasts. Kept across restarts |
 | `/aibudget` | Claude's daily budget, today's spend per agent and the month at today's pace. `/aibudget 3` lets Claude spend up to $3 a day (real money, at most $20), `/aibudget default` goes back to the settings file. Kept across restarts |
@@ -156,6 +157,9 @@ Messages also arrive automatically:
 - every buy, sell or failed order;
 - when the scout changes the coin list;
 - when the AI changes how often it checks;
+- with the daily trend rule (from version 1.7.1): a short summary of each day's decisions just after 00:00 UTC (sent silently, so it
+  does not wake you), and a message when a winner's take-profit order is moved up or a position bought by the
+  hourly strategy is taken over;
 - a daily report.
 
 **On the server:** open Cloud Shell, run the same `ssh -i ssh-key-*.key ubuntu@YOUR_IP` line, and then:
@@ -171,6 +175,7 @@ Messages also arrive automatically:
 | `desk update` | Install the latest version now (normally not needed: it happens automatically) |
 | `desk version` | Which version is running |
 | `desk notes` | Rebuild the notebook in `~/crypto-desk/data/notes` (add `--zip` for a zip file) |
+| `desk backtest --strategy trend --days 1000` | Replay the daily trend rule (servers installed before 1.7.0: `~/crypto-desk/.venv/bin/python -m trader backtest --strategy trend --days 1000` from `~/crypto-desk`, or simply `/trendtest 1000` on Telegram) |
 
 ## Is it working? (no terminal needed)
 
@@ -191,7 +196,8 @@ working"* or *"🛑 Needs attention"* with the reason. `/agents` shows each agen
 **"No trades" is not by itself a fault.** The desk buys only when the signals, the master traders' checklist
 and the risk limits all agree; in a falling market (Bitcoin under its 200-day average) that can mean days in
 cash. `/health` shows why each buy signal was refused. If one rule refused all of them, that is the
-case to look at.
+case to look at. With the daily trend rule a quiet week is normal too: it decides once a day and trades 1-2 times a
+week; `/diagnose` shows the date of its last daily decision (from 1.7.1 `/health` too, with a warning if it has not run).
 
 ## If the desk says your starting balance is small
 
@@ -235,6 +241,31 @@ separately from Claude, so after a few weeks you can see which one's vetoes save
 used up for the day, Claude (if it has budget) or the built-in rules answer until it restarts (for Gemini, at
 midnight California time), and Telegram tells you once.
 
+## Switch to the daily trend strategy
+
+Since 1.7.0 the desk can trade one plain, tested rule instead of the hourly agents: hold a coin while its daily
+close is above its 50-day average, sell after a close below, a 25% emergency stop on Binance, no AI (README "The daily
+trend strategy" has the replays and the risks). To switch:
+
+1. On Telegram, send `/trendtest 1000` first if you like: it replays the rule on real prices over the last 1,000 days
+   with the desk's limits and answers in a minute (it changes nothing).
+2. On the server, run `desk setup` and press **Enter** to keep every answer until **STEP 5 - Strategy, coins and
+   timing**. Choose **1) Daily trend rule**.
+3. Press **Enter** for the 8 tested coins (BTC ETH SOL BNB XRP ADA DOGE LINK). The setup gives each coin its own
+   position slot (`MAX_OPEN_POSITIONS=8`) and switches the coin scout off.
+4. Choose the risk level: **1) Normal** (as tested; worst drop in the replays 28-40%) or **2) Calmer** (worst drop about
+   17-24%, about two thirds of the gain).
+5. At *Start a fresh journal?* (asked only if you also changed the mode or budget) either answer is fine: the trend
+   rule's goals count from the day it starts in any case.
+6. The desk restarts. At its first check it makes the day's decisions: coins you hold that are not in the list are
+   sold, coins in the list follow the rule, and coins above their average are bought. Telegram shows each order.
+   After that it decides once a day, just after 00:00 UTC (02:00 in Central Europe in summer, 01:00 in winter).
+
+What to expect: 1-2 trades a week, most of them small losses (1 trade in 4 or 5 wins), and now and then a winner held
+for weeks or months that pays for them. `/report` shows the trend goals: 26 weeks, 30 trades, profit factor 1.5,
+worst drop at most 30%, next to "just holding" the same coins. `/diagnose` shows the date of the last daily decision.
+To go back, run `desk setup` again and choose **2) Hourly agents**.
+
 ## One-time upgrade of a server installed before automatic updates
 
 If your server was set up with the first version (before the update job existed), it does not yet know how to
@@ -277,7 +308,7 @@ installs one immediately if you don't want to wait.
 | Orders filled | 100%: the Binance connection is reliable |
 | Demo vs real price gap | Under ~0.2%: demo results reflect the real market |
 | Profit factor | Above 1.0 means it makes more than it loses; 1.5+ is good |
-| Win rate | 45–60% is normal. Profit comes from wins being larger than losses |
+| Win rate | 45–60% is normal for the hourly agents; 20–30% for the daily trend rule. Profit comes from wins being larger than losses |
 | Worst drop from peak | The pain you'd have to stomach with real money. Lower is better |
 
 ## Good to know
@@ -326,6 +357,7 @@ bound what a bad decision can cost.
 | Problem | Solution |
 |---|---|
 | Telegram still shows the old budget after you changed it | Since 1.6.2 the desk applies a new STARTING_BALANCE_USDT at its next start and confirms it (💰). If it says 🛑 *Budget not changed*, the Binance demo wallet holds less than the new budget: run `desk setup` and choose **2) Paper trading** with the budget you want |
+| The daily trend rule bought nothing | It buys only coins whose daily close is above their 50-day average; in a falling market that can be none for weeks (holding cash is the point). `/status` shows each coin's latest decision and why; a coin whose emergency stop fired waits until its trend has reset |
 | Card rejected at Oracle signup | Use a regular credit or debit card whose name and address match what you entered |
 | `Out of capacity` when creating the server | Choose a different Availability domain, or try later |
 | `ssh: connect ... timed out` | Check the server shows *Running*, and that you used the **Public** IP |

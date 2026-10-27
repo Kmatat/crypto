@@ -89,6 +89,12 @@ class Journal:
         self.db.execute("UPDATE positions SET stop_loss=?, high_water=? WHERE symbol=?", (stop, high_water, symbol))
         self.db.commit()
 
+    def update_exits(self, symbol: str, stop: float, take: float) -> None:
+        """Set a position's stop-loss and take-profit (the daily trend strategy: adopting a position, raising the
+        take-profit as the price rises)."""
+        self.db.execute("UPDATE positions SET stop_loss=?, take_profit=? WHERE symbol=?", (stop, take, symbol))
+        self.db.commit()
+
     def set_high_water(self, symbol: str, high_water: float) -> None:
         self.db.execute("UPDATE positions SET high_water=? WHERE symbol=?", (high_water, symbol))
         self.db.commit()

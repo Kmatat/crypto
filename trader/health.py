@@ -479,6 +479,51 @@ def wallet_line(bot) -> str | None:
     return f"Demo wallet on Binance: {usdt:,.2f} USDT" + (f" plus {', '.join(others)}" if others else "")
 
 
+def trend_state(bot, j: Journal) -> dict:
+    """The daily trend decisions at a glance (STRATEGY=trend): the last day decided, whether today's decisions are
+    late or gave up, and how many coins are held. `warning` is a sentence for the owner, or None when all is well."""
+    from .orchestrator import TREND_TRIES
+    now = dt.datetime.now(dt.timezone.utc)
+    expected = (now.date() - dt.timedelta(days=1)).isoformat()   # the last finished day
+    day = j.get("trend_day")
+    tries = j.get("trend_tries") or {}
+    pace = (getattr(bot, "pace", None) or {}).get("minutes", bot.base.cycle_minutes)
+    minutes_into_day = now.hour * 60 + now.minute
+    late = day != expected and minutes_into_day > 2 * pace + 15
+    gave_up = tries.get("day") == day == expected and tries.get("n", 0) >= TREND_TRIES and not _trend_complete(j, day)
+    positions = j.positions()
+    held = [s for s in positions if s in bot.base.symbols]
+    protected = sum(1 for s in held if positions[s].get("protected") in ("exchange", "emulated"))
+    warning = None
+    if late:
+        warning = (f"the daily trend decisions for {expected} have not run yet "
+                   f"({tries.get('n', 0) if tries.get('day') == expected else 0} tries); the desk retries at every check")
+    elif gave_up:
+        warning = f"the daily trend decisions for {day} stayed incomplete after {TREND_TRIES} tries; see /diagnose"
+    start = j.get("trend_start") or {}
+    return {"day": day, "expected": expected, "late": late, "gave_up": gave_up, "held": held,
+            "protected": protected, "slots": bot.base.max_open_positions, "coins": list(bot.base.symbols),
+            "since": start.get("ts"), "warning": warning}
+
+
+def _trend_complete(j: Journal, day: str | None) -> bool:
+    """False when the give-up event for that day was recorded."""
+    if not day:
+        return False
+    row = j.db.execute("SELECT 1 FROM events WHERE kind='error' AND text LIKE ? LIMIT 1",
+                       (f"Daily trend decisions: the decisions for {day} stayed incomplete%",)).fetchone()
+    return row is None
+
+
+def trend_line(bot, j: Journal) -> str:
+    """One line: when the rule last decided and what it holds."""
+    t = trend_state(bot, j)
+    held = ", ".join(s.removesuffix("USDT") for s in t["held"]) or "none"
+    head = (f"📈 Daily trend decisions: last for {t['day']}" if t["day"] else "📈 Daily trend decisions: not made yet")
+    return (f"{head} (decided once a day after 00:00 UTC) · holding {len(t['held'])} of {len(t['coins'])} coins "
+            f"({held}), {t['protected']} with exchange protection" + (f" · ⚠️ {t['warning']}" if t["warning"] else ""))
+
+
 def settings_lines(bot) -> list[str]:
     s, base = bot.s, bot.base
     card = getattr(bot, "card", None)
@@ -502,6 +547,18 @@ def settings_lines(bot) -> list[str]:
                       + f"); spent today ${bot.llm.spent_today:.2f}")
     if (w := wallet_line(bot)):
         budget.append(w)
+    if base.trend:
+        from .trend import params
+        sma_days, vol_target, stop_pct = params(base)
+        day = bot.journal.get("trend_day")
+        return [*budget,
+                f"Strategy in force: the daily trend rule (STRATEGY=trend): hold a coin while its daily close is above its "
+                f"{sma_days}-day average, emergency stop {stop_pct:.0%} below the entry, no profit target; decisions once "
+                f"a day after 00:00 UTC (last: {day or 'not yet'})",
+                f"Size: {base.max_open_positions} positions, each coin's share 1/{len(base.symbols)} of the account made "
+                f"smaller for coins swinging more than {vol_target:.0%} a year, at most {base.max_position_pct:.0%} each; "
+                f"coins: {', '.join(x.removesuffix('USDT') for x in base.symbols)} (no scout picks)",
+                "Decisions: the rule alone, no AI (Claude and the free AI are not asked about trades)"]
     lines = [*budget, f"Strategy in force: stop {s.stop_loss_atr:g} ATR, target {s.take_profit_atr:g} ATR "
              f"({s.take_profit_atr / s.stop_loss_atr:.1f}:1, rule minimum {s.min_reward_risk:g}:1), trailing {s.trail_atr:g} ATR, "
              f"checks {', '.join(s.mentor_checks) or 'none'}, cooldown {s.cooldown_hours:g} h",
@@ -588,8 +645,10 @@ def diagnose_text(bot, j: Journal, days: float, replay=None) -> str:
         except Exception as e:  # noqa: BLE001 - the replay needs the network; the rest of the report stands alone
             lines.append(f"\n(The rules' replay could not run: {clean(e, 120)})")
     if r is not None:
-        lines.append(f"\nThe rules alone on the same coins and prices (no news, no AI, no head trader): {r['trades']} "
-                     f"trades, {r['return_pct']:+.2f}% (holding the coins: {r['basket_hold_pct']:+.1f}%)")
+        what = ("The daily trend rule replayed on the same coins and daily prices" if bot.base.trend else
+                "The rules alone on the same coins and prices (no news, no AI, no head trader)")
+        lines.append(f"\n{what}: {r['trades']} trades, {r['return_pct']:+.2f}% (holding the coins: "
+                     + (f"{r['basket_hold_pct']:+.1f}%)" if r.get("basket_hold_pct") is not None else "n/a)"))
         gap = r["trades"] - opened
         if gap > max(2, r["trades"] * 0.3):
             causes = sorted([("AI vetoes", totals["claude"]), ("bad-news blocks", totals["news"]),

@@ -5,6 +5,36 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.0 - 2026-10-27
+
+New: **the daily trend strategy** (`STRATEGY=trend`, chosen in `desk setup` step 5; README "The daily trend
+strategy"). Every replay of the hourly agents lost money after fees; this one plain rule held up in every test:
+- Hold a coin while its finished daily close is above its 50-day average, sell after a close below; decide once a day
+  at the first check after 00:00 UTC. Each coin's share is 1 / number of coins, smaller for coins that swing more than
+  50% a year, at most `MAX_POSITION_PCT`; when slots are short, the strongest 60-day gain goes first.
+- A 25% emergency stop on Binance for every position; after it fires the coin is bought again only once its trend has
+  reset. No profit target: Binance's protective pair needs a take-profit price below twice the market, so the desk
+  keeps it at 1.9x the price and moves it up as the price rises.
+- No AI in the decisions, no coin scout, no head trader, no weekly lab (they belong to the hourly strategy and stay
+  available for `STRATEGY=hourly`). Every risk limit stays: position slots, the daily-loss limit, the 10% overall
+  brake.
+- Switching keeps the record: coins outside `SYMBOLS` are sold at the first daily decision, coins in the list follow
+  the rule (their stop becomes the emergency stop). The trend goals count from the day the rule started, on the
+  trades it opened itself: 26 weeks, 30 trades, profit factor 1.5, worst drop at most 30%.
+- Replays on real prices with the desk's limits (8 coins): +192% from Oct 2023 to Apr 2026 while holding made +127%;
+  -22% in the 2022 crash while holding lost 76%; -4% in the last 365 days while holding lost 47%; +19% in the last
+  180 days while holding made +3%. Worst drops 28-40%; the "Calmer" risk level (`TREND_VOL_TARGET=0.25`) roughly
+  halves them.
+- `/trendtest [days]` on Telegram replays the rule on your coins (also before you switch); `desk backtest --strategy
+  trend` on the server (for servers installed before 1.7.0: `.venv/bin/python -m trader backtest --strategy trend`).
+- On the Binance demo exchange a coin that is missing or priced more than 3% from the real market is not bought (the
+  desk values its coins at real prices); `desk setup` warns about such coins.
+- Buy and sell messages, `/status`, `/report`, `/diagnose`'s replay and the settings lines describe the trend rule.
+  The next release finishes the rest (`/health`, `/agents`, `/strategies`, the notebook, the help, and a short daily
+  summary of the trend decisions on Telegram).
+- Also for both strategies: the Risk Manager's limits are shared by every kind of buy; nothing changes for the hourly
+  strategy.
+
 ## 1.6.7 - 2026-10-27
 
 Fixes found by an independent review of 1.6.6:

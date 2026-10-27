@@ -29,6 +29,9 @@ LAYOUT = [
      "AI_ORDER: free-first or claude-first", [
         "FREE_AI_PROVIDER", "FREE_AI_API_KEY", "FREE_AI_MODELS", "FREE_AI_BASE_URL", "FREE_AI_DAILY_REQUESTS", "AI_ORDER"]),
     ("Telegram alerts (optional)", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DAILY_REPORT_HOUR_UTC"]),
+    ("Strategy: trend = the daily trend rule (recommended, see README 'The daily trend strategy'); hourly = the agents' "
+     "hourly signals. TREND_*: average days, yearly swing a full share allows, emergency stop below the entry", [
+        "STRATEGY", "TREND_SMA_DAYS", "TREND_VOL_TARGET", "TREND_STOP_PCT"]),
     ("What to trade: SYMBOLS are always watched; the scout may add coins up to MAX_COINS", [
         "SYMBOLS", "AUTO_COINS", "MAX_COINS", "SCOUT_HOURS", "MIN_VOLUME_MUSD", "CANDLE_INTERVAL"]),
     ("Timing: normal check interval, and the range the AI may choose from", [
@@ -48,7 +51,9 @@ DEFAULTS = {
     "MAX_DRAWDOWN_PCT": "0.10", "MIN_CONFIDENCE": "0.60", "STOP_LOSS_ATR": "2.0", "TAKE_PROFIT_ATR": "4.0",
     "TRAIL_ATR": "2.0", "MENTOR_CHECKS": "trend200,btc,cooldown,reward", "MIN_REWARD_RISK": "2.0",
     "COOLDOWN_HOURS": "24", "AI_ORDER": "free-first",
+    "STRATEGY": "hourly", "TREND_SMA_DAYS": "50", "TREND_VOL_TARGET": "0.5", "TREND_STOP_PCT": "0.25",
 }
+TREND_COINS = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT"   # the 8 coins the rule was tested on
 
 # The free AI menu: (preset, what the owner reads). Gemini first: no card, the largest daily allowance.
 FREE_AI_CHOICES = [
@@ -89,6 +94,23 @@ def check_symbol(symbol: str) -> bool:
         return True
     except BinanceError:
         return False
+
+
+def check_demo_prices(symbols: list[str]) -> dict[str, str]:
+    """Coins the Binance demo exchange does not list, or prices more than 3% from the real market: the desk does not
+    buy those there (its positions are valued at real prices)."""
+    try:
+        demo = BinanceClient(TESTNET_BASE_URL).all_prices()
+        real = BinanceClient(PUBLIC_BASE_URL).all_prices()
+    except Exception as e:  # noqa: BLE001 - only advice; the desk checks again before every buy
+        return {"*": f"could not compare the demo exchange's prices with the real market ({e})"}
+    out = {}
+    for s in symbols:
+        if not demo.get(s):
+            out[s] = "not listed on the demo exchange"
+        elif real.get(s) and abs(demo[s] / real[s] - 1) > 0.03:
+            out[s] = f"its demo price is {demo[s] / real[s] - 1:+.0%} from the real market"
+    return out
 
 
 def check_claude(model: str, key: str) -> bool:
@@ -406,18 +428,39 @@ class Wizard:
                 return
             self.say("   Please type a whole hour from 0 to 23.")
 
-    def step_coins(self) -> None:
-        self.say("\nSTEP 5 of 5 - Coins and timing")
+    def ask_coins(self, question: str, default: str) -> list[str]:
         while True:
-            coins = self.ask("   Core coins, always watched (comma separated)", self.v.get("SYMBOLS") or DEFAULTS["SYMBOLS"])
+            coins = self.ask(question, default)
             symbols = [c.strip().upper() for c in coins.split(",") if c.strip()]
-            symbols = [s if s.endswith("USDT") else s + "USDT" for s in symbols]
+            symbols = list(dict.fromkeys(s if s.endswith("USDT") else s + "USDT" for s in symbols))
             unknown = [s for s in symbols if not check_symbol(s)]
             if symbols and not unknown:
                 self.v["SYMBOLS"] = ",".join(symbols)
-                break
+                return symbols
             self.say(f"   Binance does not list: {', '.join(unknown) or '(nothing entered)'}. "
                      "Use names like BTCUSDT or just BTC.")
+
+    def step_coins(self) -> None:
+        self.say("\nSTEP 5 of 5 - Strategy, coins and timing")
+        was = self.old.get("STRATEGY") or ("hourly" if self.old else "")
+        self.say("   How the desk decides when to buy and sell:")
+        pick = self.choose("   Strategy", [
+            "Daily trend rule - recommended. Holds a coin while its daily close is above its 50-day average, sells after\n"
+            "      a close below; decides once a day after 00:00 UTC and needs no AI. Replayed on real prices with the\n"
+            "      desk's limits (8 coins): +192% from Oct 2023 to Apr 2026 while holding the coins made +127%; in the\n"
+            "      2022 crash -22% while holding lost 76%. It wins only 1 trade in 4-5 (the long trends pay for the many\n"
+            "      small losses) and its worst drop was 28-40%.",
+            "Hourly agents - the original: hourly charts, news and AI opinions. In replays of the last two years it\n"
+            "      lost money after fees."], 1 if was in ("", "trend") else 2)
+        if pick == 1:
+            self.step_trend(was)
+            return
+        self.v["STRATEGY"] = "hourly"
+        if was == "trend":   # the trend rule's one slot per coin: back to the hourly strategy's default
+            self.v["MAX_OPEN_POSITIONS"] = DEFAULTS["MAX_OPEN_POSITIONS"]
+        default = self.v.get("SYMBOLS") or DEFAULTS["SYMBOLS"]
+        symbols = self.ask_coins("   Core coins, always watched (comma separated)",
+                                 DEFAULTS["SYMBOLS"] if was == "trend" and default == TREND_COINS else default)
         self.say("   The Market Scout can add more coins: every 6 hours it scans all Binance coins and, with")
         self.say("   Claude, searches the web for news to pick the most promising ones (each with a reason).")
         auto = self.yes("   Let the scout add coins?", self.v.get("AUTO_COINS", "true").lower() != "false")
@@ -432,6 +475,31 @@ class Wizard:
         self.say("   when big news breaks, or less often (up to 60 min) when markets are quiet.")
         self.v["CYCLE_MINUTES"] = self.ask_int("   Normal check interval in minutes (5-60)",
                                                self.v.get("CYCLE_MINUTES") or DEFAULTS["CYCLE_MINUTES"], 5, 60)
+
+    def step_trend(self, was: str) -> None:
+        self.v["STRATEGY"] = "trend"
+        self.say("   The rule was tested on 8 large coins. Fewer coins means fewer trends to catch; coins with a short")
+        self.say("   history (under 60 days on Binance) wait until they have one.")
+        current = self.v.get("SYMBOLS") or ""
+        symbols = self.ask_coins("   Coins to trade (comma separated)", current if was == "trend" and current else TREND_COINS)
+        if self.v.get("TRADING_MODE") == "testnet" and (problems := check_demo_prices(symbols)):
+            self.say("   ⚠️  On the Binance demo exchange: " + "; ".join(
+                f"{s.removesuffix('USDT')} {why}" if s != "*" else why for s, why in problems.items()) + ".")
+            self.say("      The desk does not buy such a coin there (it checks before every buy); paper trading")
+            self.say("      (step 1, choice 2) has no such limit.")
+        self.v["AUTO_COINS"] = "false"           # the rule trades the owner's list; the scout's picks are untested
+        self.v["MAX_OPEN_POSITIONS"] = str(len(symbols))
+        pct = self.v.get("MAX_POSITION_PCT") or DEFAULTS["MAX_POSITION_PCT"]
+        self.say(f"   One position slot per coin (MAX_OPEN_POSITIONS {len(symbols)}), each at most {float(pct):.0%} of the "
+                 "account (MAX_POSITION_PCT).")
+        self.say("   Coins the desk holds that are not in this list are sold at the first daily decision; coins in the")
+        self.say("   list are kept and follow the rule from then on.")
+        calm = float(self.v.get("TREND_VOL_TARGET") or DEFAULTS["TREND_VOL_TARGET"]) <= 0.3
+        level = self.choose("   Risk level", [
+            "Normal - as tested: worst drop in the replays 28-40%",
+            "Calmer - smaller positions in wild markets: worst drop about 17-24%, about two thirds of the gain"],
+            2 if calm else 1)
+        self.v["TREND_VOL_TARGET"] = "0.25" if level == 2 else "0.5"
 
     def offer_fresh_journal(self) -> None:
         """Changing mode or budget mid-test mixes two experiments; offer a clean start."""

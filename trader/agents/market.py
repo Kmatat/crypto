@@ -20,6 +20,7 @@ class MarketDataAgent:
         self.offline = offline
         self._synthetic: dict[str, list[dict]] = {}
         self._daily: dict[str, tuple[float, list[float]]] = {}
+        self._daily_candles: dict[tuple[str, int], tuple[float, list[dict]]] = {}
         self._rng: dict[str, random.Random] = {}
 
     def candles(self, symbol: str, limit: int = 200) -> list[dict]:
@@ -45,6 +46,37 @@ class MarketDataAgent:
         closes = [c["close"] for c in self.client.klines(symbol, "1d", limit)]
         self._daily[symbol] = (time.time(), closes)
         return closes
+
+    def daily_candles(self, symbol: str, limit: int = 130) -> list[dict]:
+        """Daily candles, the newest (still forming) day last, for the daily trend strategy. Cached for an hour.
+        Offline: a deterministic synthetic series, so the trend mode can be tried without a network."""
+        if self.offline or self.client is None:
+            return self._synthetic_daily(symbol, limit)
+        cached = self._daily_candles.get((symbol, limit))
+        # never across midnight UTC: a day read before its close must not pass for the finished day afterwards
+        if cached and time.time() - cached[0] < 3600 and int(cached[0] // 86400) == int(time.time() // 86400):
+            return cached[1]
+        rows = self.client.klines(symbol, "1d", limit)
+        self._daily_candles[(symbol, limit)] = (time.time(), rows)
+        return rows
+
+    def price(self, symbol: str) -> float:
+        """The live price (offline: the newest synthetic price)."""
+        if self.offline or self.client is None:
+            return self.candles(symbol)[-1]["close"]
+        return float(self.client.price(symbol))
+
+    def _synthetic_daily(self, symbol: str, limit: int) -> list[dict]:
+        rng = random.Random(zlib.crc32(b"daily-" + symbol.encode()))
+        day = 86_400_000
+        today = int(time.time() * 1000) // day * day
+        price, out = _SEED_PRICES.get(symbol, 100.0), []
+        for i in range(limit):
+            close = price * (1 + 0.004 * math.sin(i / 20) + rng.gauss(0, 0.03))
+            out.append({"time": today - (limit - 1 - i) * day, "open": price, "high": max(price, close) * 1.01,
+                        "low": min(price, close) * 0.99, "close": close, "volume": rng.uniform(1000, 5000)})
+            price = close
+        return out
 
     def range_since(self, symbol: str, since_ms: int) -> tuple[float, float, int] | None:
         """(lowest, highest, time of the last minute) traded since `since_ms` - the price path

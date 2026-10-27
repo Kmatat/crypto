@@ -261,7 +261,8 @@ class Backtest:
 def print_result(r: dict) -> None:
     print(f"\n=== {r['days']} days, ${r['start_balance']:,.0f} start ===")
     print(f"Strategy return     {r['return_pct']:+.2f}%   (final ${r['final_balance']:,.2f})")
-    print(f"Buy-and-hold        basket {r['basket_hold_pct']:+.1f}%   " +
+    basket = "n/a" if r["basket_hold_pct"] is None else f"{r['basket_hold_pct']:+.1f}%"
+    print(f"Buy-and-hold        basket {basket}   " +
           "  ".join(f"{k} {v:+.1f}%" for k, v in r["buy_and_hold_pct"].items()))
     print(f"Trades              {r['trades']} ({r['trades_per_week']}/week), avg hold {r['avg_hold_hours']} h, "
           f"exits {r['exits']}")
@@ -286,10 +287,41 @@ def parse_coin_buy(ap: argparse.ArgumentParser, text: str) -> dict[str, float]:
     return out
 
 
+def _symbols(text: str) -> list[str]:
+    return [x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT") for x in text.split(",") if x.strip()]
+
+
+def trend_main(args) -> int:
+    """`backtest --strategy trend`: the daily trend rule over the last --days days, under the desk's limits."""
+    from . import trend
+    symbols = _symbols(args.symbols) if args.symbols else list(trend.TESTED_COINS)
+    args.days = args.days or 1095   # 1-2 trades a week: a short window says little
+    live = Settings()
+    s = Settings(offline=True, symbols=symbols, starting_balance=args.balance, strategy="trend",
+                 max_position_pct=args.position or live.max_position_pct,
+                 max_open_positions=args.max_positions or len(symbols),
+                 trend_sma_days=args.sma or live.trend_sma_days,
+                 trend_vol_target=args.vol_target or live.trend_vol_target,
+                 trend_stop_pct=args.trend_stop or live.trend_stop_pct)
+    sma_days = trend.params(s)[0]
+    client = BinanceClient(PUBLIC_BASE_URL)
+    print(f"Downloading {args.days} (+{trend.window(sma_days)} for the averages) days of daily prices for "
+          f"{', '.join(symbols)} ...", file=sys.stderr)
+    now_ms = int(time.time() * 1000)
+    history = {sym: trend.fetch_daily(client, sym, args.days + trend.window(sma_days) + 2, now_ms) for sym in symbols}
+    r = trend.backtest(s, history, start_ms=now_ms - args.days * trend.DAY_MS)
+    print(f"Daily trend rule: {sma_days}-day average, volatility target {trend.params(s)[1]:g}, emergency stop "
+          f"{trend.params(s)[2]:.0%}, up to {s.max_open_positions} positions of at most {s.max_position_pct:.0%} "
+          "(the tested defaults and these flags, not your settings file; /trendtest on Telegram uses yours)")
+    print_result(r)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="trader backtest")
-    ap.add_argument("--days", type=int, default=180)
-    ap.add_argument("--symbols", default="BTC,ETH,SOL")
+    ap.add_argument("--days", type=int, default=None, help="days to replay (default 180; 1095 with --strategy trend)")
+    ap.add_argument("--symbols", default=None, help="coins, e.g. BTC,ETH,SOL (default BTC,ETH,SOL; with --strategy "
+                                                     "trend the 8 tested coins)")
     ap.add_argument("--balance", type=float, default=10_000)
     ap.add_argument("--buy", type=float, help="buy threshold on the weighted score (default 0.25)")
     ap.add_argument("--sell", type=float, help="sell threshold (default -0.25)")
@@ -306,11 +338,19 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--trail", type=float, help="trailing stop distance in ATR (e.g. 2); 0 = off")
     ap.add_argument("--interval", default="1h", choices=sorted(INTERVAL_MS), help="candle size (live: CANDLE_INTERVAL)")
     ap.add_argument("--coin-buy", default="", help="per-coin buy thresholds, e.g. BTC=0.4,ETH=0.3 (others use --buy)")
+    ap.add_argument("--strategy", default="hourly", choices=("hourly", "trend"),
+                    help="hourly: the agents' hourly rules (default); trend: the daily trend rule (STRATEGY=trend)")
+    ap.add_argument("--sma", type=int, help="trend: days of the average (default 50)")
+    ap.add_argument("--vol-target", type=float, help="trend: yearly swing a full share allows (default 0.5)")
+    ap.add_argument("--trend-stop", type=float, help="trend: emergency stop below the entry (default 0.25)")
     args = ap.parse_args(argv)
+    if args.strategy == "trend":
+        return trend_main(args)
+    args.days = args.days or 180
     coin_buy = parse_coin_buy(ap, args.coin_buy) if args.coin_buy else {}  # before any download: bad input fails fast
 
     from .agents import decision as dmod
-    symbols = [x.strip().upper() + ("" if x.strip().upper().endswith("USDT") else "USDT") for x in args.symbols.split(",")]
+    symbols = _symbols(args.symbols or "BTC,ETH,SOL")
     client = BinanceClient(PUBLIC_BASE_URL)
     print(f"Downloading {args.days} (+{EXTRA_DAYS} for long averages) days of hourly prices for "
           f"{', '.join(symbols)} ...", file=sys.stderr)

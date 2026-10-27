@@ -217,6 +217,11 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
             shield = {"exchange": " · 🛡️ both placed on Binance", "emulated": " · 🛡️ simulated exchange orders"}.get(
                 r.get("protected"), "")
             mentor = f"\nMaster traders' checklist:\n{r['mentor']}" if r.get("mentor") else ""
+            if r.get("source") == "trend":   # the daily trend rule: an emergency stop, no profit target
+                out.append(("", f"🟢 BUY {sym} (daily trend rule)\n{o['qty']:.6g} at {money(o['avg_price'])} = "
+                                f"{money(o['quote'])}\nEmergency stop {money(r['stop_loss'])}{shield}; no profit target "
+                                f"(the take-profit order moves up with the price)\nWhy: {clean(r['reasoning'])}"))
+                continue
             out.append(("", f"🟢 BUY {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Stop-loss {money(r['stop_loss'])} · Take-profit {money(r['take_profit'])}{shield}\n"
                             f"Confidence {r['confidence']:.0%}. Why: {clean(r['reasoning'])}{mentor}"))
@@ -231,6 +236,8 @@ def trade_messages(summary: list[dict]) -> list[tuple[str, str]]:
                    "stop-loss (emulated)": "stop-loss hit between checks (simulated exchange order)",
                    "take-profit (emulated)": "take-profit hit between checks (simulated exchange order)",
                    }.get(r.get("reason"), r.get("reason", ""))
+            if why.startswith("trend: "):
+                why = "daily trend rule: " + why[len("trend: "):]
             out.append(("", f"🔴 SELL {sym}\n{o['qty']:.6g} at {money(o['avg_price'])} = {money(o['quote'])}\n"
                             f"Reason: {why}\n{result}"))
     return out
