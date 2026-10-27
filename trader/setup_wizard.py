@@ -16,6 +16,7 @@ from dotenv import dotenv_values
 from .binance_client import BinanceClient, BinanceError
 from .config import ENV_PATH, PUBLIC_BASE_URL, ROOT, SETTINGS_VERSION, TESTNET_BASE_URL, check_minutes, legacy_take_profit
 from .free_ai import PRESETS, FreeAI
+from .trend import DEMO_GAP, TESTED_COINS
 from .llm import MODEL_CHOICES, ClaudeJSON
 from .notify import Telegram
 
@@ -53,7 +54,7 @@ DEFAULTS = {
     "COOLDOWN_HOURS": "24", "AI_ORDER": "free-first",
     "STRATEGY": "hourly", "TREND_SMA_DAYS": "50", "TREND_VOL_TARGET": "0.5", "TREND_STOP_PCT": "0.25",
 }
-TREND_COINS = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT"   # the 8 coins the rule was tested on
+TREND_COINS = ",".join(TESTED_COINS)   # the 8 coins the daily trend rule was tested on
 
 # The free AI menu: (preset, what the owner reads). Gemini first: no card, the largest daily allowance.
 FREE_AI_CHOICES = [
@@ -108,7 +109,7 @@ def check_demo_prices(symbols: list[str]) -> dict[str, str]:
     for s in symbols:
         if not demo.get(s):
             out[s] = "not listed on the demo exchange"
-        elif real.get(s) and abs(demo[s] / real[s] - 1) > 0.03:
+        elif real.get(s) and abs(demo[s] / real[s] - 1) > DEMO_GAP:
             out[s] = f"its demo price is {demo[s] / real[s] - 1:+.0%} from the real market"
     return out
 
@@ -288,8 +289,9 @@ class Wizard:
 
     def step_claude(self) -> None:
         self.say("\nSTEP 2 of 5 - Claude AI (optional, paid)")
-        self.say("   With Claude, AI reads the news and makes the final buy/sell call, with a written reason.")
-        self.say("   Without it, a free AI (next step) or the built-in rules decide. You can add it later by re-running setup.")
+        self.say("   With the hourly agents, Claude reads the news and makes the final buy/sell call, with a written reason;")
+        self.say("   without it, a free AI (next step) or the built-in rules decide. The daily trend rule (step 5) needs no AI:")
+        self.say("   there Claude is used only for /review. You can add it later by re-running setup.")
         if not self.yes("   Use Claude?", bool(self.v.get("ANTHROPIC_API_KEY"))):
             self.v["ANTHROPIC_API_KEY"] = ""
             return
@@ -319,7 +321,8 @@ class Wizard:
 
     def step_free_ai(self) -> None:
         self.say("\nSTEP 3 of 5 - A free AI (optional, costs nothing)")
-        self.say("   A free AI reads the news and double-checks each buy or sell, within the provider's daily allowance.")
+        self.say("   With the hourly agents, a free AI reads the news and double-checks each buy or sell, within the")
+        self.say("   provider's daily allowance. The daily trend rule (step 5) does not use it: you can skip this step.")
         self.say("   With Claude too, the free AI answers first and Claude only when it cannot (you can change the order).")
         if not self.yes("   Use a free AI?", bool(self.v.get("FREE_AI_PROVIDER"))):
             self.v["FREE_AI_PROVIDER"] = ""
@@ -442,7 +445,9 @@ class Wizard:
 
     def step_coins(self) -> None:
         self.say("\nSTEP 5 of 5 - Strategy, coins and timing")
-        was = self.old.get("STRATEGY") or ("hourly" if self.old else "")
+        # as Settings reads it: any other saved value, or none in an existing file, is the hourly strategy
+        was = (self.old.get("STRATEGY") or "").strip().lower()
+        was = "trend" if was == "trend" else ("hourly" if self.old else "")
         self.say("   How the desk decides when to buy and sell:")
         pick = self.choose("   Strategy", [
             "Daily trend rule - recommended. Holds a coin while its daily close is above its 50-day average, sells after\n"
@@ -463,7 +468,7 @@ class Wizard:
                                  DEFAULTS["SYMBOLS"] if was == "trend" and default == TREND_COINS else default)
         self.say("   The Market Scout can add more coins: every 6 hours it scans all Binance coins and, with")
         self.say("   Claude, searches the web for news to pick the most promising ones (each with a reason).")
-        auto = self.yes("   Let the scout add coins?", self.v.get("AUTO_COINS", "true").lower() != "false")
+        auto = self.yes("   Let the scout add coins?", was == "trend" or self.v.get("AUTO_COINS", "true").lower() != "false")
         self.v["AUTO_COINS"] = "true" if auto else "false"
         if auto:
             low = len(symbols)
@@ -494,12 +499,17 @@ class Wizard:
                  "account (MAX_POSITION_PCT).")
         self.say("   Coins the desk holds that are not in this list are sold at the first daily decision; coins in the")
         self.say("   list are kept and follow the rule from then on.")
-        calm = float(self.v.get("TREND_VOL_TARGET") or DEFAULTS["TREND_VOL_TARGET"]) <= 0.3
-        level = self.choose("   Risk level", [
-            "Normal - as tested: worst drop in the replays 28-40%",
-            "Calmer - smaller positions in wild markets: worst drop about 17-24%, about two thirds of the gain"],
-            2 if calm else 1)
-        self.v["TREND_VOL_TARGET"] = "0.25" if level == 2 else "0.5"
+        try:
+            current = float((self.v.get("TREND_VOL_TARGET") or DEFAULTS["TREND_VOL_TARGET"]).replace(",", "."))
+        except ValueError:
+            current = 0.5
+        options = ["Normal - as tested: worst drop in the replays 28-40%",
+                   "Calmer - smaller positions in wild markets: worst drop about 17-24%, about half to two thirds of the gain"]
+        own = current not in (0.5, 0.25)
+        if own:   # a value set by hand stays the Enter default
+            options.append(f"Keep your own value (TREND_VOL_TARGET={current:g})")
+        level = self.choose("   Risk level", options, 3 if own else (2 if current == 0.25 else 1))
+        self.v["TREND_VOL_TARGET"] = {1: "0.5", 2: "0.25"}.get(level, f"{current:g}")
 
     def offer_fresh_journal(self) -> None:
         """Changing mode or budget mid-test mixes two experiments; offer a clean start."""

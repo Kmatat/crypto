@@ -119,8 +119,30 @@ def test_env_keys_list_every_variable_the_settings_loader_reads():
     import re
     from pathlib import Path
     from trader import config
-    read = set(re.findall(r'(?:getenv|_f|_b)\("([A-Z_]+)"', Path(config.__file__).read_text()))
-    assert read and read <= set(config.ENV_KEYS)
+    read = set(re.findall(r'(?:getenv|_f|_b|_tolerant)\("([A-Z_]+)"', Path(config.__file__).read_text()))
+    assert read and read <= set(config.ENV_KEYS) and {"STRATEGY", "TREND_STOP_PCT"} <= read
+
+
+def test_the_setup_wizard_and_the_example_file_name_real_settings_with_the_same_defaults(tmp_path, monkeypatch):
+    from pathlib import Path
+    from dotenv import dotenv_values
+    from trader import config, setup_wizard, trend
+    layout = {k for _, keys in setup_wizard.LAYOUT for k in keys}
+    assert layout <= set(config.ENV_KEYS) and set(setup_wizard.DEFAULTS) <= layout
+    example = Path(config.__file__).parent.parent / ".env.example"
+    names = [line.split("=", 1)[0].strip() for line in example.read_text().splitlines()
+             if "=" in line and not line.strip().startswith("#")]
+    assert set(names) <= set(config.ENV_KEYS) and len(names) == len(set(names))   # no key twice (the last would win)
+    assert set(dotenv_values(example)) <= set(config.ENV_KEYS)
+    s = Settings()
+    d = setup_wizard.DEFAULTS
+    assert d["STRATEGY"] == s.strategy == "hourly" and int(d["TREND_SMA_DAYS"]) == s.trend_sma_days
+    assert float(d["TREND_VOL_TARGET"]) == s.trend_vol_target and float(d["TREND_STOP_PCT"]) == s.trend_stop_pct
+    assert setup_wizard.TREND_COINS == ",".join(trend.TESTED_COINS)
+    env = tmp_path / ".env"
+    setup_wizard.write_env(env, {})
+    monkeypatch.setattr(config, "ENV_PATH", env)
+    assert Settings.load().strategy == "hourly" and not Settings.load().trend
 
 
 def test_update_job_runs_the_tests_without_the_servers_settings_or_keys(monkeypatch, tmp_path):

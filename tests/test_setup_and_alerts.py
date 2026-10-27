@@ -41,6 +41,7 @@ def wiz(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_wizard, "check_binance", lambda k, s: {"USDT": 5000.0, "BTC": 1.0})
     monkeypatch.setattr(setup_wizard, "check_claude", lambda model, key: key == "sk-ant-good")
     monkeypatch.setattr(setup_wizard, "check_symbol", lambda s: s in {"BTCUSDT", "ETHUSDT", "SOLUSDT"})
+    monkeypatch.setattr(setup_wizard, "check_demo_prices", lambda symbols: {})   # never the network from a test
     env = tmp_path / ".env"
 
     def make(answers):
@@ -375,6 +376,26 @@ def test_wizard_sets_up_the_daily_trend_rule(wiz, monkeypatch):
     make(["", "", "n", "n", "n", "", "btc,eth,sol", "2"]).run()   # keep the rule, 3 coins, calmer
     v = dotenv_values(env)
     assert v["SYMBOLS"] == "BTCUSDT,ETHUSDT,SOLUSDT" and v["MAX_OPEN_POSITIONS"] == "3" and v["TREND_VOL_TARGET"] == "0.25"
-    make(["", "", "n", "n", "n", "2", "", "", ""]).run()   # back to the hourly agents: coins, scout (off), interval
+    make(["", "", "n", "n", "n", "2", "", "", "", ""]).run()   # back to the hourly agents: coins, scout, max, interval
     v = dotenv_values(env)
-    assert v["STRATEGY"] == "hourly" and v["MAX_OPEN_POSITIONS"] == "3"
+    assert v["STRATEGY"] == "hourly" and v["MAX_OPEN_POSITIONS"] == "3" and v["AUTO_COINS"] == "true"
+
+
+def test_wizard_keeps_a_hand_set_strategy_and_risk_level(wiz, monkeypatch):
+    env, make = wiz
+    monkeypatch.setattr(setup_wizard, "check_symbol", lambda s: True)
+    env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=3\nSTRATEGY=Trend\n"
+                   "SYMBOLS=BTCUSDT,ETHUSDT\nTREND_VOL_TARGET=0.4\n")
+    make(["", "", "n", "n", "n", "", "", ""]).run()          # Enter everywhere: still the trend rule, still 0.4
+    v = dotenv_values(env)
+    assert v["STRATEGY"] == "trend" and v["SYMBOLS"] == "BTCUSDT,ETHUSDT" and v["TREND_VOL_TARGET"] == "0.4"
+
+
+def test_wizard_on_a_settings_file_from_before_the_trend_rule_keeps_the_hourly_desk(wiz):
+    env, make = wiz
+    env.write_text("TRADING_MODE=simulation\nSTARTING_BALANCE_USDT=10000\nSETTINGS_VERSION=3\nSYMBOLS=BTCUSDT,ETHUSDT\n"
+                   "AUTO_COINS=true\nMAX_COINS=6\nMAX_OPEN_POSITIONS=2\nCYCLE_MINUTES=20\n")
+    make(["", "", "n", "n", "n", "", "", "", "", ""]).run()   # Enter, no AI or Telegram, then Enter for the rest
+    v = dotenv_values(env)
+    assert v["STRATEGY"] == "hourly" and v["SYMBOLS"] == "BTCUSDT,ETHUSDT" and v["AUTO_COINS"] == "true"
+    assert v["MAX_COINS"] == "6" and v["MAX_OPEN_POSITIONS"] == "2" and v["CYCLE_MINUTES"] == "20"

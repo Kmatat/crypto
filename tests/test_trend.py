@@ -391,6 +391,23 @@ def test_the_lessons_leave_out_trades_from_before_a_switch():
     assert ResearchAgent.lessons(j)["trades"] == 2 and ResearchAgent.lessons(j, since=since)["trades"] == 1
 
 
-def test_hourly_limits_above_the_card_bounds_are_reported():
-    assert any("at most 3 positions" in p for p in Settings(offline=True, max_open_positions=8).problems())
-    assert not any("at most 3 positions" in p for p in Settings(offline=True).problems())
+def test_a_typo_in_a_trend_setting_never_stops_the_desk(monkeypatch, tmp_path):
+    from trader import config
+    monkeypatch.setattr(config, "ENV_PATH", tmp_path / "none.env")
+    monkeypatch.setenv("TREND_VOL_TARGET", "0,25")
+    monkeypatch.setenv("TREND_STOP_PCT", "20%")
+    monkeypatch.setenv("TREND_SMA_DAYS", "fifty")
+    s = Settings.load()
+    assert s.trend_vol_target == 0.25 and abs(s.trend_stop_pct - 0.2) < 1e-12 and s.trend_sma_days == 50
+    assert any("TREND_SMA_DAYS='fifty' is not a number" in m for m in s.migrations)
+    monkeypatch.setenv("TREND_STOP_PCT", "")
+    assert Settings.load().trend_stop_pct == 0.25
+    wrong = Settings(offline=True, strategy="trend", trend_stop_pct=0.6).problems()
+    assert any("TREND_STOP_PCT=0.6 (allowed 0.05-0.5)" in p for p in wrong)
+
+
+def test_the_replay_reports_what_the_rule_holds_after_the_latest_close():
+    s = Settings(offline=True, symbols=["AAAUSDT"], strategy="trend", max_open_positions=1, max_position_pct=1.0)
+    closes = [100.0 * 0.995 ** i for i in range(120)] + [80.0]   # below its average for months, then far above it
+    r = trend.backtest(s, {"AAAUSDT": candles(closes)})
+    assert r["still_open"] == 0 and r["holding"] == ["AAAUSDT"]    # the live desk buys at 00:00: the replay agrees

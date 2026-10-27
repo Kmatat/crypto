@@ -110,6 +110,22 @@ def _f(name: str, default: float) -> float:
     return float(os.getenv(name, default))
 
 
+def _tolerant(name: str, default: float, notes: list[str]) -> float:
+    """A number the owner may type by hand: empty means the default, a decimal comma and a trailing % are accepted,
+    anything else falls back to the default with a note (a typo must never stop the desk or its updates)."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    text = raw.replace(",", ".")
+    percent = text.endswith("%")
+    try:
+        value = float(text.rstrip("%").strip())
+    except ValueError:
+        notes.append(f"{name}={raw!r} is not a number: the tested value {default:g} is used")
+        return default
+    return value / 100 if percent else value
+
+
 def _b(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "y", "on")
 
@@ -246,19 +262,19 @@ class Settings:
             out.append(f"FREE_AI_PROVIDER={self.free_ai_provider} needs {need} (desk setup): no free AI is used")
         if self.strategy not in ("hourly", "trend"):
             out.append(f"STRATEGY={self.strategy!r} must be hourly or trend: using hourly")
-        if not self.trend and (self.max_open_positions > 3 or self.max_position_pct > 0.10 + 1e-9):
-            out.append(f"MAX_OPEN_POSITIONS {self.max_open_positions} / MAX_POSITION_PCT {self.max_position_pct:g}: the hourly "
-                       "strategy uses at most 3 positions of at most 10% each (its tested limits), so it trades with those "
-                       "(the daily trend rule's one slot per coin applies only with STRATEGY=trend)")
         elif self.trend:
             if self.max_open_positions < len(self.symbols):
                 out.append(f"STRATEGY=trend with {len(self.symbols)} coins but MAX_OPEN_POSITIONS {self.max_open_positions}: "
                            f"the rule was tested with a slot for every coin (MAX_OPEN_POSITIONS {len(self.symbols)}); with "
                            f"fewer it holds only the strongest {self.max_open_positions} and earned much less in the tests")
-            if not 10 <= self.trend_sma_days <= 400 or not 0.05 <= self.trend_vol_target <= 2 \
-                    or not 0.05 <= self.trend_stop_pct <= 0.5:
-                out.append("TREND_SMA_DAYS must be 10-400, TREND_VOL_TARGET 0.05-2 and TREND_STOP_PCT 0.05-0.5: "
-                           "the tested values (50, 0.5, 0.25) are used instead")
+            from .trend import RANGES
+            wrong = [f"{key}={value:g} (allowed {low:g}-{high:g})" for key, value, (low, high) in
+                     zip(RANGES, (self.trend_sma_days, self.trend_vol_target, self.trend_stop_pct), RANGES.values())
+                     if not low <= value <= high]
+            if wrong:
+                out.append(f"{', '.join(wrong)}: the tested values (50, 0.5, 0.25) are used instead")
+            if not self.symbols:
+                out.append("STRATEGY=trend needs at least one coin in SYMBOLS")
         if self.ai_order not in ("free-first", "claude-first"):
             out.append(f"AI_ORDER={self.ai_order!r} must be free-first or claude-first: using free-first")
         pct = self.ai_pct_month()
@@ -285,14 +301,17 @@ class Settings:
             db_path = db_path.with_name(db_path.stem + "_offline" + db_path.suffix)
         take, note = legacy_take_profit(os.getenv("TAKE_PROFIT_ATR"), os.getenv("SETTINGS_VERSION"),
                                         os.getenv("MIN_REWARD_RISK"))
+        typos: list[str] = []
+        trend_values = (int(_tolerant("TREND_SMA_DAYS", 50, typos)), _tolerant("TREND_VOL_TARGET", 0.5, typos),
+                        _tolerant("TREND_STOP_PCT", 0.25, typos))
         return cls(
-            migrations=(note,) if note else (),
+            migrations=((note,) if note else ()) + tuple(typos),
             mode=mode,
             offline=offline,
             strategy=os.getenv("STRATEGY", "hourly").strip().lower() or "hourly",
-            trend_sma_days=int(float(os.getenv("TREND_SMA_DAYS") or 50)),
-            trend_vol_target=_f("TREND_VOL_TARGET", 0.5),
-            trend_stop_pct=_f("TREND_STOP_PCT", 0.25),
+            trend_sma_days=trend_values[0],
+            trend_vol_target=trend_values[1],
+            trend_stop_pct=trend_values[2],
             api_key=os.getenv("BINANCE_TESTNET_API_KEY", ""),
             api_secret=os.getenv("BINANCE_TESTNET_API_SECRET", ""),
             anthropic_key=os.getenv("ANTHROPIC_API_KEY", ""),

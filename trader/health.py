@@ -341,7 +341,8 @@ def _trend_rows(bot, j: Journal, hours: float, fresh: bool, beat: dict, err, row
     rows = [row("Market data", "real Binance prices: the live price every check, finished daily candles once a day",
                 "working" if fresh else "idle",
                 f"{len(bot.last_price)} coins, last check {ago(beat.get('ts'))}; daily candles "
-                + (f"read for {t['day']}" if t["day"] else "not read yet"), err("market data"))]
+                + ((f"incomplete for {t['day']}" if t["gave_up"] else f"read for {t['day']}") if t["day"]
+                   else "not read yet"), err("market data"))]
     role = "buys, holds and sells on the finished daily close, once a day after 00:00 UTC (no AI)"
     held = f"holding {len(t['held'])} of {len(t['coins'])} coins"
     if t["warning"]:

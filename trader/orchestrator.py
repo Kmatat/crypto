@@ -48,7 +48,7 @@ from .strategy import StrategyCard, summary_line
 
 log = logging.getLogger("orchestrator")
 TREND_TRIES = 4   # checks in a row the daily trend step is tried when a coin's prices or a sale fail
-DEMO_GAP = 0.03   # the demo exchange's price may differ this much from the real market before a buy is refused
+DEMO_GAP = trend.DEMO_GAP
 
 
 class Orchestrator:
@@ -598,7 +598,11 @@ class Orchestrator:
         out, complete, sigs, days = [], True, {}, {}
         for sym in coins:
             try:
-                days[sym] = trend.finished(self.market.daily_candles(sym, trend.history_days(sma_days) + 1), now_ms)
+                need = trend.history_days(sma_days) + 1
+                stop_ms = self.journal.last_stop_loss_ms(sym)
+                if stop_ms is not None and stop_ms >= since_ms:   # enough days to see whether its signal has reset
+                    need = max(need, min(1000, int((now_ms - stop_ms) // trend.DAY_MS) + sma_days + 2))
+                days[sym] = trend.finished(self.market.daily_candles(sym, need), now_ms)
                 sigs[sym] = trend.signal([c["close"] for c in days[sym]], sma_days)
             except Exception as e:  # noqa: BLE001 - this coin waits; the step runs again at the next check
                 log.warning("Daily prices unavailable for %s: %s", sym, e)

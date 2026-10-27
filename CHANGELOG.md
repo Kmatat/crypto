@@ -5,6 +5,26 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.2 - 2026-10-27
+
+Your desk keeps trading exactly as before (the hourly agents) until you choose the daily trend rule in `desk setup`.
+- A typo in a trend setting (`TREND_STOP_PCT=0,25`, `20%`, an empty value or a word) no longer stops the desk and its
+  updates: a decimal comma and a % sign are understood, anything else falls back to the tested value with a message.
+  `/health` names the setting that is out of range.
+- `desk setup`: a saved `STRATEGY=Trend` (any capitals) is kept when you press Enter; a risk level you set by hand is
+  kept; going back to the hourly agents proposes the coin scout again; the Claude and free-AI steps say that the daily
+  trend rule needs neither.
+- `/diagnose` compares the desk with what the rule holds after its latest daily decision (it was one day behind and
+  reported differences that were not there).
+- After an emergency stop older than about ten weeks, the re-entry rule now reads enough days to see whether the
+  coin's trend has reset (it could buy again too early with a stop much tighter than the tested 25%).
+- The 1.7.1 warning for hourly desks with more than 3 positions is removed: the hourly strategy simply trades within
+  its tested limits (3 positions, 10% each), as the README says.
+- The guide and README state the risk limits of each strategy as they really work: the trend rule can have up to 80% of
+  the account in coins (one 10% slot per coin), its daily-loss limit practically never acts (it buys only at the start
+  of the day), and the 10% overall brake will usually trip in a bad stretch; how to replay the rule
+  (`backtest --strategy trend`, `/trendtest`), the setup questions in order, and that AI keys are optional for it.
+
 ## 1.7.1 - 2026-10-27
 
 The daily trend strategy, finished and made safer (independent reviews of 1.7.0 by subsystem):

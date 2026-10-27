@@ -12,7 +12,7 @@ places demo orders on Binance, and sends every trade and a daily report to your 
 |---|---|---|
 | Free, with no time limit | The demo should run for weeks | **Oracle Cloud "Always Free"**: one small server, free for good |
 | Located in a country Binance supports | Binance blocks trading API calls from the USA and some other countries, including most free US servers | Oracle lets you pick **Frankfurt, Germany** |
-| Always on | The agents check the market every hour | The installer sets the desk to restart by itself after a crash or reboot |
+| Always on | The desk checks the market every 15 minutes | The installer sets the desk to restart by itself after a crash or reboot |
 
 Real *prices* work from anywhere: Binance publishes market data openly. Only the demo *orders*
 need a supported country.
@@ -77,6 +77,9 @@ often rejected.
 3. Give it a name (for example *My Crypto Desk*) and a username that ends in `bot` (for example `kmdesk_bot`).
 4. BotFather replies with a **token** like `123456789:AAH...`. Copy it.
 
+If you will choose the recommended daily trend rule in the setup, you can skip **D** and **E**: it decides without
+any AI (Claude, if added, is used only for `/review`). They matter for the hourly agents.
+
 **D) Claude key (optional, paid).** Without it, a free AI (E) or the built-in rules make the decisions.
 Get one at **https://console.anthropic.com**, under **API Keys**. The account needs some prepaid credit.
 
@@ -119,9 +122,11 @@ balances, keys or notebook. If you prefer a provider that never keeps what it re
    ```
    bash ~/crypto-desk/deploy/setup.sh
    ```
-   It installs everything (2–3 minutes), then asks four short questions:
-   **trading mode** (choose 1, the demo account), your **Binance keys**, **Claude** (optional) and
-   **Telegram**. It checks each key straight away and tells you if something is wrong.
+   It installs everything (2–3 minutes), then asks a few short questions:
+   **trading mode** (choose 1, the demo account), your **Binance keys**, **Claude** (optional), a **free AI**
+   (optional), **Telegram**, and last the **strategy**: choose **1) Daily trend rule** (recommended), press Enter for
+   the 8 tested coins, then choose **1) Normal** or **2) Calmer**. It checks each key straight away and tells you if
+   something is wrong.
 6. At the end you'll see **"✅ The trading desk is running 24/7"**, and your Telegram receives
    *"🚀 Trading desk started"*.
 
@@ -169,7 +174,7 @@ Messages also arrive automatically:
 | `desk status` | Is it running? Latest activity and performance |
 | `desk report` | Full performance report |
 | `desk logs` | Watch the agents work live (Ctrl+C stops watching; the desk keeps running) |
-| `desk setup` | Change keys, coins, Claude, the free AI or Telegram settings |
+| `desk setup` | Change the strategy, keys, coins, Claude, the free AI or Telegram settings |
 | `desk stop` / `desk start` | Pause or resume trading |
 | `desk reset` | Start the demo again from zero (old results are kept in a backup file) |
 | `desk update` | Install the latest version now (normally not needed: it happens automatically) |
@@ -252,19 +257,27 @@ trend strategy" has the replays and the risks). To switch:
 2. On the server, run `desk setup` and press **Enter** to keep every answer until **STEP 5 - Strategy, coins and
    timing**. Choose **1) Daily trend rule**.
 3. Press **Enter** for the 8 tested coins (BTC ETH SOL BNB XRP ADA DOGE LINK). The setup gives each coin its own
-   position slot (`MAX_OPEN_POSITIONS=8`) and switches the coin scout off.
+   position slot (`MAX_OPEN_POSITIONS=8`; at most 10% each, so up to 80% of the account can be in coins) and switches
+   the coin scout off. On the demo account it warns if a coin is missing or priced more than 3% off on the Binance demo
+   exchange: the desk never buys such a coin there (paper trading has no such limit).
 4. Choose the risk level: **1) Normal** (as tested; worst drop in the replays 28-40%) or **2) Calmer** (worst drop about
-   17-24%, about two thirds of the gain).
+   17-24%, about half to two thirds of the gain).
 5. At *Start a fresh journal?* (asked only if you also changed the mode or budget) either answer is fine: the trend
    rule's goals count from the day it starts in any case.
 6. The desk restarts. At its first check it makes the day's decisions: coins you hold that are not in the list are
-   sold, coins in the list follow the rule, and coins above their average are bought. Telegram shows each order.
-   After that it decides once a day, just after 00:00 UTC (02:00 in Central Europe in summer, 01:00 in winter).
+   sold, coins in the list follow the rule (a coin already more than 25% below what the desk paid is sold at once: its
+   emergency stop has been passed), and coins above their average are bought. Telegram shows each order. After that
+   it decides once a day, just after 00:00 UTC (02:00 in Central Europe in summer, 01:00 in winter).
+
+The 10% overall loss brake is measured from your starting budget. In a bad stretch it will trip: no new buys for 14
+days, then half-size buys until the account is back within 5% of the start. Positions already held keep riding. The
+replays include this.
 
 What to expect: 1-2 trades a week, most of them small losses (1 trade in 4 or 5 wins), and now and then a winner held
 for weeks or months that pays for them. `/report` shows the trend goals: 26 weeks, 30 trades, profit factor 1.5,
 worst drop at most 30%, next to "just holding" the same coins. `/health` shows the date of the last daily decision.
-To go back, run `desk setup` again and choose **2) Hourly agents**.
+To go back, run `desk setup` again and choose **2) Hourly agents**: the setup proposes the hourly defaults (BTC, ETH,
+SOL, coin scout on, 3 positions); change them there if you used others before.
 
 ## One-time upgrade of a server installed before automatic updates
 
@@ -348,9 +361,13 @@ The server holds only demo keys and fake money, but it is connected to real acco
 
 What is already handled for you: your keys are stored on the server in a file only your user can read; they
 never appear in the logs or in Telegram messages; the code refuses to run in any real-money mode; links in
-AI-written text are stripped before anything reaches your phone; and the Risk Manager's limits (1% of the
-account at risk per trade, at most 10% in one coin, 3 positions, 3% daily loss stop, 10% overall loss stop)
-bound what a bad decision can cost.
+AI-written text are stripped before anything reaches your phone; and the Risk Manager's limits bound what a bad
+decision can cost. Hourly agents: 1% of the account at risk per trade, at most 10% in one coin, 3 positions, a 3%
+daily loss stop and a 10% overall loss stop. Daily trend rule: at most 10% in one coin with one slot per coin (so with 8
+coins up to 80% of the account can be in coins that tend to fall together), a 25% emergency stop on each position
+(about 2.5% of the account each), and the 10% overall loss stop measured from your starting budget (14 days without
+buys, then half-size buys). Its 3% daily loss stop exists but practically never acts, because the rule buys only right
+after 00:00 UTC, when the day's result is still zero.
 
 ## Troubleshooting
 

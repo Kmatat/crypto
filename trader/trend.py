@@ -33,13 +33,16 @@ TAKE_MULT = 1.9        # the take-profit leg of the exchange pair, as a multiple
 RAISE_AT = 1.3         # move it up once the price is within 30% of it
 SLIPPAGE = 0.0005      # a market order at the open pays a little more (buy) or gets a little less (sell)
 TESTED = (50, 0.5, 0.25)   # TREND_SMA_DAYS, TREND_VOL_TARGET, TREND_STOP_PCT as tested
+RANGES = {"TREND_SMA_DAYS": (10, 400), "TREND_VOL_TARGET": (0.05, 2.0), "TREND_STOP_PCT": (0.05, 0.5)}
 TESTED_COINS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "LINKUSDT")
+DEMO_GAP = 0.03   # the demo exchange's price may differ this much from the real market before a buy is refused
 
 
 def params(s) -> tuple[int, float, float]:
     """(average days, volatility target, stop distance). Out-of-range settings fall back to the tested values
     (Settings.problems() reports them)."""
-    if 10 <= s.trend_sma_days <= 400 and 0.05 <= s.trend_vol_target <= 2 and 0.05 <= s.trend_stop_pct <= 0.5:
+    values = (s.trend_sma_days, s.trend_vol_target, s.trend_stop_pct)
+    if all(low <= v <= high for v, (low, high) in zip(values, RANGES.values())):
         return int(s.trend_sma_days), float(s.trend_vol_target), float(s.trend_stop_pct)
     return TESTED
 
@@ -210,10 +213,26 @@ def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end
     curve.append(final)
     first = {sym: rows[sym][index[sym][days[0]]]["open"] for sym in coins if days and days[0] in index[sym]}
     hold = {sym: (marks[sym] / first[sym] - 1) * 100 for sym in first if sym in marks}
-    return _metrics(start, final, trades, curve, len(days), hold, sorted(pos), buys_refused)
+    holding = sorted(pos)
+    if days:   # what the rule holds once it has acted on the latest close, as the live desk does at 00:00 UTC
+        last = days[-1]
+        sigs = {sym: sig(sym, last) for sym in coins}
+        for sym in list(pos):
+            i = index[sym].get(last)
+            if i is not None and rows[sym][i]["low"] <= pos[sym]["stop"]:
+                ready[sym] = False
+        for sym, g in sigs.items():
+            if g is not None and not g["on"]:
+                ready[sym] = True
+        keep = [x for x in pos if not (sigs.get(x) is not None and not sigs[x]["on"])
+                and not (index[x].get(last) is not None and rows[x][index[x][last]]["low"] <= pos[x]["stop"])]
+        new = sorted((x for x in coins if x not in pos and ready[x] and sigs.get(x) is not None and sigs[x]["on"]),
+                     key=lambda x: -sigs[x]["momentum"])
+        holding = sorted(keep + new[:max(0, s.max_open_positions - len(keep))])
+    return _metrics(start, final, trades, curve, len(days), hold, holding, buys_refused, len(pos))
 
 
-def _metrics(start, final, trades, curve, days, hold, holding, refused) -> dict:
+def _metrics(start, final, trades, curve, days, hold, holding, refused, still_open) -> dict:
     wins = [x for x in trades if x["pnl"] > 0]
     losses = [x for x in trades if x["pnl"] <= 0]
     peak, max_dd = start, 0.0
@@ -237,7 +256,9 @@ def _metrics(start, final, trades, curve, days, hold, holding, refused) -> dict:
         "max_drawdown_pct": round(max_dd * 100, 2),
         "avg_hold_hours": round(sum(x["hours"] for x in trades) / len(trades), 1) if trades else None,
         "exits": {r: sum(1 for x in trades if x["reason"] == r) for r in ("stop-loss", "signal")},
-        "still_open": len(holding), "holding": holding, "decisions": {"buys refused": refused} if refused else {},
+        # still_open: positions open at the end of the replay; holding: the coins the rule holds after its latest
+        # decision (the last finished day's close), to compare with the live desk
+        "still_open": still_open, "holding": holding, "decisions": {"buys refused": refused} if refused else {},
     }
 
 

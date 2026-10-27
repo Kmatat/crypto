@@ -15,7 +15,8 @@ Follow the click-by-click guide in [deploy/FREE_SERVER_GUIDE.md](deploy/FREE_SER
 
 ## How the desk works
 
-Think of it as a small trading firm where each employee has one job:
+Think of it as a small trading firm where each employee has one job. (With the daily trend strategy, recommended
+since 1.7.0, only Market Data, the Risk Manager and Execution work; see "The daily trend strategy" below.)
 
 | Agent | Role in business terms | What it actually does |
 |---|---|---|
@@ -27,7 +28,7 @@ Think of it as a small trading firm where each employee has one job:
 | **Forecaster** | Predicts the next move | Fits a trend line to the last 24 hours, compares it with the noise, and gives a probability that the price goes up |
 | **Portfolio Manager** | Makes the call | Weighs all reports and decides **BUY / SELL / HOLD**, with a confidence level and a plain-English reason. Uses Claude if a key is set, otherwise a weighted score |
 | **Mentor** | The master traders' checklist | Every candidate buy must pass rules documented by well-known traders: above the 200-day average (Paul Tudor Jones), Bitcoin itself in an uptrend (don't fight the tape), no re-entry 24 h after a stop-loss (Livermore), at least 2:1 reward-to-risk (PTJ). Each line is shown with its source in the buy alert, and Claude is told to weigh it |
-| **Risk Manager** | Safety officer, can veto anything | Sizes each trade so a stop-loss costs 1% of equity (the Turtle Traders' method), capped at 15% per coin; sets the stop-loss and a 2:1 take-profit; **trails the stop upward** as the price rises (Seykota: cut losses, let profits run). Blocks trades with low confidence, too many open positions, or after the 3% daily / 10% overall loss limits |
+| **Risk Manager** | Safety officer, can veto anything | Sizes each trade so a stop-loss costs 1% of equity (the Turtle Traders' method), capped at 10% per coin; sets the stop-loss and a 2:1 take-profit; **trails the stop upward** as the price rises (Seykota: cut losses, let profits run). Blocks trades with low confidence, too many open positions, or after the 3% daily / 10% overall loss limits |
 | **Execution Trader** | Places the order, then insures it | Sends the order to Binance, confirms it was **FILLED**, records the real quantity, price and fees, and immediately places the **stop-loss and take-profit on the exchange** as a pair (when one fills, Binance cancels the other) |
 
 Every 15 minutes (the AI may adjust this between 5 and 60), for each watched coin:
@@ -149,7 +150,7 @@ coin, at most 10% each when bought, the 25% stop and the desk's loss brakes; 0.1
 | Period | Trend rule | Just holding the 8 coins | Worst drop (rule) | Trades a week | Winners | Profit factor |
 |---|---|---|---|---|---|---|
 | Jan 2021 - Oct 2023 (boom and crash) | **+334%** | +390% | 40% | 1.7 | 23% | 1.9 |
-| Nov 2021 - Dec 2022 (the crash alone) | **-22%** | -76% | 28% | 1.8 | - | 0.1 |
+| Nov 2021 - Dec 2022 (the crash alone) | **-22%** | -76% | 28% | 1.6 | - | 0.1 |
 | Oct 2023 - Apr 2026 | **+192%** | +127% | 28% | 1.9 | 22% | 1.9 |
 | Last 180 days (to Oct 2026) | **+19%** | +3% | 10% | 1.3 | 30% | 5.1 |
 | Last 365 days (to Oct 2026) | **-4%** | -47% | 17% | 1.4 | 20% | 0.8 |
@@ -163,7 +164,7 @@ coin, at most 10% each when bought, the 25% stop and the desk's loss brakes; 0.1
   holding, never on the win rate.
 - **The worst drop is real money in a live account**: 28-40% in the replays (the hourly strategy's goal was 10%).
   The **Calmer** risk level in `desk setup` (`TREND_VOL_TARGET=0.25`) roughly halves the drops (17-24%) and keeps about
-  two thirds of the gain.
+  half to two thirds of the gain (two thirds in Oct 2023 - Apr 2026, about half in the 2021-2023 boom).
 - **Evidence comes slowly**: 1-2 trades a week means about 30 trades in 26 weeks. The trend goals below reflect that.
 - Replays are history, not a promise. The research tested about 200 hourly variants and a handful of daily ones; the
   daily rule's results held across periods and coins, which is the best protection against a lucky fit that this
@@ -171,8 +172,12 @@ coin, at most 10% each when bought, the 25% stop and the desk's loss brakes; 0.1
 
 **What changes on the desk.** No market scout (the rule trades your `SYMBOLS` only), no news, forex, Claude or free-AI
 opinions on trades, no head trader and no weekly strategy lab (they work on the hourly strategy). The desk still
-checks every `CYCLE_MINUTES` to look after the protective orders, records everything, reports on Telegram and keeps
-every risk limit (position slots, the daily-loss limit, the 10% overall brake with its 14-day pause). When you switch,
+checks every `CYCLE_MINUTES` to look after the protective orders, records everything and reports on Telegram. The
+position slots and the 10% overall brake (with its 14-day pause) apply; the 3% daily-loss limit is checked but
+practically never acts, because the rule buys only at the start of the day; the protection is the 25% emergency stop
+on each position and the overall brake. The brake is measured from your starting budget, so in a bad stretch it will
+usually trip (no new buys for 14 days, then half-size buys until the account is within 5% of the start); the replays
+include it. When you switch,
 coins you hold that are not in `SYMBOLS` are sold at the first daily decision; coins in the list are kept and follow
 the rule from then on. `/trendtest [days]` on Telegram replays the rule on your coins over any period, also before
 you switch. `MAX_OPEN_POSITIONS` should equal the number of coins: with fewer slots it holds only the strongest coins
@@ -184,6 +189,16 @@ comes within 30% of it. It is a placeholder, not a target. And if a coin only su
 also refuses a stop that far below the price; the desk then watches that position itself every 5 minutes.
 
 ## Measuring the strategy before trusting it
+
+**The daily trend rule:** `python -m trader backtest --strategy trend --days 1000` (on the server
+`desk backtest --strategy trend --days 1000`; on servers installed before 1.7.0
+`cd ~/crypto-desk && .venv/bin/python -m trader backtest --strategy trend --days 1000`) replays it on real daily
+Binance prices with the desk's own Risk Manager. Flags: `--symbols`, `--balance`, `--position`, `--max-positions`,
+`--sma`, `--vol-target`, `--trend-stop`. It uses the tested settings and these flags, not your settings file;
+`/trendtest [days]` on Telegram uses yours. An independent check found it reproduces the research simulator behind
+the table above to the cent on 11 scenarios (crashes, brake trips, 66 stops, scarce slots).
+
+**The hourly agents:**
 
 `python -m trader backtest --days 180` replays the desk's rule-based decision logic (indicators,
 forecast, weighted score, the master traders' checklist, sizing, trailing stops, risk limits, fees,
@@ -425,7 +440,8 @@ above all with "just holding" over the same weeks, shown in the same report.
 The report also shows what simply holding would have done over the same period: Bitcoin, your watched
 coins, and a "fair blend" that matches the desk's actual exposure (it is in cash most of the time, so 100%
 buy-and-hold is a misleading yardstick in both directions). The likely range of the true win rate is shown
-next to the observed one. If the 10% brake trips during the demo, the 12-week clock restarts.
+next to the observed one. If the 10% brake trips during the hourly demo, judge the 12 weeks again from that day (the
+report does not restart the count by itself).
 
 **Phase 2, going live (not before Phase 1 passes):** start with a small amount, a written review of the
 trade log, and the project-level goal below as the yardstick; any brake trip ends the phase.
@@ -468,7 +484,8 @@ There are two different kinds of success:
    order instead of sending it again, so you don't end up with two orders.
 2. **Profitable trades.** No system can make every trade profitable. A good strategy might win
    45–60% of its trades and still make money, because the stop-loss keeps losses smaller than wins
-   (default: stop at 2× volatility, take profit at 3×). The demo phase exists to measure this
+   (default: stop at 2× volatility, take profit at 4×); the daily trend rule wins only 20–30% by design, because its
+   few long winners are many times its typical loss. The demo phase exists to measure this
    honestly before any money is at risk.
 
 ## Known challenges and limitations
@@ -502,8 +519,10 @@ There are two different kinds of success:
   assumes 0.2% slippage). Binance also rejects a protective pair if the market has already moved past
   one of its levels at placement time; the desk then sells at once or retries, and tells you on Telegram.
 - **More coins means more correlated risk.** Most coins tend to fall together when Bitcoin falls.
-  The Risk Manager still allows at most 3 open positions of 10% each, so watching 8 coins means more
-  choice, not more exposure.
+  With the hourly agents the Risk Manager allows at most 3 open positions of 10% each, so watching 8 coins
+  means more choice, not more exposure. The daily trend rule has one 10% slot per coin, so with 8 coins up to 80% of
+  the account is invested in coins that tend to fall together: that is where its 28-40% worst drops come from
+  (Calmer: 17-24%).
 - **What the scout won't pick:**
   - Stablecoins and gold tokens are filtered out by list and by price behaviour.
   - Tokenized stocks are rejected: Claude must label each pick's asset type, and only "crypto" is accepted.
@@ -526,6 +545,7 @@ trader/
   setup_wizard.py   the setup questions (python -m trader setup)
   updater.py        over-the-air updates: fetch, test, restart, roll back (python -m trader update)
   backtest.py       replay the rule core on real history (python -m trader backtest)
+  trend.py          the daily trend rule and its replay (STRATEGY=trend, backtest --strategy trend, /trendtest)
   strategy.py       strategy cards: a complete configuration as data, with hard bounds
   lab.py            the laboratory: exam, forward test, promotion, rollback (python -m trader ... /lab)
   scorecard.py      Claude versus the rules, computed from real later prices
