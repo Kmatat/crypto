@@ -121,3 +121,45 @@ def test_percentage_cap_limits_the_ai_budget():
     # orchestrator sets the percentage cap from the account size
     s2 = Settings(symbols=["BTCUSDT"], anthropic_key="k", ai_budget_pct_month=0.25, starting_balance=10_000)
     assert s2.use_claude
+
+
+def test_the_scorecard_downloads_each_coins_prices_once_and_gets_the_same_answer():
+    """1.7.7: /report asked the exchange once per judged case (minutes on a busy journal, every other command waiting);
+    one download per coin, cut per case, gives identical results."""
+    import random
+    from trader.scorecard import CandleCache
+    hour, now = 3_600_000, 1_800_000_000_000
+    rng = random.Random(7)
+    series = {}
+    for sym in ("AAAUSDT", "BBBUSDT"):
+        price, rows = 100.0, []
+        for i in range(900):
+            o = price
+            price *= 1 + rng.uniform(-0.02, 0.02)
+            rows.append({"time": now - (900 - i) * hour, "open": o, "close": price, "high": max(o, price) * 1.005,
+                         "low": min(o, price) * 0.995, "volume": 1.0})
+        series[sym] = rows
+    calls = []
+
+    def fetch(symbol, start_ms, limit):
+        calls.append(symbol)
+        return [r for r in series[symbol] if r["time"] >= start_ms][:limit]
+
+    def direct(symbol, since_ms):
+        return fetch(symbol, since_ms, 130)
+    moments = [(sym, now - h * hour - 1234) for h in range(850, 0, -7) for sym in series]
+    want = [direct(sym, ms) for sym, ms in moments]
+    calls.clear()
+    cache = CandleCache(fetch)
+    assert [cache(sym, ms) for sym, ms in moments] == want
+    assert len(calls) == 2                                             # one download per coin, not one per case
+    assert cache("AAAUSDT", now - 899 * hour) == direct("AAAUSDT", now - 899 * hour)   # an earlier moment: fetched again
+
+
+def test_report_builds_the_scorecard_once(monkeypatch):
+    from trader import __main__ as main
+    built = []
+    monkeypatch.setattr(main, "scorecard_block", lambda bot, j: built.append(1) or "🧪 card")
+    j = Journal(":memory:", 5_000)
+    text = main.report_message(SimpleNamespace(last_price={}), Settings(starting_balance=5_000), j)
+    assert built == [1] and text.endswith("🧪 card") and "Balance" in text

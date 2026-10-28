@@ -13,7 +13,9 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from ..binance_client import BinanceClient
+import requests
+
+from ..binance_client import BinanceClient, BinanceError
 from ..config import Settings
 from ..llm import ClaudeJSON
 
@@ -42,6 +44,10 @@ def is_stock_token(base: str) -> bool:
     list and the AI's asset-type label remain as further defences."""
     return len(base) >= 4 and base.endswith("B") and base not in MAJOR_COINS
 MAX_PICK_MOVE_PCT = 30  # a coin up or down more than this in 24h is too risky to start watching
+# Binance lets a crypto coin's sell orders reach 2x its recent average price; it holds tokenized stocks, ETFs, gold and
+# fiat tokens to a far tighter band (1.2x or less). That band is the exchange's own mark of "not a crypto coin": it
+# catches the stock tokens whose names the rule above cannot (a 3-letter ticker such as MUB, Micron's).
+CRYPTO_MIN_BAND = 1.5
 
 PICK_SCHEMA = {
     "type": "object",
@@ -88,6 +94,17 @@ def normalize(symbol: str) -> str:
     return s if s.endswith("USDT") else s + "USDT"
 
 
+def exchange_says_not_crypto(public, symbol: str) -> bool:
+    """True when Binance's price band for the pair is that of a stock, ETF, gold or fiat token, or when the band cannot
+    be read (a coin is only watched once the exchange confirms it trades like a crypto coin)."""
+    try:
+        band = float(public.symbol_filters(symbol).get("ask_up") or 0)
+    except (BinanceError, requests.RequestException, KeyError, IndexError, TypeError, ValueError) as e:
+        log.warning("Scout: could not read the price rules of %s (%s); left out this time", symbol, e)
+        return True
+    return 0 < band < CRYPTO_MIN_BAND
+
+
 def looks_stable(t: dict) -> bool:
     """A coin pinned near $1 that barely moved all day is a stablecoin, whatever its name."""
     return abs(t["price"] - 1) < 0.015 and t["low"] > 0 and (t["high"] / t["low"] - 1) < 0.005
@@ -117,7 +134,13 @@ class MarketScoutAgent:
             out.append({"symbol": sym, "change_24h_pct": round((t["price"] / t["open"] - 1) * 100, 2),
                         "volume_musd": round(t["quote_volume"] / 1e6, 1), "major": base in MAJOR_COINS})
         out.sort(key=lambda c: -c["volume_musd"])
-        return out[:MAX_CANDIDATES]
+        kept = []
+        for c in out:   # the exchange's own check last: one small request per coin, remembered by the client
+            if len(kept) >= MAX_CANDIDATES:
+                break
+            if c["major"] or not exchange_says_not_crypto(self.public, c["symbol"]):
+                kept.append(c)
+        return kept
 
     def run(self, core: list[str], held: list[str]) -> dict:
         cands = self.candidates()

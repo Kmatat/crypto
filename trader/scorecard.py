@@ -21,6 +21,29 @@ log = logging.getLogger(__name__)
 HORIZON_HOURS = 120   # a counterfactual trade is followed for at most five days
 
 
+class CandleCache:
+    """candles_after(symbol, since_ms) for one scorecard run: each coin's hourly prices are downloaded once (up to
+    1,000 hours from the earliest moment asked for) and every case is cut from that copy. Asking the exchange once per
+    case took minutes on a busy journal and held up every Telegram command behind /report."""
+    LIMIT = 130    # hourly candles per case, the same as one direct request returned
+    SPAN = 1000    # the exchange's largest single download
+
+    def __init__(self, fetch):
+        self.fetch = fetch   # fetch(symbol, start_ms, limit) -> hourly candles opening at or after start_ms
+        self.rows: dict[str, tuple[int, list[dict], bool]] = {}
+
+    def __call__(self, symbol: str, since_ms: int) -> list[dict]:
+        got = self.rows.get(symbol)
+        if got is None or since_ms < got[0]:
+            rows = self.fetch(symbol, since_ms, self.SPAN)
+            got = self.rows[symbol] = (since_ms, rows, len(rows) < self.SPAN)   # fewer than asked: reaches now
+        _, rows, to_now = got
+        out = [r for r in rows if r["time"] >= since_ms][:self.LIMIT]
+        if len(out) < self.LIMIT and not to_now:   # past the end of the copy: ask for this case directly
+            return self.fetch(symbol, since_ms, self.LIMIT)
+        return out
+
+
 def replay_trade(candles: list[dict], entry: float, atr: float, s: Settings) -> dict:
     """What a rules trade opened at `entry` would have done over the candles that followed."""
     stop = entry - s.stop_loss_atr * atr

@@ -535,7 +535,7 @@ There are two different kinds of success:
   (Calmer: 17-24%).
 - **What the scout won't pick:**
   - Stablecoins and gold tokens are filtered out by list and by price behaviour.
-  - Tokenized stocks are rejected: Claude must label each pick's asset type, and only "crypto" is accepted.
+  - Tokenized stocks are rejected three ways: by name (Binance calls them TICKER + B), by the exchange's own price rules (Binance holds stock, ETF, gold and fiat tokens to a much tighter price band than crypto coins, which also catches short names such as MUB), and by the AI's asset-type label (only "crypto" is accepted).
   - Coins that moved more than 30% in a day are never added (no chasing pumps).
   - In testnet mode, only coins the demo exchange lists at a realistic price are used.
 - **Before going live** you need at least several weeks of testnet results across different

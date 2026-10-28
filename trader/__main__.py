@@ -35,7 +35,7 @@ from .agents.research import ResearchAgent, review_text
 from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
 from .notify import clean
-from .scorecard import claude_scorecard, news_scorecard, scorecard_text
+from .scorecard import CandleCache, claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
 from .ai_router import ORDERS, AIRouter, is_ai_source
 from .health import (agents_text, diagnose_text, free_ai_line, health_text, pulse_text, stuck_rule_for, trend_line,
@@ -411,8 +411,8 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
     if client is None:
         return ""
 
-    def candles_after(symbol: str, since_ms: int) -> list[dict]:
-        return client.klines(symbol, "1h", limit=130, start_ms=since_ms)
+    candles_after = CandleCache(lambda symbol, start_ms, limit: client.klines(symbol, "1h", limit=limit,
+                                                                            start_ms=start_ms))
     try:
         claude = claude_scorecard(j, bot.s, candles_after)
         free = []
@@ -430,6 +430,14 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
     j.set("scorecard_text", text)  # reused by the notebook between daily reports
     j.set("news_scorecard", news)  # the head trader tilts thresholds on news only once this shows news predicts
     return text
+
+
+def report_message(bot: Orchestrator, s: Settings, j: Journal) -> str:
+    """/report: performance, goals and the AI/news scorecard, each worked out once."""
+    perf = performance(j, bot.last_price)
+    card = scorecard_block(bot, j)
+    return (report_text(perf) + "\n\n" + goals_text(goals(j, perf, bot.last_price, trend=s.trend), perf)
+            + (("\n\n" + card) if card else ""))
 
 
 def status_extra(bot: Orchestrator, s: Settings, j: Journal | None = None) -> list[str]:
@@ -1137,10 +1145,7 @@ def cmd_run(s: Settings, args) -> None:
             "/trendtest": trendtest_now,
             "/ai": ai_now,
             "/review": review_now,
-            "/report": lambda: with_journal(s, lambda j: report_text(performance(j, bot.last_price)) + "\n\n"
-                                            + goals_text(goals(j, performance(j, bot.last_price), bot.last_price, trend=s.trend),
-                                                         performance(j, bot.last_price))
-                                            + (("\n\n" + scorecard_block(bot, j)) if scorecard_block(bot, j) else "")),
+            "/report": lambda: with_journal(s, lambda j: report_message(bot, s, j)),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
                                                                      status_extra(bot, s, j), trend=s.trend)),
             "/watchlist": lambda: with_journal(s, lambda j: trend_watchlist_text(s, j) if s.trend else

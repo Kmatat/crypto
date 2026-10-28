@@ -5,6 +5,23 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.7 - 2026-10-28
+
+Two defects found in the review of the live desk's results:
+- **A stock token got through the coin scout.** MUB is Micron's share as a Binance token, not a crypto coin. The name
+  rule catches Binance's stock tokens only when the name has 4 or more letters (TSLAB, NVDAB), and the AI labelled MUB
+  "crypto". The scout now also reads Binance's own price rules for each new candidate: the exchange holds stock, ETF,
+  gold and fiat tokens to a much tighter price band than crypto coins (sell orders up to 1.2x the recent price against
+  2x), and that band separates the two exactly on today's list (about 100 stock tokens out, every real coin whose
+  name ends in B, such as BNB, CKB or DGB, kept). A coin whose rules cannot be read is left out until the next scan.
+  (The scout runs only with the hourly agents; the daily trend rule trades your own coin list.)
+- **`/report` was slow and held up the other commands.** It worked out the AI and news scorecard twice and asked
+  Binance for prices once per judged item (hundreds of requests, 30 seconds or more, while every other Telegram
+  command waited). It now does it once, with one download per coin. The daily report uses the same faster path. (With
+  the daily trend rule the scorecard is not shown at all.)
+- Phone setup wording: the confirm screen says "ZEC HYPE NEAR, which are not in the list: the trend rule sells them"
+  (it said "is ... it"), and a risk level never set is shown as Normal, the value the desk uses (it said "not set").
+
 ## 1.7.6 - 2026-10-27
 
 - The last finding of the phone-setup review: a request file holding data nested thousands of levels deep (valid,

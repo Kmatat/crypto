@@ -27,11 +27,18 @@ TICKERS = [
 
 
 class FakeMarket:
-    def __init__(self, tickers=TICKERS, demo=None):
-        self.tickers, self.demo = tickers, demo
+    def __init__(self, tickers=TICKERS, demo=None, bands=None):
+        self.tickers, self.demo, self.bands, self.asked = tickers, demo, bands or {}, []
 
     def tickers_24h(self):
         return self.tickers
+
+    def symbol_filters(self, symbol):   # Binance's sell-price band: 2x for crypto coins, 1.2x for stock tokens
+        self.asked.append(symbol)
+        band = self.bands.get(symbol, 2.0)
+        if isinstance(band, Exception):
+            raise band
+        return {"ask_up": band}
 
     def all_prices(self):
         return self.demo
@@ -200,3 +207,16 @@ def test_watchlist_and_pace_messages():
     assert pace_message({"minutes": 5, "reason": "Fed decision", "source": "AI"}) == \
         "⏱️ Now checking every 5 min (set by the AI): Fed decision"
     assert trade_messages([{"symbol": "SCOUT", "error": "binance down"}])[0][1].startswith("⚠️ Market scout:")
+
+
+def test_stock_tokens_with_short_names_are_left_out_by_the_exchanges_own_price_rules():
+    """1.7.7: MUB (Micron's stock token) has a 3-letter ticker the name rule cannot catch; Binance's tighter price band
+    for stocks, ETFs, gold and fiat tokens does. Real coins whose names end in B stay; a band that cannot be read
+    leaves the coin out this time."""
+    from trader.binance_client import BinanceError
+    tickers = TICKERS + [tick("MUBUSDT", 120, 2, 60), tick("DGBUSDT", 0.01, 1, 20), tick("CKBUSDT", 0.005, 1, 15),
+                         tick("ODDUSDT", 1.5, 1, 12)]
+    market = FakeMarket(tickers, bands={"MUBUSDT": 1.2, "ODDUSDT": BinanceError("HTTP 500")})
+    syms = [c["symbol"] for c in MarketScoutAgent(market, None, None, Settings()).candidates()]
+    assert "MUBUSDT" not in syms and "ODDUSDT" not in syms and {"DGBUSDT", "CKBUSDT"} <= set(syms)
+    assert "BTCUSDT" not in market.asked                               # long-established coins need no lookup

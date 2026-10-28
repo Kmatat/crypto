@@ -301,6 +301,11 @@ def test_the_confirm_screen_names_the_coins_the_trend_rule_will_sell():
     p.answer("1"), p.answer("1"), p.answer("1"), p.answer("1")
     text, _ = p.answer("9")
     assert "holds PEPE, which is not in the list" in text and "BTC," not in text
+    two = session(held=["PEPEUSDT", "ZECUSDT"])
+    two.answer("1"), two.answer("1"), two.answer("1"), two.answer("2")
+    text, _ = two.answer("9")
+    assert "holds PEPE ZEC, which are not in the list: the trend rule sells them" in text
+    assert "Risk level: Normal → Calmer" in text
 
 
 def test_a_star_message_without_a_setup_gets_the_help():

@@ -244,6 +244,8 @@ def normalized(values: dict[str, str]) -> dict[str, str]:
 
 def describe(key: str, value: str | None) -> str:
     """A setting the way the owner reads it."""
+    if key == "TREND_VOL_TARGET" and value in (None, ""):
+        return "Normal"   # what the desk uses when the file has no risk level
     if value in (None, ""):
         return "not set"
     if key == "STRATEGY":
@@ -526,8 +528,10 @@ class PhoneSetup:
             return ""
         coins = set(self.value("SYMBOLS", HOURLY_COINS).split(","))
         sold = [c for c in self.held if c not in coins]
-        return (f"\n⚠️ The desk holds {describe('SYMBOLS', ','.join(sold))}, which is not in the list: the trend rule "
-                "sells it at its next daily decision (just after 00:00 UTC).") if sold else ""
+        many = len(sold) > 1
+        return (f"\n⚠️ The desk holds {describe('SYMBOLS', ','.join(sold))}, which {'are' if many else 'is'} not in the "
+                f"list: the trend rule sells {'them' if many else 'it'} at its next daily decision (just after 00:00 "
+                "UTC).") if sold else ""
 
     def _demo_note(self, coins: list[str]) -> str:
         if self.value("TRADING_MODE", "simulation") != "testnet":
