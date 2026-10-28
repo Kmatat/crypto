@@ -5,6 +5,14 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.7.8 - 2026-10-28
+
+- From the review of 1.7.7: when Binance does not answer, `/report` still tried again for every item it judges, and
+  each try can wait 10 seconds, so during an outage it could still hold up the other Telegram commands for many
+  minutes. Now a coin that fails twice is skipped for that report, and after three failures in a row the rest is
+  skipped (judged at the next report). A one-off failure still recovers. (Hourly agents only: with the daily trend rule
+  this scorecard is not shown.)
+
 ## 1.7.7 - 2026-10-28
 
 Two defects found in the review of the live desk's results:

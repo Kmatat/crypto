@@ -28,11 +28,29 @@ class CandleCache:
     LIMIT = 130    # hourly candles per case, the same as one direct request returned
     SPAN = 1000    # the exchange's largest single download
 
+    TRIES = 2      # a coin whose download fails twice is skipped for the rest of this run (judged next time)
+    OUTAGE = 3     # failed downloads in a row, any coin: the exchange is down, skip everything left
+
     def __init__(self, fetch):
         self.fetch = fetch   # fetch(symbol, start_ms, limit) -> hourly candles opening at or after start_ms
         self.rows: dict[str, tuple[int, list[dict], bool]] = {}
+        self.failed: dict[str, tuple[int, Exception]] = {}
+        self.streak, self.last_error = 0, None
 
     def __call__(self, symbol: str, since_ms: int) -> list[dict]:
+        tries, error = self.failed.get(symbol, (0, None))
+        if tries >= self.TRIES or self.streak >= self.OUTAGE:   # each try may wait 10 s: never one per case
+            raise error or self.last_error
+        try:
+            out = self._candles(symbol, since_ms)
+        except Exception as e:
+            self.failed[symbol] = (tries + 1, e)
+            self.streak, self.last_error = self.streak + 1, e
+            raise
+        self.streak = 0
+        return out
+
+    def _candles(self, symbol: str, since_ms: int) -> list[dict]:
         got = self.rows.get(symbol)
         if got is None or since_ms < got[0]:
             rows = self.fetch(symbol, since_ms, self.SPAN)

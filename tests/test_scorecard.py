@@ -163,3 +163,36 @@ def test_report_builds_the_scorecard_once(monkeypatch):
     j = Journal(":memory:", 5_000)
     text = main.report_message(SimpleNamespace(last_price={}), Settings(starting_balance=5_000), j)
     assert built == [1] and text.endswith("🧪 card") and "Balance" in text
+
+
+def test_a_coin_or_an_exchange_that_keeps_failing_is_not_asked_once_per_case():
+    """1.7.8: during an outage each request can wait 10 s; /report must not try again for every judged case."""
+    from trader.binance_client import BinanceError
+    from trader.scorecard import CandleCache
+    calls = []
+
+    def fetch(symbol, start_ms, limit):
+        calls.append(symbol)
+        if symbol == "GONEUSDT" or symbol.startswith("DOWN"):
+            raise BinanceError("timed out")
+        if symbol == "BLIPUSDT" and calls.count("BLIPUSDT") == 1:
+            raise BinanceError("one-off")
+        return [{"time": t, "close": 1.0} for t in range(start_ms, start_ms + 200)]
+    cache = CandleCache(fetch)
+    for t in range(50):
+        for sym in ("GONEUSDT", "OKUSDT", "BLIPUSDT"):
+            try:
+                cache(sym, 1000 + t)
+            except BinanceError:
+                pass
+    assert calls.count("GONEUSDT") == 2 and calls.count("OKUSDT") == 1 and calls.count("BLIPUSDT") == 2
+    assert len(cache("BLIPUSDT", 1010)) == 130                        # a one-off failure recovers
+    calls.clear()
+    down = CandleCache(fetch)
+    for t in range(50):
+        for sym in ("DOWN1USDT", "DOWN2USDT", "DOWN3USDT", "DOWN4USDT"):
+            try:
+                down(sym, t)
+            except BinanceError:
+                pass
+    assert len(calls) == 3                                             # an exchange-wide outage: 3 tries in all
