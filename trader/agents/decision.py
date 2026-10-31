@@ -46,6 +46,8 @@ SYSTEM = (
     "When a 'mentor' report is present it is the desk's trading discipline, built from principles documented by "
     "well-known traders (Paul Tudor Jones, Mark Minervini, the Turtle Traders, Ed Seykota, Jesse Livermore): "
     "weigh each ✓/✗ line explicitly in your reasoning; a failed check is a strong reason to HOLD. "
+    "A 'chart' report describes the market regime per timeframe (chop / trending / impulsive) and the latest chart "
+    "events; it is context for your judgement, never a trigger on its own. "
     "A separate risk manager sets position size and stop-loss, so focus on direction and conviction."
 )
 

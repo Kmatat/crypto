@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 STAMP = "%Y-%m-%d %H:%M"
 ICONS = {"start": "🚀", "trade": "💱", "order": "❌", "brake": "🛑", "watchlist": "🔭", "protection": "🛡️",
          "pace": "⏱️", "lab": "🔬", "strategy": "🏆", "challenger": "🧪", "rollback": "⏪", "error": "⚠️",
-         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝"}
+         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝", "chart": "📊"}
 PARAM_LABELS = [
     ("buy_threshold", "Buy when the weighted score is at least"),
     ("stop_loss_atr", "Stop-loss distance (ATR)"),
@@ -301,7 +301,8 @@ class Notes:
                        self._write("STRATEGY.md", self.strategy_md(trades, hist)),
                        self._write("TRADES.md", self.trades_md(trades, hist, prices)),
                        self._write("DIARY.md", self.diary_md()),
-                       self._write("PERFORMANCE.md", self.performance_md(trades, hist, prices, scorecard))]
+                       self._write("PERFORMANCE.md", self.performance_md(trades, hist, prices, scorecard)),
+                       self._write("CHART.md", self.chart_md())]
             for card, entry in self.cards():
                 written.append(self._write(f"strategies/{card.id}.md", self.card_md(card, entry, trades, hist)))
             return written
@@ -441,6 +442,8 @@ class Notes:
                  ["TRADES.md", "every trade: the decision, the agents' reports and the checklist at entry, the exit"],
                  ["DIARY.md", "the notable moments in order (starts, trades, brakes, coin list, lab, promotions, rollbacks)"],
                  ["PERFORMANCE.md", "results, demo goals, the week-by-week learning curve, the Claude scorecard"],
+                 ["CHART.md", "the chart picture per coin now, and the chart events of the last two weeks (regimes, "
+                              "crossovers, breakouts, levels)"],
                  ["weekly/<week>.md", "one snapshot a week, never rewritten: what was known and decided at the time"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -493,6 +496,8 @@ class Notes:
                  ["TRADES.md", "every trade: the decision at entry, the exit, which strategy it belonged to"],
                  ["DIARY.md", "the notable moments in order (starts, trades, brakes, take-profit raises, strategy switches)"],
                  ["PERFORMANCE.md", "results, the trend rule's goals (counted from its start), the week-by-week record"],
+                 ["CHART.md", "the hourly agents' chart picture (regimes, crossovers, breakouts, levels); the daily trend "
+                              "rule does not use it"],
                  ["weekly/<week>.md", "the hourly strategy's weekly pages, never rewritten (the trend rule adds none)"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -768,6 +773,9 @@ class Notes:
                 out.append("- Agents at entry: " + " · ".join(parts))
             if rep.get("mentor"):
                 out.append(f"- Checklist at entry: {_esc(rep['mentor'].get('checklist'))}")
+            chart = rep.get("chart") or {}
+            if chart.get("summary") and chart["summary"] != "no chart report":
+                out.append(f"- Chart at entry: {_esc(chart['summary'])}")
             if rep.get("head"):
                 out.append(f"- Buy threshold for this check: {rep['head'].get('threshold')} ({_esc(rep['head'].get('why'))})")
             if rep.get("watchlist", {}).get("why_watched"):
@@ -800,6 +808,73 @@ class Notes:
             for e in by_day[day]:
                 lines.append(f"- {e['ts'][11:16]} {ICONS.get(e['kind'], '•')} {e['kind']}: {e['text']}")
             lines.append("")
+        return "\n".join(lines)
+
+    # ---- CHART: the chart reader's picture (trader/agents/chart.py), from the journal only ----
+    def chart_now_table(self) -> str:
+        """The latest picture per coin as a table (empty string when the chart reader has not run yet)."""
+        latest = self.j.get("chart_latest") or {}
+        if not latest:
+            return ""
+        first = next(iter(latest.values()))
+        base = first.get("interval") or next((k for k in first if k not in ("4h", "1d", "events", "support",
+                                                                           "resistance", "summary", "ts", "interval")), "1h")
+        labels = ([base] if base == "4h" else [base, "4h"]) + ["1d"]
+        rows = []
+        for sym, b in latest.items():
+            rows.append([sym.removesuffix("USDT"), *[b.get(k, "-") for k in labels],
+                         _px(b["support"]) if b.get("support") else "-", _px(b["resistance"]) if b.get("resistance") else "-",
+                         _esc(b.get("summary", ""))])
+        when = str(first.get("ts", ""))[:16].replace("T", " ")
+        return "\n".join([f"_As of {when} UTC._", "",
+                          _table(["Coin", *[("daily" if k == "1d" else k) for k in labels], "Support", "Resistance",
+                                  "Picture"], rows)])
+
+    def chart_md(self) -> str:
+        """CHART.md: the three regimes explained, the picture per coin now, the events of the last 14 days by day and
+        a count per kind for the last 7 days. Everything comes from the journal (chart_latest and chart_events)."""
+        from .agents.chart import KINDS, frame_name, phrase
+        from .notify import KIND_WORDS
+        lines = ["# Chart picture", "",
+                 "_The chart reader describes each coin from finished candles only. **Chop** = going nowhere (the price "
+                 "went back and forth: a straightness below 0.30, where 1 is a straight line). **Trending** = a steady "
+                 "direction. **Impulsive** = a fast move (straightness 0.60 or more and at least three usual ranges in "
+                 "20 bars). Events: 12/26 average crossovers (50/200-day on the daily chart), breakouts above the recent "
+                 "high and breakdowns below the recent low (2 days on the hourly chart, 5 days on the 4-hour chart), big "
+                 "candles (over 2.5x the usual range), a new high with weaker momentum (RSI divergence) or on thinner "
+                 "volume. Nothing trades on this by itself; the optional `regime` checklist rule is the only place it can "
+                 "refuse a buy._", ""]
+        if self.s.trend:
+            lines += ["_The desk runs the daily trend rule, which does not use the chart reader; what follows is the last "
+                      "picture the hourly agents recorded, if any._", ""]
+        now = self.chart_now_table()
+        lines += ["## Now", "", now or "_Nothing recorded yet: the first market check fills this in._", ""]
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=14)).isoformat(timespec="seconds")
+        recent = self.j.chart_events(since=cutoff, limit=5000)   # all of the 14 days, not the newest 400 rows
+        lines += ["## Events, last 14 days", ""]
+        if not recent:
+            lines.append("_none recorded_")
+        by_day: dict[str, list[dict]] = {}
+        for e in recent:
+            day = dt.datetime.fromtimestamp(e["bar_time"] / 1000, dt.timezone.utc)
+            by_day.setdefault(day.strftime("%Y-%m-%d"), []).append(e)
+        for day in sorted(by_day, reverse=True):
+            lines += [f"### {day}", ""]
+            for e in by_day[day][:40]:   # the 4-hour and daily events sort first on a tie; the rest is hourly noise
+                clock = dt.datetime.fromtimestamp(e["bar_time"] / 1000, dt.timezone.utc).strftime("%H:%M")
+                lines.append(f"- {clock} UTC {e['symbol'].removesuffix('USDT')} {frame_name(e['timeframe'])} "
+                             f"{e['kind'].replace('_', ' ')}: {_esc(phrase(e))}")
+            if len(by_day[day]) > 40:
+                lines.append(f"- … and {len(by_day[day]) - 40} more hourly events that day")
+            lines.append("")
+        week = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat(timespec="seconds")
+        counts = self.j.chart_event_counts(week)
+        frames = sorted(counts, key=lambda k: (k == "1d", k == "4h", k))
+        if counts:
+            rows = [[f"{kind.replace('_', ' ')} ({KIND_WORDS.get(kind, kind)})",
+                     *[str(counts.get(f, {}).get(kind, 0)) for f in frames]] for kind in KINDS]
+            lines += ["## Events per kind, last 7 days", "",
+                      _table(["Kind", *[frame_name(f) for f in frames]], rows), ""]
         return "\n".join(lines)
 
     # ---- PERFORMANCE ----
@@ -871,5 +946,7 @@ class Notes:
         parts.append("\n".join(recent))
         ev = self.j.events()[-events_limit:]
         parts.append("# Recent diary\n\n" + "\n".join(f"- {_ts(e['ts'])} {e['kind']}: {e['text']}" for e in ev))
+        if now_table := self.chart_now_table():   # a few hundred bytes: the chart reader's picture per coin
+            parts.append("# Chart picture\n\n" + now_table)
         text = "\n\n".join(parts)
         return text if len(text) <= max_chars else text[:max_chars] + "\n\n[truncated]"

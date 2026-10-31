@@ -25,7 +25,9 @@ from pathlib import Path
 from . import trend
 from .config import AI_BUDGET_CEILING_USD, ENV_PATH, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
 from .journal import Journal
-from .notify import Telegram, pace_message, scout_message, trade_messages, trend_lines, trend_message
+from .notify import (Telegram, chart_daily_line, chart_text, pace_message, scout_message, trade_messages, trend_lines,
+                     trend_message)
+from .agents.chart import ChartEventsAgent
 from .orchestrator import Orchestrator
 from .report import (GOALS_TREND, goals, goals_text, performance, print_report, report_text, status_text,
                      watchlist_text)
@@ -34,18 +36,21 @@ from .agents.head import HeadTraderAgent
 from .agents.research import ResearchAgent, review_text
 from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
-from .notify import clean
+from .notify import MAX_LEN, clean
 from .scorecard import CandleCache, claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
 from .ai_router import ORDERS, AIRouter, is_ai_source
-from .health import (agents_text, diagnose_text, free_ai_line, health_text, pulse_text, stuck_rule_for, trend_line,
-                     trend_state, write_json)
+from .health import (agents_text, diagnose_text, free_ai_line, health_text, pulse_text, since_iso, stuck_rule_for,
+                     trend_line, trend_state, write_json)
 
 log = logging.getLogger("trader")
 
 HELP_TEXT = (
     "🤖 Crypto trading desk commands\n"
     "/status - open positions and each coin's latest decision with the reason\n"
+    "/chart [coin] - the chart picture: chop (going nowhere), trending or impulsive (a fast move) on the 1-hour, "
+    "4-hour and daily chart, "
+    "the latest crossovers and breakouts, nearest support and resistance\n"
     "/report - performance so far (profit, win rate, order success)\n"
     "/watchlist - which coins the desk watches and why\n"
     "/strategies - the strategy in use, challengers under test, and what you can approve\n"
@@ -293,6 +298,8 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     perf = performance(bot.journal, bot.last_price)
     text = report_text(perf, title=f"☀️ Daily report {today}")
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
+    if not s.trend and (chart_line := chart_daily_line(bot.journal, since_iso(24))):   # the chart reader's day
+        text += "\n" + chart_line
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=s.trend), perf)
     if s.trend and (block := trend_day_text(bot, bot.journal)):
         text += "\n\n" + block
@@ -638,7 +645,7 @@ def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
     cap = llm.effective_daily_budget()
     used_up = ("/review waits until then" if trend_mode else
                "the free AI, then the free rules, answer" if free else "free rules")
-    lines = [f"💸 Claude's budget: " + (f"${cap:.2f} a day" if cap else "no daily cap") + f" on {llm.model}; "
+    lines = ["💸 Claude's budget: " + (f"${cap:.2f} a day" if cap else "no daily cap") + f" on {llm.model}; "
              f"spent today ${llm.spent_today:.2f}"
              + ((" (used up until 00:00 UTC: " + used_up + ")") if llm.budget_hit else "")]
     if trend_mode:
@@ -863,7 +870,7 @@ def start_summary(bot: Orchestrator, s: Settings) -> dict:
 
 
 def cmd_run(s: Settings, args) -> None:
-    lock = single_instance(s.db_path)  # noqa: F841 - held until exit
+    lock = single_instance(s.db_path)  # held until exit (see the end of this function)
     bot = Orchestrator(s)
     trade_lock = threading.Lock()
     stop = threading.Event()  # a restart (update, reboot) waits for the current check to finish; the lab stops early
@@ -1039,6 +1046,17 @@ def cmd_run(s: Settings, args) -> None:
                 days = 7.0
             return with_journal(s, lambda j: agents_text(bot, j, days))
 
+        def chart_now(arg: str = "") -> str:
+            text = with_journal(s, lambda j: chart_text(bot, j, arg))
+            if len(text) > MAX_LEN - 100:   # many coins: several messages, split on line breaks (as /diagnose)
+                tg.send_long(text)
+                return ""
+            return text
+
+        def chart_tags() -> dict[str, str] | None:
+            """The regime tag per coin for /status (a copy of the desk's dict: the trading thread writes it)."""
+            return None if s.trend else {sym: ChartEventsAgent.tag(r) for sym, r in dict(bot.charts).items()}
+
         def diagnose_now(arg: str = "") -> str:
             try:
                 days = max(0.5, min(30.0, float(arg))) if arg.strip() else 7.0
@@ -1100,7 +1118,7 @@ def cmd_run(s: Settings, args) -> None:
                                               "Upload it to Claude and ask what to improve (see README.md inside).", notes)
             if with_journal(s, build):
                 return ("Inside the zip: README.md (start here), STRATEGY.md, TRADES.md, DIARY.md, PERFORMANCE.md, "
-                        "strategies/ (one file per strategy) and weekly/ (one page per week).")
+                        "CHART.md, strategies/ (one file per strategy) and weekly/ (one page per week).")
             return "Could not upload the notebook. On the server it is in data/notes (or run: desk notes)."
 
         def review_now() -> str:
@@ -1140,6 +1158,7 @@ def cmd_run(s: Settings, args) -> None:
             "/playbook": playbook_now,
             "/health": health_now,
             "/agents": agents_now,
+            "/chart": chart_now,
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
             "/trendtest": trendtest_now,
@@ -1147,7 +1166,8 @@ def cmd_run(s: Settings, args) -> None:
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_message(bot, s, j)),
             "/status": lambda: with_journal(s, lambda j: status_text(j, bot.last_price, watched(j),
-                                                                     status_extra(bot, s, j), trend=s.trend)),
+                                                                     status_extra(bot, s, j), trend=s.trend,
+                                                                     tags=chart_tags())),
             "/watchlist": lambda: with_journal(s, lambda j: trend_watchlist_text(s, j) if s.trend else
                                                watchlist_text(j.get("watchlist") or default_watchlist(s))),
             "/help": lambda: help_text(s),
@@ -1232,6 +1252,7 @@ def cmd_run(s: Settings, args) -> None:
     if stop.is_set():
         print("Stopping after finishing the current check (restart or update).")
     print_report(performance(bot.journal, bot.last_price))
+    lock.close()   # the instance lock is released only now, when the desk has finished
 
 
 def main() -> None:

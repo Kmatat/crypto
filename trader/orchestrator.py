@@ -27,6 +27,7 @@ import logging
 import time
 
 from . import free_ai, trend
+from .agents.chart import NOTABLE, ChartEventsAgent, daily_missing_reason, finished_daily, phrase
 from .agents.decision import NEWS_VETO, DecisionAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
@@ -82,6 +83,10 @@ class Orchestrator:
         # the daily trend strategy trades the owner's coins on a measured rule: no scout, head trader or AI decisions
         self.scout = MarketScoutAgent(public, testnet, self.ai, s) if public and s.auto_coins and not s.trend else None
         self.technical = TechnicalAnalysisAgent()
+        self.chart = ChartEventsAgent(s.interval)   # the chart reader: regimes, crossovers, breakouts, levels
+        self.charts: dict[str, dict] = {}           # the latest chart report per coin (for /chart and /status)
+        self.charts_at: str | None = None           # when those reports were made (ISO, UTC)
+        self._daily_rows: dict[str, list | None] = {}   # daily prices read this check, per coin (None: the read failed)
         self.prediction = PredictionAgent()
         self.news = NewsAgent(self.ai, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
         self.forex = ForexAgent(offline=s.offline)
@@ -288,6 +293,7 @@ class Orchestrator:
             self.mentor = MentorAgent(self.s.mentor_checks, self.s.min_reward_risk, self.s.cooldown_hours) \
                 if self.s.mentor_checks else None
             self.market.interval = self.s.interval
+            self.chart = ChartEventsAgent(self.s.interval)   # a 2h/4h card changes the chart's base frame too
             if self.card is not None:
                 log.info("Strategy switched to %s [%s]", card.name, card.id)
                 self.journal.event("strategy", f"The desk now trades {card.name} [{card.id}]: "
@@ -322,6 +328,7 @@ class Orchestrator:
 
         # 1-2. prices, analysis, exchange-side exits, desk-side backup exits
         ctx: dict[str, dict] = {}
+        self._daily_rows = {}
         for sym in symbols:
             try:
                 candles = self.market.candles(sym)
@@ -331,6 +338,7 @@ class Orchestrator:
                 closed = self.market.closed(candles)  # the decision looks only at finished candles (as the backtester)
                 technical = self.technical.run(closed)
                 technical["price"] = price
+                chart = self._chart(sym, closed, position)   # never raises; None when the picture could not be drawn
                 if position:
                     position, exit_result = self._sync_protection(sym, position)
                     if exit_result:
@@ -352,10 +360,12 @@ class Orchestrator:
                         if err := self._protect(sym, position):
                             summary.append({"symbol": sym, "protect_error": err})
                 ctx[sym] = {"price": price, "technical": technical, "prediction": self.prediction.run(closed),
-                            "closes": [c["close"] for c in closed], "candles": closed}
+                            "closes": [c["close"] for c in closed], "candles": closed, "chart": chart}
             except Exception as e:  # one bad coin must not stop the others
                 log.exception("Market data failed for %s", sym)
+                self.charts.pop(sym, None)   # no picture from this check: never show last hour's as fresh
                 summary.append({"symbol": sym, "stage": "market data", "error": str(e)})
+        self._store_charts(symbols)
 
         if ctx:
             self._remember_benchmark({sym: c["price"] for sym, c in ctx.items() if sym in self.s.symbols}, allow_empty=True)
@@ -391,6 +401,8 @@ class Orchestrator:
                     "news": news.get(coin, {"score": 0, "summary": "no data"}) | {"market_mood": news.get("_mood")},
                     "forex": forex,
                     "watchlist": {"why_watched": wl.get("reasons", {}).get(sym, "")},
+                    # the chart reader's picture: context for the AI, not part of the rules' weighted score
+                    "chart": ChartEventsAgent.brief(c["chart"]) if c.get("chart") else {"summary": "no chart report"},
                 }
                 position = positions.get(sym)
                 review = self._mentor_review(sym, c) if self.mentor and position is None else None
@@ -823,7 +835,6 @@ class Orchestrator:
             pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         near = []
         for sym, p in self.journal.positions().items():
-            c = ctx.get(sym)
             if self._is_protected(p):
                 continue  # the exchange watches this one every second; no need to hurry
             near.append(sym)  # no exchange orders: the desk is the only safety net, so check often
@@ -920,18 +931,76 @@ class Orchestrator:
             out.append({"symbol": sym, "action": "SELL", "reason": reason, "order": fill, "trade": trade})
         return out
 
+    # ---- the chart reader (trader/agents/chart.py) ----
+    def _chart(self, sym: str, closed: list[dict], position: dict | None) -> dict | None:
+        """The chart picture of one coin from the candles already in hand; its events go to the journal once each, the
+        notable 4-hour and daily ones to the diary. Daily prices are read from the download the checklist makes anyway
+        (unheld coins, checklist on); otherwise only from the cache, so a check makes no new request. A chart problem
+        never stops the check."""
+        rows = None
+        try:
+            if self.mentor and position is None:          # the one download of the check; the checklist reuses it
+                rows = self.market.daily_rows(sym)
+            else:                                          # held coin or checklist off: the cache or nothing
+                rows = self.market.daily_cached(sym)
+            daily = finished_daily(rows, closed[-1]["time"]) if rows and closed else None
+        except Exception as e:  # noqa: BLE001 - daily history is optional context
+            log.warning("Daily history unavailable for %s: %s", sym, e)
+            daily = None
+        self._daily_rows[sym] = rows       # None after a failed read: the checklist then makes no second attempt
+        try:
+            report = self.chart.run(closed, daily)
+            if daily is None:              # say why the daily part is missing, the same words /chart uses
+                report["summary"] = ChartEventsAgent.summary(report, daily_missing_reason(bool(self.mentor),
+                                                                                         position is not None))
+        except Exception:  # noqa: BLE001
+            log.exception("Chart analysis failed for %s", sym)
+            self.charts.pop(sym, None)     # no picture from this check: never show last hour's as fresh
+            return None
+        self.charts[sym] = report          # replaced in one step: the Telegram thread reads a copy of this dict
+        try:
+            for e in self.journal.add_chart_events(sym, report["events"]):
+                if e["timeframe"] in ("4h", "1d") and e["kind"] in NOTABLE:   # the base frame's noise stays out
+                    frame = report["timeframes"].get(e["timeframe"]) or {}
+                    self.journal.event("chart", f"{sym.removesuffix('USDT')} {e['timeframe']}: {phrase(e)} "
+                                                f"(regime {frame.get('regime') or 'unknown'})", data=e)
+        except Exception:  # noqa: BLE001 - journal bookkeeping must never stop the check (the coin's stops come next)
+            log.exception("Recording the chart events of %s failed", sym)
+        return report
+
+    def _store_charts(self, symbols: list[str]) -> None:
+        """After the analysis loop: forget coins that left the watchlist, keep the compact picture in the journal (what
+        /chart and the notebook read after a restart) and prune chart events older than 90 days."""
+        try:
+            self.charts = {k: v for k, v in self.charts.items() if k in symbols}
+            self.charts_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            if self.charts:
+                self.journal.set("chart_latest", {sym: {**ChartEventsAgent.brief(r), "interval": r["interval"],
+                                                        "ts": self.charts_at} for sym, r in self.charts.items()})
+            self.journal.prune_chart_events()
+        except Exception:  # noqa: BLE001 - bookkeeping must never stop the check
+            log.exception("Storing the chart picture failed")
+
     # ---- master traders' checklist and trailing stops ----
     def _mentor_review(self, sym: str, c: dict) -> dict | None:
+        read = self._daily_rows.get(sym, "unread")   # the chart step's read of this check: no second download
         try:
-            daily = self.market.daily_closes(sym)
-            btc_daily = daily if sym == "BTCUSDT" else self.market.daily_closes("BTCUSDT")
+            if read == "unread":
+                daily = self.market.daily_closes(sym)
+            elif read is None:                        # that read failed: the same outcome as before, one attempt
+                raise RuntimeError("daily prices could not be read this check")
+            else:
+                daily = [r["close"] for r in read]
+            btc_read = self._daily_rows.get("BTCUSDT")
+            btc_daily = daily if sym == "BTCUSDT" else \
+                [r["close"] for r in btc_read] if isinstance(btc_read, list) else self.market.daily_closes("BTCUSDT")
         except Exception as e:
             log.warning("Daily history unavailable for %s: %s", sym, e)
             daily, btc_daily = [], None
         atr = c["technical"]["atr"]
         stop, take = c["price"] - self.s.stop_loss_atr * atr, c["price"] + self.s.take_profit_atr * atr
         return self.mentor.review(sym, c["candles"], daily, c["price"], stop, take, atr, btc_daily,
-                                  self.journal.last_stop_loss_ms(sym), int(time.time() * 1000))
+                                  self.journal.last_stop_loss_ms(sym), int(time.time() * 1000), chart=c.get("chart"))
 
     def _trail_price(self, position: dict, closed: list[dict]) -> float:
         """The highest finished-candle close since the position was opened (the entry price before the first one)."""

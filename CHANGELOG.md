@@ -5,6 +5,41 @@ fixes only, and a new **major** number only if the owner has to do something by 
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
 the exact code revision, and every update message names the version it installed.
 
+## 1.8.0 - 2026-10-31
+
+The first step of the multi-agent plan: a **chart reader** (`trader/agents/chart.py`) that describes the market
+picture of every watched coin, from the finished hourly candles the desk already downloads. Nothing it says changes
+what the desk trades unless you switch its rule on.
+
+- **What it reads.** Three timeframes per coin: the hourly chart, the 4-hour bars built from the same candles (aligned
+  to 00:00, 04:00, ... UTC, a bar used only once its four hours are finished) and the daily closes the checklist already
+  downloads. Each gets a regime - **chop** (going nowhere), **trending** (a steady direction) or **impulsive** (a fast
+  move), measured as the straightness of the last 20 bars - the structural events of the newest finished bars (12/26
+  average crossovers, 50/200-day golden and death crosses, a breakout above the 2-day high or a breakdown below the
+  2-day low on the hourly chart and 5-day on the 4-hour chart, a candle over 2.5x the usual range, a new high with weaker
+  momentum or on thinner volume), the nearest support and resistance, and one plain-language line.
+- **Where you see it.** `/chart` shows every coin's picture (`/chart eth` one coin with its recent events and levels);
+  each `/status` line gets a short regime tag; the daily report gets one line with the last 24 hours' event counts; the
+  notebook gets `CHART.md`; the diary records the 4-hour and daily crossovers, breakouts and breakdowns (the hourly
+  chart's events stay in the journal and `/chart`: on pure noise it fires about once every seven hours per coin, which
+  would bury the trades). No Telegram alert per event. The Portfolio Manager sees the picture as one more analyst
+  report; the rules' weighted score is unchanged. `/health` and `/agents` list the chart reader (15 agents).
+- **A new checklist rule, off by default: `regime`.** No new buy while the hourly or the 4-hour chart is in chop, or
+  right after a breakdown. Switch it on with `MENTOR_CHECKS=trend200,btc,cooldown,reward,regime` (or `/setup`), but
+  measure it first: `python -m trader backtest --days 365 --checks trend200,btc,cooldown,reward,regime` runs exactly the
+  agent and the candles the live desk uses, and `Checklist vetoes {'regime': n}` says how many buy signals it refused
+  (`--checks all` includes it, as it includes every rule).
+  The replay with the rule takes a little longer; without it nothing new is computed there.
+- **What did not change.** The weighted score and thresholds, the daily trend rule (which does not use the chart
+  reader), the risk limits, and the number of requests per check: none were added. The daily prices come from the
+  download the checklist already makes for coins the desk does not hold, so a coin you hold keeps its daily line for an
+  hour after the buy and then reads "daily: not refreshed while the coin is held" until the position closes; with the
+  checklist off there is no daily line. The desk's own candles give the picture; the agent itself never calls the
+  network and costs well under a millisecond per coin.
+- **Journal.** A `chart_events` table (one row per coin, timeframe, kind and bar, never duplicated across checks),
+  pruned after 90 days; older journals get it at the next start. The `TRADES.md` trade blocks gain a "Chart at entry"
+  line.
+
 ## 1.7.8 - 2026-10-28
 
 - From the review of 1.7.7: when Binance does not answer, `/report` still tried again for every item it judges, and

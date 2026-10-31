@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS closed_trades (
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS equity (ts TEXT, equity REAL, cash REAL);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts TEXT, kind TEXT, text TEXT, data TEXT);
+CREATE TABLE IF NOT EXISTS chart_events (
+  id INTEGER PRIMARY KEY, ts TEXT, symbol TEXT, timeframe TEXT, kind TEXT, bar_time INTEGER, price REAL, details TEXT,
+  UNIQUE(symbol, timeframe, kind, bar_time));
+CREATE INDEX IF NOT EXISTS chart_events_ts ON chart_events(ts);
 """
 
 
@@ -187,6 +191,63 @@ class Journal:
         for e in out:
             e["data"] = json.loads(e["data"]) if e.get("data") else None
         return out
+
+    # ---- chart events (trader/agents/chart.py): crossovers, breakouts, big candles per coin and timeframe ----
+    def add_chart_events(self, symbol: str, events: list[dict]) -> list[dict]:
+        """Record the chart events of one coin; the same bar's event is never written twice (a check every 15 minutes
+        sees the same finished bar four times). Returns the ones that were new, so the orchestrator can put the
+        notable ones in the diary."""
+        new, ts = [], now()
+        for e in events:
+            if e["kind"] in ("cross_up", "cross_down"):
+                # the 4-hour averages are computed on a sliding window, so one real cross can land on a neighbouring
+                # bar from one check to the next: a cross is recorded once per direction, never behind a later one
+                last = self.db.execute("SELECT kind, bar_time FROM chart_events WHERE symbol=? AND timeframe=? AND kind "
+                                       "IN ('cross_up', 'cross_down') ORDER BY bar_time DESC, id DESC LIMIT 1",
+                                       (symbol, e["timeframe"])).fetchone()
+                if last and (last["kind"] == e["kind"] or int(last["bar_time"]) > int(e["bar_time"])):
+                    continue
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO chart_events (ts, symbol, timeframe, kind, bar_time, price, details) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ts, symbol, e["timeframe"], e["kind"], int(e["bar_time"]), e.get("price"),
+                 json.dumps(e.get("details") or {}, default=str)))
+            if cur.rowcount == 1:
+                new.append(e)
+        self.db.commit()
+        return new
+
+    def chart_events(self, symbol: str | None = None, since: str | None = None, limit: int = 50) -> list[dict]:
+        """Newest first (unlike events(), which is oldest first); `since` is an ISO timestamp on the time the desk
+        recorded the event. Ordered by the bar's time, so a 4-hour bar recorded late still sorts by when it happened."""
+        where, args = [], []
+        if symbol:
+            where.append("symbol=?")
+            args.append(symbol)
+        if since:
+            where.append("ts >= ?")
+            args.append(since)
+        sql = "SELECT * FROM chart_events" + (" WHERE " + " AND ".join(where) if where else "") \
+              + " ORDER BY bar_time DESC, id DESC LIMIT ?"
+        out = [dict(r) for r in self.db.execute(sql, (*args, limit))]
+        for e in out:
+            e["details"] = json.loads(e["details"]) if e.get("details") else {}
+        return out
+
+    def chart_event_counts(self, since: str) -> dict[str, dict[str, int]]:
+        """{timeframe: {kind: n}} of the events recorded since `since` (the daily report's line)."""
+        out: dict[str, dict[str, int]] = {}
+        for r in self.db.execute("SELECT timeframe, kind, COUNT(*) AS n FROM chart_events WHERE ts >= ? "
+                                 "GROUP BY timeframe, kind", (since,)):
+            out.setdefault(r["timeframe"], {})[r["kind"]] = r["n"]
+        return out
+
+    def prune_chart_events(self, days: int = 90) -> int:
+        """Forget chart events older than `days`; returns how many went. Cheap (the table is indexed on ts)."""
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        cur = self.db.execute("DELETE FROM chart_events WHERE ts < ?", (cutoff,))
+        self.db.commit()
+        return cur.rowcount
 
     def log_equity(self, equity: float) -> None:
         self.db.execute("INSERT INTO equity VALUES (?,?,?)", (now(), equity, self.cash))

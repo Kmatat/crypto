@@ -26,9 +26,9 @@ CHECKLIST = "master traders' checklist:"
 STUCK_MIN_SIGNALS = 20
 STUCK_MIN_TREND = 3      # the daily trend rule makes at most one buy signal per coin a day
 TREND_RULE = "Trend rule"
-TREND_UNUSED = ("Not used by the daily trend rule, so not listed: technical analysis, prediction, the mentor's "
-                "checklist, news, forex, the market scout, the head trader, the research agent, the laboratory and the "
-                "AI's trade decisions. No AI decides a trade; /review can still ask Claude about the notebook.")
+TREND_UNUSED = ("Not used by the daily trend rule, so not listed: technical analysis, the chart reader, prediction, the "
+                "mentor's checklist, news, forex, the market scout, the head trader, the research agent, the laboratory "
+                "and the AI's trade decisions. No AI decides a trade; /review can still ask Claude about the notebook.")
 
 
 def now_utc() -> dt.datetime:
@@ -292,6 +292,16 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
                     f"{coins} coins each check"))
     rows.append(row("Prediction", "statistical next-hours forecast per coin", "working" if fresh else "idle",
                     f"{coins} coins each check"))
+    charts = dict(getattr(bot, "charts", {}) or {})   # a copy: the trading thread writes this dict
+    regimes: dict[str, int] = {}
+    for r in charts.values():
+        frame = r["timeframes"].get("4h") or r["timeframes"].get(r["interval"]) or {}
+        regimes[frame.get("regime") or "unknown"] = regimes.get(frame.get("regime") or "unknown", 0) + 1
+    chart_n = sum(sum(kinds.values()) for kinds in j.chart_event_counts(since).values())
+    rows.append(row("Chart reader", "regime, crossovers, breakouts and levels per coin on 1h, 4h and daily",
+                    "working" if charts else "idle",
+                    f"{len(charts)} coins; 4h: " + (", ".join(f"{n} {k}" for k, n in sorted(regimes.items())) or "no picture yet")
+                    + f"; {chart_n} events in the last {hours:g} h"))
     checks = list(s.mentor_checks)
     refused = sum(n for k, n in f["refused"].items() if k.startswith("checklist"))
     rows.append(row("Mentor (master traders' checklist)", "refuses buys that break documented trading rules",
@@ -644,11 +654,11 @@ def settings_lines(bot) -> list[str]:
               + f"; positions about ${(equity or base.starting_balance) * s.max_position_pct:,.2f} each (minimum order $10)"]
     if bot.llm:
         pct = base.ai_pct_month()
-        budget.append(f"Claude cap " + (f"${bot.llm.effective_daily_budget():.2f}/day" if bot.llm.effective_daily_budget()
+        budget.append("Claude cap " + (f"${bot.llm.effective_daily_budget():.2f}/day" if bot.llm.effective_daily_budget()
                                         else "none: no daily limit on real-money spend, /aibudget 1 sets $1 a day") + " ("
                       + ("set with /aibudget" if bot.journal.get("ai_budget_override") else
                          f"the lower of ${base.ai_daily_budget_usd:g}/day and {pct:g}% a month of the balance" if pct else
-                         f"AI_DAILY_BUDGET_USD; no percentage cap on demo money")
+                         "AI_DAILY_BUDGET_USD; no percentage cap on demo money")
                       + f"); spent today ${bot.llm.spent_today:.2f}")
     if (w := wallet_line(bot)):
         budget.append(w)

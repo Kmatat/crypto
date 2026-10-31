@@ -15,6 +15,9 @@ computed from price data are included; nothing here copies anyone's live calls.
   reward       Paul Tudor Jones' reward-to-risk discipline: the target must be at least
                MIN_REWARD_RISK times the distance to the stop (default 2:1).
   cooldown     Jesse Livermore: never rush back into a coin that just stopped you out.
+  regime       Dow theory / Wyckoff: no new buy while the hourly or 4-hour chart is in chop (going
+               nowhere), or right after a breakdown below the recent low. Off by default; measure it
+               first with the replay (python -m trader backtest --checks ...,regime).
 
 Sizing (the Turtle Traders' "units", Richard Dennis) and trailing stops (Ed Seykota,
 "cut losses, let profits run") live in the Risk Manager and the orchestrator; this
@@ -26,10 +29,11 @@ import datetime as dt
 
 from .technical import ema
 
-ALL_CHECKS = ("trend200", "alignment", "overextended", "btc", "reward", "cooldown")
+ALL_CHECKS = ("trend200", "alignment", "overextended", "btc", "reward", "cooldown", "regime")
 SOURCES = {
     "trend200": "Paul Tudor Jones", "alignment": "Mark Minervini", "overextended": "Minervini / Livermore",
     "btc": "Druckenmiller (don't fight the tape)", "reward": "Paul Tudor Jones", "cooldown": "Jesse Livermore",
+    "regime": "Dow theory / Wyckoff (trade with the trend, not inside the range)",
 }
 
 
@@ -61,9 +65,12 @@ class MentorAgent:
         self.overextension_atr = overextension_atr
 
     def review(self, symbol: str, candles: list[dict], daily: list[float], price: float, stop: float, take: float,
-               atr: float, btc_daily: list[float] | None, last_stop_ms: int | None, now_ms: int) -> dict:
+               atr: float, btc_daily: list[float] | None, last_stop_ms: int | None, now_ms: int,
+               chart: dict | None = None) -> dict:
         """Returns {"pass": bool, "checks": {name: {"ok", "detail", "source"}}, "failed": [names]}.
-        A check that cannot be computed (not enough history) is reported as unknown and does not block."""
+        A check that cannot be computed (not enough history) is reported as unknown and does not block.
+        `chart` is the Chart Events agent's report for the coin (trader/agents/chart.py), read only by the
+        `regime` rule; the other rules work without it."""
         out: dict[str, dict] = {}
 
         def add(name, ok, detail):
@@ -99,6 +106,22 @@ class MentorAgent:
             hours = (now_ms - last_stop_ms) / 3_600_000
             add("cooldown", hours >= self.cooldown_hours,
                 f"last stop-loss on this coin {hours:.0f} h ago (wait {self.cooldown_hours:g} h)")
+        if "regime" in self.checks:
+            if not chart:
+                add("regime", None, "no chart report")
+            else:
+                # the base frame (hourly) and the 4-hour frame; the daily frame is context only. The words are the
+                # chart module's own (a local import: chart.py imports fmt from this module when it loads)
+                from .chart import phrase, regime_text
+                short = [f for f in chart["timeframes"].values() if f and f["label"] != "1d"]
+                chop = [f["label"] for f in short if f.get("regime") == "chop"]
+                latest = chart.get("latest_event")
+                after_breakdown = bool(latest and latest["kind"] == "breakdown")
+                picture = ", ".join(f"{f['label']} {regime_text(f)}" for f in short) or "no chart frames yet"
+                detail = picture + (f"; latest event: {latest['timeframe']} {phrase(latest)}" if latest
+                                    else "; no recent event")
+                # no usable frame yet (a new listing): unknown, like the other rules with too little history
+                add("regime", None if not short else (not chop and not after_breakdown), detail)
         failed = [n for n, c in out.items() if c["ok"] is False]
         return {"pass": not failed, "checks": out, "failed": failed}
 

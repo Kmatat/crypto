@@ -260,8 +260,9 @@ def watchlist_text(wl: dict) -> str:
 
 
 def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra: list[str] | None = None,
-                trend: bool = False) -> str:
-    """Open positions plus the latest decision (and its reason) for each coin."""
+                trend: bool = False, tags: dict[str, str] | None = None) -> str:
+    """Open positions plus the latest decision (and its reason) for each coin. `tags`: the chart reader's regime tag
+    per coin ('4h trending up · 1h chop'), shown after the decision's time when given."""
     lines = ["📌 Status", *(extra or []), f"Free cash: ${j.cash:,.2f}"]
     positions = j.positions()
     for sym, pos in positions.items():
@@ -287,7 +288,8 @@ def status_text(j: Journal, prices: dict[str, float], symbols: list[str], extra:
             found = True
             when = f"{r['ts'][:10]} {r['ts'][11:16]}" if r["source"] == "trend" else r["ts"][11:16]
             how = "" if r["source"] == "trend" else f" ({r['confidence']:.0%})"   # the rule has no confidence
-            lines.append(f"• {sym} {r['action']}{how} at {when} UTC: "
+            tag = f" · chart: {tags[sym]}" if tags and tags.get(sym) else ""
+            lines.append(f"• {sym} {r['action']}{how} at {when} UTC{tag}: "
                          f"{clean(r['reasoning'], 300)} [risk: {r['risk_reason']}]")
     if not found:
         lines.append("None yet - the first check is still running. Try again in a minute.")

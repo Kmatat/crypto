@@ -427,3 +427,145 @@ def scout_message(u: dict) -> str:
 def pace_message(pace: dict) -> str:
     who = {"AI": "the AI", "risk": "the risk rules", "settings": "the normal setting"}.get(pace["source"], pace["source"])
     return f"⏱️ Now checking every {pace['minutes']} min (set by {who}): {clean(pace['reason'], 200)}"
+
+
+# ---- the chart reader (trader/agents/chart.py): /chart and the daily report's line ----
+KIND_WORDS = {"breakout": "breakout", "breakdown": "breakdown", "cross_up": "crossover", "cross_down": "crossover",
+              "impulse_up": "big candle", "impulse_down": "big candle", "rsi_divergence": "weaker momentum",
+              "volume_exhaustion": "thinner volume"}
+PLURALS = ("breakout", "breakdown", "crossover", "big candle")
+REGIME_LEGEND = ("Chop = going nowhere, trending = a steady direction, impulsive = a fast move. Events are from the "
+                 "latest finished candles; nothing here places an order.")
+NO_CHART_YET = "No chart yet - the first market check is still running. Try again in a minute."
+CHART_TREND = "The chart reader works with the hourly agents; the daily trend rule does not use it."
+
+
+def _frame_word(label: str) -> str:
+    return {"1h": "hourly chart", "4h": "4-hour chart", "1d": "daily chart"}.get(label, f"{label} chart")
+
+
+def _level_text(frame: dict) -> str:
+    """'support $3,401.00 (-3.2%) · resistance $3,522.50 (+0.3%)' for one frame."""
+    from .agents.mentor import fmt
+    price = frame["price"] or 1.0
+    return (f"support ${fmt(frame['support'])} ({(frame['support'] / price - 1) * 100:+.1f}%) · "
+            f"resistance ${fmt(frame['resistance'])} ({(frame['resistance'] / price - 1) * 100:+.1f}%)")
+
+
+def daily_missing_text(bot, j, sym: str) -> str:
+    """Why a coin has no daily frame, in words (the checklist-off reason first: with it off, no coin gets daily prices,
+    held or not)."""
+    from .agents.chart import daily_missing_reason
+    return daily_missing_reason(bool(getattr(bot, "mentor", None)), sym in j.positions())
+
+
+def _no_picture_text(bot, j, coin: str, known: set) -> str:
+    """A coin that has no picture: watched but not drawn at the latest check (its data failed), or not watched."""
+    sym = coin if coin.endswith("USDT") else coin + "USDT"
+    watched = set(known) | set(getattr(getattr(bot, "s", None), "symbols", None) or []) \
+        | set((j.get("watchlist") or {}).get("symbols") or [])
+    if sym in watched:
+        return (f"{coin.removesuffix('USDT')} has no picture from the latest check (its prices or its chart analysis "
+                "failed; /health shows errors). It is drawn again at the next check.")
+    return f"{coin.removesuffix('USDT')} is not on the watchlist (see /watchlist)."
+
+
+def _check_clock(bot) -> str:
+    ts = getattr(bot, "charts_at", None)
+    return f", latest check {ts[11:16]} UTC" if ts else ""
+
+
+def _coin_block(sym: str, report: dict, daily_missing: str, levels: bool = True) -> list[str]:
+    """One or two lines per coin for /chart: the picture, then the main (4-hour) levels."""
+    from .agents.chart import ChartEventsAgent
+    from .agents.mentor import fmt
+    frames = report["timeframes"]
+    base = frames.get(report["interval"])
+    main = frames.get("4h") or base
+    price = f"${fmt(base['price'])} " if base else ""
+    out = [f"{sym.removesuffix('USDT')} {price}- {clean(ChartEventsAgent.summary(report, daily_missing), 400)}"]
+    if levels and main:
+        out.append(f"   {_level_text(main)}" + (" on the 4-hour chart" if main is frames.get("4h") else ""))
+    return out
+
+
+def chart_text(bot, j, coin: str = "") -> str:
+    """/chart: the chart picture per coin from the desk's latest check (bot.charts); with a coin, its details and the
+    last events from the journal. Reads a copy of the desk's dict: the trading thread writes it while this runs."""
+    from .agents.chart import FOUR_H_MS, ChartEventsAgent, bar_clock, frame_name, phrase, regime_text
+    from .agents.mentor import fmt
+    if getattr(getattr(bot, "base", None), "trend", False):
+        return CHART_TREND
+    charts = dict(getattr(bot, "charts", {}) or {})
+    coin = coin.strip().upper()
+    sym = (coin if coin.endswith("USDT") else coin + "USDT") if coin else ""
+    if not charts:   # before the first check, or right after a restart: the journal's compact picture
+        latest = j.get("chart_latest") or {}
+        if not latest:
+            return NO_CHART_YET
+        if sym and sym not in latest:
+            return _no_picture_text(bot, j, coin, set(latest))
+        ts = str(next(iter(latest.values())).get("ts", ""))[:16].replace("T", " ")
+        rows = [f"📊 Chart picture as of {ts} UTC (from the journal; the desk's latest check is not finished yet)"]
+        rows += [f"{s.removesuffix('USDT')} - {clean(b.get('summary', ''), 300)}" for s, b in latest.items()
+                 if not sym or s == sym]
+        return "\n".join(rows)
+    held = j.positions()
+    order = sorted(charts, key=lambda k: (k not in held, list(charts).index(k)))   # held coins first
+    if not sym:
+        rows = [f"📊 Chart picture (finished candles{_check_clock(bot)})"]
+        for s in order:
+            rows += _coin_block(s, charts[s], daily_missing_text(bot, j, s))
+        rows += ["", REGIME_LEGEND + " /chart eth shows one coin with its recent events."]
+        return clean("\n".join(rows), 12_000)   # 20 coins need more than one message: the command splits it
+    if sym not in charts:
+        return _no_picture_text(bot, j, coin, set(charts))
+    r, missing = charts[sym], daily_missing_text(bot, j, sym)
+    rows = [f"📊 {sym.removesuffix('USDT')} chart (finished candles{_check_clock(bot)})"]
+    rows += _coin_block(sym, r, missing, levels=False)
+    for label, f in ChartEventsAgent.frames_in_order(r):
+        if f is None:
+            rows.append(f"{_frame_word(label)}: " + (missing if label == "1d" else "not enough finished bars yet"))
+            continue
+        line = f"{_frame_word(label)}: {regime_text(f)}"
+        if f.get("er") is not None:
+            line += f", straightness {f['er']:.2f} (0 = going nowhere, 1 = a straight line)"
+        if label == "1d":
+            if f.get("sma50") and f.get("sma200"):
+                line += f"; 50-day ${fmt(f['sma50'])} · 200-day ${fmt(f['sma200'])}"
+            rows.append(line + f"; last finished day {bar_clock(f['bar_time'], with_date=True)[:6]}")
+            continue
+        if label == "4h":   # a 4-hour event can be hours old: say which bar the picture ends with
+            line += f"; 4h bars up to {bar_clock(f['bar_time'] + FOUR_H_MS)} UTC"
+        rows += [line, f"   {_level_text(f)}"]
+    events = j.chart_events(sym, limit=8)
+    if events:
+        rows.append("Recent events:")
+        rows += [f"- {bar_clock(e['bar_time'], with_date=True)} {frame_name(e['timeframe'])}: {phrase(e)}" for e in events]
+    else:
+        rows.append("No chart events recorded for this coin yet.")
+    rows += ["", REGIME_LEGEND]
+    return clean("\n".join(rows), MAX_LEN)
+
+
+def chart_daily_line(j, since: str) -> str:
+    """One line for the daily report: '📊 Chart events, last 24 h: 11 - 4-hour chart: 2 breakouts, 1 breakdown,
+    1 crossover · hourly chart: 7 · daily chart: none'. Empty when nothing was recorded in the 24-hour window (not
+    "today": the report goes out in the morning, when today is a few hours old)."""
+    counts = j.chart_event_counts(since)
+    if not counts:
+        return ""
+    total = sum(sum(kinds.values()) for kinds in counts.values())
+
+    def words(kinds: dict[str, int]) -> str:
+        merged: dict[str, int] = {}
+        for kind, n in kinds.items():
+            word = KIND_WORDS.get(kind, kind.replace("_", " "))
+            merged[word] = merged.get(word, 0) + n
+        return ", ".join(f"{n} {w}{'s' if n != 1 and w in PLURALS else ''}" for w, n in merged.items()) or "none"
+
+    parts = ["4-hour chart: " + words(counts.get("4h", {}))]
+    for label in [k for k in counts if k not in ("4h", "1d")] or ["1h"]:
+        parts.append(f"{_frame_word(label)}: {sum(counts.get(label, {}).values())}")
+    parts.append("daily chart: " + words(counts.get("1d", {})))
+    return f"📊 Chart events, last 24 h: {total} - " + " · ".join(parts)

@@ -25,9 +25,10 @@ since 1.7.0, only Market Data, the Risk Manager and Execution work; see "The dai
 | **News Analyst** | Reads the headlines, sets the pace | Reads CoinDesk, Cointelegraph and Decrypt. Claude rates each coin's news from -1 (bearish) to +1 (bullish) and advises how often to check the market right now. With no Claude key it uses a keyword list |
 | **Forex / Macro** | Watches the US dollar | Follows USD vs EUR, GBP, JPY and CHF (European Central Bank rates). A fast-rising dollar usually hurts crypto ("risk-off") |
 | **Technical Analyst** | Chart reader | Standard indicators: trend averages (EMA), momentum (MACD), overbought/oversold (RSI), Bollinger bands, volatility (ATR) |
+| **Chart Reader** | Describes the market picture | From the same finished candles: is each timeframe (1-hour, the 4-hour bars built from it, daily) in **chop** (going nowhere), **trending** or **impulsive** (a fast move)? Which structural events just happened: 12/26 average crossovers (50/200-day on the daily chart), a breakout above the recent high or a breakdown below the recent low, an unusually big candle, a new high with weaker momentum or on thinner volume? Nearest support and resistance. Shown to the Portfolio Manager as context, on `/chart` and in the notebook; nothing trades on it by itself (see "Chart events") |
 | **Forecaster** | Predicts the next move | Fits a trend line to the last 24 hours, compares it with the noise, and gives a probability that the price goes up |
 | **Portfolio Manager** | Makes the call | Weighs all reports and decides **BUY / SELL / HOLD**, with a confidence level and a plain-English reason. Uses Claude if a key is set, otherwise a weighted score |
-| **Mentor** | The master traders' checklist | Every candidate buy must pass rules documented by well-known traders: above the 200-day average (Paul Tudor Jones), Bitcoin itself in an uptrend (don't fight the tape), no re-entry 24 h after a stop-loss (Livermore), at least 2:1 reward-to-risk (PTJ). Each line is shown with its source in the buy alert, and Claude is told to weigh it |
+| **Mentor** | The master traders' checklist | Every candidate buy must pass rules documented by well-known traders: above the 200-day average (Paul Tudor Jones), Bitcoin itself in an uptrend (don't fight the tape), no re-entry 24 h after a stop-loss (Livermore), at least 2:1 reward-to-risk (PTJ). Each line is shown with its source in the buy alert, and Claude is told to weigh it. Optionally `regime`: no buy while the 1-hour or 4-hour chart is in chop or right after a breakdown (off until a replay shows its effect) |
 | **Risk Manager** | Safety officer, can veto anything | Sizes each trade so a stop-loss costs 1% of equity (the Turtle Traders' method), capped at 10% per coin; sets the stop-loss and a 2:1 take-profit; **trails the stop upward** as the price rises (Seykota: cut losses, let profits run). Blocks trades with low confidence, too many open positions, or after the 3% daily / 10% overall loss limits |
 | **Execution Trader** | Places the order, then insures it | Sends the order to Binance, confirms it was **FILLED**, records the real quantity, price and fees, and immediately places the **stop-loss and take-profit on the exchange** as a pair (when one fills, Binance cancels the other) |
 
@@ -215,7 +216,8 @@ forecast, weighted score, the master traders' checklist, sizing, trailing stops,
 exchange-side exits) over real hourly Binance history and prints return, trade count, win rate, profit
 factor and drawdown next to the buy-and-hold result for the same coins and period. `--sweep` tries a grid
 of thresholds and stop/take-profit distances; `--checks`, `--trail`, `--risk`, `--position`, `--symbols`
-test the principles, sizing and coin sets. News, forex and Claude's judgement have no history and are left
+test the principles, sizing and coin sets (`--checks trend200,btc,cooldown,reward,regime` adds the chart reader's
+`regime` rule, see "Chart events"). News, forex and Claude's judgement have no history and are left
 out, so the backtest measures the free rule core: the floor the AI layer has to beat.
 
 What the backtests showed when the defaults were chosen (BTC, ETH, SOL; buy-and-hold of the same coins in
@@ -392,6 +394,46 @@ mirror image), and a **head trader** agent manages the other agents around it:
   strategy. It has no revenue target, on purpose: an agent pushed for fast revenue takes more risk. Its job is
   to make every dollar of AI budget change a decision and every threshold earn its evidence.
 
+## Chart events
+
+Since 1.8.0 a **chart reader** (`trader/agents/chart.py`) describes the market picture of every watched coin at
+every check, from the finished hourly candles the desk already downloads: the hourly chart, the 4-hour bars built
+from those candles (aligned to 00:00, 04:00, ... UTC; a bar is used only once its four hours are finished) and the
+daily closes. **It makes no new request**: the daily prices come from the download the checklist already makes for
+coins the desk does not hold, so a coin you hold keeps its daily line for an hour after the buy and then reads
+"daily: not refreshed while the coin is held" until the position closes (its hourly and 4-hour lines go on). With
+`MENTOR_CHECKS=none` no daily prices are downloaded at all, and the daily line says so.
+
+**The regime** is one number per timeframe, the *straightness* of the last 20 bars (the net move divided by the
+length of the path the price took: 1 is a straight line, near 0 is going back and forth; a random walk scores about
+0.22). Below 0.30 the chart is in **chop** (going nowhere); at 0.60 or more, when the 20 bars also moved at least
+three usual ranges (3 ATR), it is **impulsive** (a fast move); everything in between is **trending**.
+
+**The events**, on the latest finished bars (the last 6 hourly, the last 2 four-hour bars), each written to the
+journal once per bar and kept 90 days:
+
+| Event | Fires when |
+|---|---|
+| crossover | the 12-bar average crosses the 26-bar average (daily chart: the 50-day crosses the 200-day: golden / death cross) |
+| breakout / breakdown | the bar closes above the highest high / below the lowest low of the bars before it: 2 days (48 bars) on the hourly chart, 5 days (30 bars) on the 4-hour chart |
+| big candle | the bar's range is more than 2.5x the usual range (the ATR of the 14 bars before it) |
+| weaker momentum | a new 2-day (5-day) closing high with the RSI at least 5 points below its value at the previous peak |
+| thinner volume | a new closing high on average volume below 70% of the volume around the previous peak |
+
+Where you see it: `/chart` (every coin: regimes, the newest events, support and resistance; `/chart eth` adds one
+coin's recent events and levels), a short regime tag in each `/status` line, one line in the daily report with the
+day's event counts, `CHART.md` in the notebook, and the diary (the 4-hour and daily crossovers, breakouts and
+breakdowns only: the hourly chart fires about one event per seven hours per coin on pure noise, which would bury the
+trades). The Portfolio Manager sees the picture as one more analyst report; **the rules' weighted score is unchanged**
+and nothing trades on a chart event by itself.
+
+**The `regime` rule** (off by default) is the one place the chart can refuse a buy: with
+`MENTOR_CHECKS=trend200,btc,cooldown,reward,regime` the checklist refuses a buy while the hourly or the 4-hour chart is
+in chop, or when the newest event on those charts is a breakdown. Measure it first, exactly as the live desk would
+apply it: `python -m trader backtest --days 365 --checks trend200,btc,cooldown,reward,regime` runs the same agent on the
+same candles; in the result `Checklist vetoes {'regime': n}` is how many buy signals it refused. The replay with the
+rule takes a little longer (the chart is computed for every candidate buy, up to a few thousand times a year).
+
 ## The notebook: every strategy, trade and lesson as Markdown (for you, and for Claude)
 
 Everything the desk does is in its SQLite journal, which code can read but people cannot. The notebook
@@ -406,6 +448,7 @@ so it can never disagree with the journal and can be rebuilt from any backup (`d
 | `TRADES.md` | every trade: when and at what price, which strategy was live, the decision and its confidence, what each agent reported at entry (technical, prediction, news, forex), the checklist, the exit |
 | `DIARY.md` | the notable moments in order: starts, buys and sells, failed orders, brakes, coin-list changes, protection problems, pace changes, lab results, promotions, rejections, rollbacks |
 | `PERFORMANCE.md` | the report, the demo goals, the week-by-week learning curve (equity, trades, profit factor, champion), the Claude scorecard, costs |
+| `CHART.md` | the chart picture per coin now (regimes, support and resistance, the owner's line), the chart events of the last two weeks by day, a count per kind for the last week |
 | `weekly/<week>.md` | written once a week after the lab and never rewritten: the lab result, the lessons, Claude's review, the performance at that moment |
 
 **Getting it:** `/notes` on Telegram sends the folder as a zip; the weekly backup message brings it too; on the
@@ -545,7 +588,7 @@ There are two different kinds of success:
 
 ```
 trader/
-  agents/      scout, market, news, forex, technical, prediction, decision, mentor, risk, execution
+  agents/      scout, market, news, forex, technical, chart, prediction, decision, mentor, risk, execution
   orchestrator.py   runs the cycle in order
   binance_client.py signed Binance REST calls
   llm.py            Claude calls with structured (JSON) answers

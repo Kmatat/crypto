@@ -19,7 +19,7 @@ class MarketDataAgent:
         self.interval = interval
         self.offline = offline
         self._synthetic: dict[str, list[dict]] = {}
-        self._daily: dict[str, tuple[float, list[float]]] = {}
+        self._daily: dict[str, tuple[float, list[dict]]] = {}   # coin -> (read at, the raw daily rows)
         self._daily_candles: dict[str, tuple[float, int, list[dict]]] = {}   # coin -> (read at, rows asked, rows)
         self._rng: dict[str, random.Random] = {}
 
@@ -36,16 +36,29 @@ class MarketDataAgent:
             return candles
         return candles[:-1]
 
-    def daily_closes(self, symbol: str, limit: int = 260) -> list[float]:
-        """Daily closing prices (for the 50- and 200-day averages). Cached for an hour; offline: none."""
+    def daily_rows(self, symbol: str, limit: int = 260) -> list[dict]:
+        """The daily candles, the newest (still forming) day last, for the checklist's 50- and 200-day averages and
+        the chart reader's daily frame. One download per coin per hour, shared by both; offline: none."""
         if self.offline or self.client is None:
             return []
         cached = self._daily.get(symbol)
         if cached and time.time() - cached[0] < 3600:
             return cached[1]
-        closes = [c["close"] for c in self.client.klines(symbol, "1d", limit)]
-        self._daily[symbol] = (time.time(), closes)
-        return closes
+        rows = self.client.klines(symbol, "1d", limit)
+        self._daily[symbol] = (time.time(), rows)
+        return rows
+
+    def daily_cached(self, symbol: str) -> list[dict]:
+        """The daily rows read less than an hour ago, or none: never a download. The hour matters: an older read
+        would hold a day that has since finished as a still-forming row with a stale price. Used for coins the
+        checklist does not download for (held coins, or the checklist switched off), so a check makes no extra
+        request for them."""
+        cached = self._daily.get(symbol)
+        return cached[1] if cached and time.time() - cached[0] < 3600 else []
+
+    def daily_closes(self, symbol: str, limit: int = 260) -> list[float]:
+        """Daily closing prices (for the 50- and 200-day averages). Cached for an hour; offline: none."""
+        return [c["close"] for c in self.daily_rows(symbol, limit)]
 
     def daily_candles(self, symbol: str, limit: int = 130) -> list[dict]:
         """Daily candles, the newest (still forming) day last, for the daily trend strategy. Cached for an hour.

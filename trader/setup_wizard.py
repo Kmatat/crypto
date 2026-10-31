@@ -40,7 +40,7 @@ LAYOUT = [
     ("Risk limits (the Risk Manager agent enforces these)", [
         "RISK_PER_TRADE_PCT", "MAX_POSITION_PCT", "MAX_OPEN_POSITIONS", "MAX_DAILY_LOSS_PCT", "MAX_DRAWDOWN_PCT",
         "MIN_CONFIDENCE", "STOP_LOSS_ATR", "TAKE_PROFIT_ATR", "TRAIL_ATR"]),
-    ("Master traders' checklist: trend200, btc, cooldown, reward, alignment, overextended ('none' = off)", [
+    ("Master traders' checklist: trend200, btc, cooldown, reward, alignment, overextended, regime ('none' = off)", [
         "MENTOR_CHECKS", "MIN_REWARD_RISK", "COOLDOWN_HOURS"]),
 ]
 DEFAULTS = {

@@ -17,6 +17,7 @@ import itertools
 import sys
 import time
 
+from .agents.chart import ChartEventsAgent
 from .agents.decision import DecisionAgent
 from .agents.execution import PAPER_FEE, STOP_SLIPPAGE
 from .agents.mentor import ALL_CHECKS, MentorAgent
@@ -100,6 +101,8 @@ class Backtest:
         self.risk = RiskManagerAgent(s)
         self.technical, self.prediction = TechnicalAnalysisAgent(), PredictionAgent()
         self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
+        # the chart reader is needed only by the checklist's `regime` rule: without it nothing is computed
+        self.chart = ChartEventsAgent(s.interval) if self.mentor and "regime" in s.mentor_checks else None
         self.daily = {sym: DailySeries(h) for sym, h in history.items()}
         self.btc = btc_history if btc_history is not None else history.get("BTCUSDT")
         self.btc_daily = DailySeries(self.btc) if self.btc else None
@@ -113,7 +116,6 @@ class Backtest:
             times = [t for t in times if t <= self.end_ms]
         if self.days and times:  # trade only the last `days`; earlier history feeds the long averages
             times = [t for t in times if t >= times[-1] - self.days * 86_400_000]
-        step_ms = times[1] - times[0] if len(times) > 1 else 3_600_000
         cash, positions, trades, curve = s.starting_balance, {}, [], []
         day, day_start = None, s.starting_balance
         decisions = {"BUY": 0, "SELL": 0, "HOLD": 0}
@@ -190,9 +192,13 @@ class Backtest:
                 if self.mentor:
                     btc_daily = (self.btc_daily.at(self.btc_index[t], self.btc[self.btc_index[t]]["close"])
                                  if self.btc_daily and t in self.btc_index else None)
+                    chart = None
+                    if self.chart:   # the same 200-candle window and the finished days before this candle's day, as live
+                        ds = self.daily[sym]
+                        chart = self.chart.run(candles[sym], ds.completed[:ds.before[idx[sym]]])
                     review = self.mentor.review(sym, candles[sym], self.daily[sym].at(idx[sym], price[sym]), price[sym],
                                                 verdict["stop_loss"], verdict["take_profit"], atr, btc_daily,
-                                                last_stop.get(sym), t)
+                                                last_stop.get(sym), t, chart=chart)
                     if not review["pass"]:
                         for name in review["failed"]:
                             vetoes[name] = vetoes.get(name, 0) + 1
