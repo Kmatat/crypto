@@ -7,10 +7,13 @@ a simple keyword list is used and the pace stays at the normal setting.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 
 import requests
 
@@ -58,6 +61,24 @@ def hits(headline: str, words: list[str]) -> int:
     return sum(bool(WORD_PATTERNS[w].search(low)) for w in words)
 
 
+def publication_time(text: str | None) -> str | None:
+    """An RSS pubDate ("Sat, 31 Oct 2026 12:49:47 +0000") as ISO UTC, or None when missing or unreadable. A date
+    without a time zone is taken as UTC. Never raises: the feeds are written by strangers, and one odd date (such as
+    the year 9999, which reads fine but cannot be converted to UTC) must cost that one item its time, never the
+    headlines the news agent reads."""
+    if not text or not str(text).strip():
+        return None
+    try:
+        d = parsedate_to_datetime(str(text).strip())
+        if d is None:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d.astimezone(dt.timezone.utc).isoformat(timespec="seconds")
+    except Exception:  # noqa: BLE001 - any unreadable date is "no time", whatever the error
+        return None
+
+
 SENTIMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -103,6 +124,11 @@ class NewsAgent:
         self.offline = offline
         self.cache_seconds = cache_seconds
         self._cache: tuple[float, dict, set] | None = None
+        # for the event study (trader/agents/events.py): the items of the last fetch with their publication times,
+        # when they were fetched, and the result the agent gave for them. Remembered, never used by the news reading
+        self.last_items: list[dict] = []
+        self.last_fetch: float = 0.0
+        self.last_result: dict | None = None
 
     def run(self, coins: list[str], snapshot: dict | None = None) -> dict:
         """Returns {"BTC": {"score": .., "summary": .., "headlines": [..]}, ..., "_mood": "..", "_pace": {..}|None}"""
@@ -116,11 +142,17 @@ class NewsAgent:
         if result is None:
             result = self.keyword_sentiment(headlines, coins)
         self._cache = (time.time(), result, set(coins))
+        self.last_result = result
         return result
 
-    def fetch_headlines(self, per_feed: int = 25) -> list[str]:
+    def fetch_items(self, per_feed: int = 25) -> list[dict]:
+        """Every item of the feeds, in feed order: {"title", "link", "ts" (the publication time as ISO UTC, or None
+        when the feed gives none or an unreadable one; a time without a zone is taken as UTC), "source" (the feed's
+        host)}. The same limits and failure handling as the titles always had: a feed over MAX_FEED_BYTES or not
+        answering within 10 seconds is skipped, and the list stops at per_feed x the number of feeds items in all."""
         out = []
         for url in FEEDS:
+            source = urlparse(url).netloc.removeprefix("www.")
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0 crypto-agents"}, stream=True)
                 r.raise_for_status()
@@ -133,12 +165,24 @@ class NewsAgent:
                 for item in root.iter("item"):
                     title = (item.findtext("title") or "").strip()
                     if title:
-                        out.append(title)
+                        out.append({"title": title, "link": "", "ts": None, "source": source})
+                        try:   # the extras for the event study: a problem here never drops the title
+                            out[-1]["link"] = (item.findtext("link") or "").strip()
+                            out[-1]["ts"] = publication_time(item.findtext("pubDate"))
+                        except Exception:  # noqa: BLE001 - the title stays, without link or time
+                            pass
                     if len(out) >= per_feed * len(FEEDS):
                         break
             except (requests.RequestException, ET.ParseError) as e:
                 log.warning("News feed %s failed: %s", url, e)
-        return list(dict.fromkeys(out))  # de-duplicate, keep order
+        return out
+
+    def fetch_headlines(self, per_feed: int = 25) -> list[str]:
+        """Titles only, de-duplicated, in feed order (what the news reading has always worked from). Also remembers
+        the items and the fetch time for the event study."""
+        items = self.fetch_items(per_feed)
+        self.last_items, self.last_fetch = items, time.time()
+        return list(dict.fromkeys(i["title"] for i in items))  # de-duplicate, keep order
 
     @staticmethod
     def mentions(headline: str, coin: str) -> bool:

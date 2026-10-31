@@ -137,11 +137,12 @@ def test_agents_report_counts_agents_and_strategy_changes(monkeypatch, tmp_path)
     assert "Created: 3" in text and "Coins added: XRP" in text and "removed: SOL" in text
     rows = roster(bot, bot.journal)
     names = [r["name"] for r in rows]
-    assert len(rows) == 15 and "Head trader" in names and "Laboratory" in names and "Chart reader" in names
+    assert len(rows) == 16 and "Head trader" in names and "Laboratory" in names and "Chart reader" in names
+    assert "Event study" in names
     by = {r["name"]: r for r in rows}
     assert by["Market data"]["status"] == "working" and by["Market scout"]["status"] == "off"   # offline: no scout
     report = agents_text(bot, bot.journal, 1)
-    assert report.startswith("🤖 15 agents:") and "Strategy in force" in report and "🧪 Strategies (last 1 days)" in report
+    assert report.startswith("🤖 16 agents:") and "Strategy in force" in report and "🧪 Strategies (last 1 days)" in report
     bot.journal.event("error", "Market data BTCUSDT: timeout")
     assert {r["name"]: r for r in roster(bot, bot.journal)}["Market data"]["status"] == "failing"
     assert "1 failing" in roster_text(roster(bot, bot.journal))

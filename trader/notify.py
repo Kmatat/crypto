@@ -251,7 +251,7 @@ def _messages(r: dict, trend: bool) -> list[tuple[str, str]]:
             out.append((f"error:{sym}", f"⚠️ Daily trend decisions: {r['error']}\n(Open positions keep their emergency "
                                         f"stop. This alert repeats at most every 6 hours.)"))
             return out
-        what = "Market scout" if sym == "SCOUT" else sym
+        what = {"SCOUT": "Market scout", "EVENTS": "Event study"}.get(sym, sym)
         out.append((f"error:{sym}", f"⚠️ {what}: {r['error']}\n(The desk keeps running with the coins it has "
                                     f"and retries. This alert repeats at most every 6 hours.)"))
         return out

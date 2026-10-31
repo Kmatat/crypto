@@ -36,6 +36,7 @@ from .agents.head import HeadTraderAgent
 from .agents.research import ResearchAgent, review_text
 from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
+from .events_report import events_line, events_text
 from .notify import MAX_LEN, clean
 from .scorecard import CandleCache, claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
@@ -52,6 +53,9 @@ HELP_TEXT = (
     "4-hour and daily chart, "
     "the latest crossovers and breakouts, nearest support and resistance\n"
     "/report - performance so far (profit, win rate, order success)\n"
+    "/events [coin|macro] - what prices did around scheduled US releases (CPI, Fed, jobs) and headline bursts: the "
+    "jump, how long it took, what it gave back, and the same hour on a normal day. Measured after the fact, not a "
+    "forecast\n"
     "/watchlist - which coins the desk watches and why\n"
     "/strategies - the strategy in use, challengers under test, and what you can approve\n"
     "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
@@ -131,6 +135,9 @@ def cycle_line(r: dict) -> str:
     if r.get("action") == "RAISE":   # the trend rule's take-profit order moved up with the price
         return (f"{r['symbol']:9s} RAISE  take-profit order -> {r['take_profit']:,.6g} (price {r['price']:,.6g}, "
                 f"{r['price'] / r['entry_price'] - 1:+.0%} since the buy; stop {r['stop_loss']:,.6g})")
+    if r.get("stage") == "events":   # the event study measured something this check (it trades nothing)
+        return (f"{'EVENTS':9s} measured {r['settled']} event(s) with {r['requests']} requests "
+                f"({r['used']}/{r['budget']} today)")
     line = f"{r['symbol']:9s} {r.get('action', ''):4s}{'*' if is_ai_source(r.get('source')) else ' '}"
     if "confidence" in r:
         px = f"{r['price']:,.2f}" if r['price'] >= 1 else f"{r['price']:.6g}"
@@ -300,6 +307,8 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
     text += "\nWatching: " + ", ".join(sym.removesuffix("USDT") for sym in bot.watchlist()["symbols"])
     if not s.trend and (chart_line := chart_daily_line(bot.journal, since_iso(24))):   # the chart reader's day
         text += "\n" + chart_line
+    if not s.trend and (ev_line := events_line(bot.journal, today)):   # the event study's day (hourly agents only)
+        text += "\n" + ev_line
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=s.trend), perf)
     if s.trend and (block := trend_day_text(bot, bot.journal)):
         text += "\n\n" + block
@@ -1118,7 +1127,7 @@ def cmd_run(s: Settings, args) -> None:
                                               "Upload it to Claude and ask what to improve (see README.md inside).", notes)
             if with_journal(s, build):
                 return ("Inside the zip: README.md (start here), STRATEGY.md, TRADES.md, DIARY.md, PERFORMANCE.md, "
-                        "CHART.md, strategies/ (one file per strategy) and weekly/ (one page per week).")
+                        "CHART.md, EVENTS.md, strategies/ (one file per strategy) and weekly/ (one page per week).")
             return "Could not upload the notebook. On the server it is in data/notes (or run: desk notes)."
 
         def review_now() -> str:
@@ -1159,6 +1168,7 @@ def cmd_run(s: Settings, args) -> None:
             "/health": health_now,
             "/agents": agents_now,
             "/chart": chart_now,
+            "/events": lambda arg="": with_journal(s, lambda j: events_text(j, s, arg)),
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
             "/trendtest": trendtest_now,
@@ -1189,6 +1199,7 @@ def cmd_run(s: Settings, args) -> None:
                     # a card that is not running is never rolled back because of the daily trend rule's trades
                     if not s.trend and (why := Lab(bot.base, bot.journal, client=None).watch_live()):
                         tg.send(f"⏪ Strategy rolled back to the previous champion: {why}. Review /strategies.")
+                    summary += bot.events_step()   # 1.8.1: the event study records and measures; it trades nothing
             except Exception as e:  # keep the desk alive; the service would restart it anyway
                 log.exception("Cycle %s failed", n)
                 tg.send_once("cycle", f"⚠️ A trading cycle failed: {e}\nThe desk keeps running and retries.")

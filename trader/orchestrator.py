@@ -29,6 +29,7 @@ import time
 from . import free_ai, trend
 from .agents.chart import NOTABLE, ChartEventsAgent, daily_missing_reason, finished_daily, phrase
 from .agents.decision import NEWS_VETO, DecisionAgent
+from .agents.events import EventsAgent
 from .agents.execution import ExecutionAgent, PaperBroker, TestnetBroker
 from .agents.forex import ForexAgent
 from .agents.head import HeadTraderAgent
@@ -98,6 +99,9 @@ class Orchestrator:
         broker = TestnetBroker(testnet) if testnet else \
             PaperBroker(lambda sym: self.last_price[sym], range_fn=self.market.range_since)
         self.execution = ExecutionAgent(broker)
+        # the event study (1.8.1): what prices did around headline bursts and scheduled releases; a measurement that
+        # runs after the trading cycle (events_step) and feeds nothing back into it
+        self.events = EventsAgent(self.journal, public, s)
         self.protect_errors: dict[str, str] = {}  # symbol -> last reason protection could not be placed
         self.pace = {"minutes": s.cycle_minutes, "reason": "normal pace", "source": "settings"}
         self.scout_update: dict | None = None  # set when the watchlist changed this cycle
@@ -256,6 +260,21 @@ class Orchestrator:
                                + "; removed " + (", ".join(self.scout_update["removed"]) or "none")
                                + f". Now watching {', '.join(new['symbols'])}.",
                                {"added": self.scout_update["added"], "removed": self.scout_update["removed"]})
+
+    # ---- the event study (after the trading cycle; it changes nothing the cycle does) ----
+    def events_step(self) -> list[dict]:
+        """Record headline bursts and scheduled releases and measure the complete windows (trader/agents/events.py).
+        Called by the main loop after run_cycle(); any failure becomes one EVENTS error entry and the desk goes on.
+        Runs with the hourly agents only (STRATEGY=hourly); with the daily trend rule it does nothing."""
+        if self.base.trend:   # the daily trend rule never runs the study: no download, no record, nothing settled
+            return []
+        try:
+            symbols = list(dict.fromkeys(self.watchlist()["symbols"] + list(self.journal.positions())))
+            return self.events.step(dt.datetime.now(dt.timezone.utc), symbols, self.news.last_items,
+                                    self.news.last_result, self.news.last_fetch or None)
+        except Exception as e:  # noqa: BLE001 - a measurement must never stop the desk
+            log.exception("Event study failed")
+            return [{"symbol": "EVENTS", "stage": "events", "error": f"the event study failed: {e}"}]
 
     # ---- strategy card ----
     def apply_champion(self) -> StrategyCard | None:

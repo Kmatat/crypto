@@ -3,7 +3,77 @@
 Release numbers follow `major.minor.patch`: a new **minor** number for new abilities, a new **patch** number for
 fixes only, and a new **major** number only if the owner has to do something by hand (such as re-running the setup).
 The number lives in `trader/__init__.py`; `/version` on Telegram and `desk version` on the server show it next to
-the exact code revision, and every update message names the version it installed.
+the exact code revision, and every update message names the version it installed. The release calendar in
+`trader/macro_calendar.json` is refreshed from the official pages whenever its last date is within 90 days.
+
+## 1.8.1 - 2026-10-31
+
+Phase 2 of the multi-agent plan: **event synthesis** (`trader/agents/events.py`), a measurement that trades nothing.
+It runs with the hourly agents only; the daily trend rule never runs it.
+
+- **What it records.** Every headline the news agent reads, with its publication time, source, keyword tone and
+  category (hack-security, regulation, etf-flows, macro, tech-upgrade, exchange-listing, adoption-corporate,
+  price-talk, other), once per coin it names; headlines about a coin within 30 minutes of the first form one burst,
+  with its "news velocity" (headlines in the hour against the coin's usual rate). And every scheduled US release:
+  CPI, the FOMC statement and the jobs report, from `trader/macro_calendar.json` (45 dates from August 2026 to
+  December 2027 plus the US market holidays, typed from the BLS and Fed pages and checked on 31 Oct 2026; the owner
+  can add or remove dates in `data/macro_calendar.json`; a missing or broken calendar never stops the desk).
+- **What it measures**, once an event is 4 hours old, per coin: the largest move within 2 hours and whether it is a
+  jump, its direction (from the price, not the tone), the minutes until the jump registered and until the extreme,
+  the first 38% give-back within 4 hours, volume falling back to its pre-event level, the first 15 minutes' volume
+  against the normal days', and whether the price had already jumped in the hour before (publication times trail the
+  triggers: the record then says "price moved first"). Every event is paired with the same New York clock time on the
+  nearest normal day before it (no weekend for a weekday event, no US market holiday, no Thursday for an 08:30 event,
+  no other release; for a headline burst no other event of the coin), and every summary shows the event rate next
+  to that normal-day rate with both counts. No verdict under 30 events per class.
+- **The jump rule is time-of-day aware** (the macro study's finding: a baseline from the preceding hours called 45% of
+  normal 08:30 New York mornings jumps, because the quiet night sets it while the stock-market open falls inside the
+  window). The baseline is the median largest 2-hour move at the same New York clock time over the last up to 10
+  normal days of the same kind; a jump is more than 3.0 times that on weekdays (4.5 at weekends) and at least 0.3%;
+  the normal day is judged against its own preceding normal days. On real prices it calls 9.5% of the study's 189
+  normal weekday windows at the release hours a jump, 7.5% of all weekday hours and 8.4% of all weekend hours of 62
+  days, and 21% of the 189 release windows; release days moved a typical 1.92% within 2 hours against 1.37% on the
+  matched normal days.
+- **Where you see it.** `/events` (the latest measured events in plain words, each class with the normal-day
+  comparison and the verdict, the request budget and the calendar), `/events macro`, `/events btc`, one line in the
+  daily report, `EVENTS.md` in the notebook, one diary line per measured release, and the event study in `/agents`
+  (16 agents).
+- **Cost.** Three public downloads per measured coin-event (600 one-minute candles, 1,000 fifteen-minute candles for
+  the baseline, 600 one-minute candles for the normal day), at most 2 coin-events per check, under a daily budget
+  `EVENTS_DAILY_REQUESTS` (60; `0` = off); expected about 30 a day. Two coin-events take about 15 ms of CPU and 2 MB
+  of memory while they run; the candles are never stored. Headlines are kept 180 days, measured events 400 days,
+  headline events the budget never reached are dropped after 7 days and counted.
+- **Nothing in this release changes a decision, an order, the pace or the risk rules**: the study runs after the
+  trading cycle, reads only what the news agent already fetched and the public price API, and writes only its own
+  tables (`headlines`, `macro_calendar`, `news_events`). A test runs the desk 40 checks with the study on and off and
+  compares every trading table and the pace; the news agent reads exactly the same titles as before, also when a feed
+  carries a publication date that cannot be read (such as the year 9999: that item simply has no time). The study's
+  diary lines stay out of the notebook digest Claude's weekly review reads, because that review's summary reaches the
+  decision prompt.
+- **Checked by two reviews before release**, and fixed:
+  - A coin name Binance does not know (a typo in `SYMBOLS`) no longer blocks the study: its event is recorded as not
+    measured after one request ("check the coin names in SYMBOLS") and the next event is measured at once; an event
+    whose download keeps failing for a whole day is recorded as not measured too.
+  - The matched normal day is never a day the same download cannot judge (it needs 3 normal days before it): the next
+    free day is used instead, without spending a request on the unusable one. A matched day that still cannot be
+    measured is said so, never shown as "+0.00%, no jump".
+  - Headline bursts in the 4 hours before a listed release ("Bitcoin steady ahead of CPI") are kept out of the headline
+    classes like those after it: the release's move sits in their own window.
+  - "Price moved first", the give-back and "volume dried up" now stand next to the matched normal days' share, with
+    counts (for "moved first", until a class has its own, next to the calibration's 1 normal hour in 10); the FOMC
+    volume line says that a 14:00 New York release has the US session close inside its window.
+  - The per-event text no longer calls the rule's yardstick (read from 15-minute closes, lower than 1-minute moves)
+    "what a normal day moves": it says what a jump at that hour needed, e.g. "1.80% (3 x 0.60%)".
+  - The daily report line and the release diary give the release's date (releases back-filled after an install are
+    measured days later), and the daily line says how many releases its coin-events come from; a release class line
+    says the same ("32 coin-events from 4 releases").
+  - `/events` tells events still inside their 4-hour window from complete ones queued for measurement, and says when
+    downloads are paused after a failure.
+  - `EVENTS_DAILY_REQUESTS` of 1 or 2 (less than one measured event) is reported by the settings check and keeps the
+    study off instead of promising "measured tomorrow" every day.
+  - Smaller: a headline 29.5 minutes after the first joins its burst whatever the seconds; the hour before an event
+    in the first UTC hour of a Monday or Saturday is compared with the same kind of day as the event; on a machine
+    without a time-zone database the jobless-claims Thursday is also skipped in winter.
 
 ## 1.8.0 - 2026-10-31
 

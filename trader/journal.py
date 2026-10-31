@@ -23,10 +23,27 @@ CREATE TABLE IF NOT EXISTS closed_trades (
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS equity (ts TEXT, equity REAL, cash REAL);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts TEXT, kind TEXT, text TEXT, data TEXT);
+-- headlines, macro_calendar and news_events (below) belong to the event study (trader/agents/events.py): what
+-- prices did around headline bursts and scheduled US releases; a measurement, nothing trades on it
 CREATE TABLE IF NOT EXISTS chart_events (
   id INTEGER PRIMARY KEY, ts TEXT, symbol TEXT, timeframe TEXT, kind TEXT, bar_time INTEGER, price REAL, details TEXT,
   UNIQUE(symbol, timeframe, kind, bar_time));
 CREATE INDEX IF NOT EXISTS chart_events_ts ON chart_events(ts);
+CREATE TABLE IF NOT EXISTS headlines (
+  id INTEGER PRIMARY KEY, ts_utc TEXT, source TEXT, title TEXT, url_hash TEXT, coins TEXT, sentiment REAL,
+  category TEXT, burst_id INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS headlines_once ON headlines (url_hash, coins);
+CREATE INDEX IF NOT EXISTS headlines_coin_ts ON headlines (coins, ts_utc);
+CREATE TABLE IF NOT EXISTS macro_calendar (ts_utc TEXT, name TEXT, kind TEXT, UNIQUE (ts_utc, name));
+CREATE TABLE IF NOT EXISTS news_events (
+  id INTEGER PRIMARY KEY, kind TEXT, ts_utc TEXT, symbol TEXT, label TEXT, category TEXT, sentiment REAL,
+  n_headlines INTEGER, velocity REAL, moved_first INTEGER, baseline_atr REAL, baseline_pct REAL, baseline_days INTEGER,
+  volume_ratio REAL, impulse INTEGER, direction INTEGER, propagation_min INTEGER, magnitude_pct REAL, peak_ts TEXT, retrace_ts TEXT,
+  correction_delay_min INTEGER, volume_exhausted INTEGER, placebo_ts TEXT, placebo_impulse INTEGER,
+  placebo_magnitude_pct REAL, settled_at TEXT, note TEXT, placebo_moved_first INTEGER, placebo_retraced INTEGER,
+  placebo_volume_exhausted INTEGER);
+CREATE INDEX IF NOT EXISTS news_events_symbol_ts ON news_events (symbol, ts_utc);
+CREATE INDEX IF NOT EXISTS news_events_open ON news_events (settled_at, ts_utc);
 """
 
 
@@ -63,6 +80,10 @@ class Journal:
             self.db.execute("ALTER TABLE positions ADD COLUMN protection TEXT")
         if "high_water" not in cols:  # highest price since entry, for trailing stops
             self.db.execute("ALTER TABLE positions ADD COLUMN high_water REAL")
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(news_events)")}
+        for col in ("placebo_moved_first", "placebo_retraced", "placebo_volume_exhausted"):
+            if col not in cols:   # the matched normal day's flags (event study, added during 1.8.1)
+                self.db.execute(f"ALTER TABLE news_events ADD COLUMN {col} INTEGER")
         self.db.commit()
 
     # ---- key/value state ----

@@ -23,6 +23,7 @@ since 1.7.0, only Market Data, the Risk Manager and Execution work; see "The dai
 | **Market Scout** | Finds new opportunities | Every 6 hours scans all ~770 Binance USDT coins and keeps the liquid crypto ones; stablecoins, gold tokens and tokenized stocks are filtered out. Claude then **searches the web** for today's news and catalysts and picks up to 8 coins to watch, each with a reason. Without Claude it adds the most-traded established coins |
 | **Market Data** | The data clerk | Pulls hourly price candles for each watched coin from Binance |
 | **News Analyst** | Reads the headlines, sets the pace | Reads CoinDesk, Cointelegraph and Decrypt. Claude rates each coin's news from -1 (bearish) to +1 (bullish) and advises how often to check the market right now. With no Claude key it uses a keyword list |
+| **Event Synthesis** | Measures what prices did around news and scheduled releases | Stores every headline with its publication time, groups headlines about a coin into bursts, and for each burst and each scheduled US release (CPI, Fed statement, jobs report) measures afterwards the price jump, how long it took to register, what it gave back and whether volume dried up, next to the same hour on a normal day. Reported by `/events` and in the notebook; **it trades nothing** (see "Event synthesis") |
 | **Forex / Macro** | Watches the US dollar | Follows USD vs EUR, GBP, JPY and CHF (European Central Bank rates). A fast-rising dollar usually hurts crypto ("risk-off") |
 | **Technical Analyst** | Chart reader | Standard indicators: trend averages (EMA), momentum (MACD), overbought/oversold (RSI), Bollinger bands, volatility (ATR) |
 | **Chart Reader** | Describes the market picture | From the same finished candles: is each timeframe (1-hour, the 4-hour bars built from it, daily) in **chop** (going nowhere), **trending** or **impulsive** (a fast move)? Which structural events just happened: 12/26 average crossovers (50/200-day on the daily chart), a breakout above the recent high or a breakdown below the recent low, an unusually big candle, a new high with weaker momentum or on thinner volume? Nearest support and resistance. Shown to the Portfolio Manager as context, on `/chart` and in the notebook; nothing trades on it by itself (see "Chart events") |
@@ -434,6 +435,95 @@ apply it: `python -m trader backtest --days 365 --checks trend200,btc,cooldown,r
 same candles; in the result `Checklist vetoes {'regime': n}` is how many buy signals it refused. The replay with the
 rule takes a little longer (the chart is computed for every candidate buy, up to a few thousand times a year).
 
+## Event synthesis: what prices do around news and scheduled releases (/events)
+
+Since 1.8.1 the desk keeps a record of what prices actually did around scheduled US releases (the CPI inflation
+figure, the Fed's FOMC statement, the monthly jobs report) and around bursts of headlines about a watched coin
+(`trader/agents/events.py`). **It measures; it does not predict, and nothing trades on it**: no decision, threshold,
+pace, risk rule or AI prompt reads these records (the study's diary lines are also kept out of the notebook digest
+Claude's weekly review reads, because that review's summary reaches the decision prompt). It runs with the hourly
+agents (`STRATEGY=hourly`); the daily trend rule never runs it (no downloads, nothing measured).
+
+**What is measured, per coin and event, once the event is 4 hours old:** the largest move within 2 hours and whether
+it counts as a **jump** (the rule below), its direction (from the price, never from the headline's tone), how many
+minutes the jump took to register, the extreme and when it came, whether the price then gave back 38% of the move
+within 4 hours (a parameter called "retrace", no claim beyond the number), whether trading volume fell back below the
+pre-event level for 10 minutes, how busy the first 15 minutes were compared with the same 15 minutes on normal days,
+and whether the price had already jumped in the hour **before** the event.
+
+**Publication times trail the triggers.** A headline's time is when the feed published it, often after the move it
+describes. So a headline event starts at the first headline of a burst (headlines about the same coin within 30
+minutes of the first), and the hour before publication is checked: when the price had already jumped, the record
+says "price moved first". Scheduled releases have exact times known in advance, which is why they are the main events.
+
+**Compared with a normal day (the placebo).** Every event is paired with the same coin at the same New York clock time
+on the nearest normal day before it (within 7 days; never a weekend for a weekday event, never a US market holiday,
+never a Thursday for an 08:30 New York event because the weekly jobless claims come out then, and never a day the
+same download cannot judge: it needs 3 normal days of its own before it, otherwise the next free day is used, or the
+record says that no day within a week could be judged). For a release, a
+normal day is one with no listed release: at 08:30 New York most weekdays still carry some second-tier US number, so
+the comparison is "top-tier release versus a typical morning". For a headline burst it is an hour with no headlines
+about the coin, which understates the normal rate (headlines often follow moves), so a headline "lift" is an upper
+bound. Every summary shows the event rate next to the normal-day rate, with both counts; so do "price moved first",
+the give-back and "volume dried up" (until a class has its own normal-day values, "moved first" is set against the
+calibration: the rule fires on about 1 normal hour in 10).
+
+**The jump rule is time-of-day aware.** A move counts as a jump when the 1-minute closes within 2 hours move more
+than K times what the coin usually does in the same 2 hours on normal days: the baseline is the median, over the last
+up to 10 normal days of the same kind, of the largest 2-hour move starting at the same New York clock time (one
+download of 1,000 fifteen-minute candles, thirty-minute ones for a weekend event), and never less than 0.3%. K is
+3.0 on weekdays and 4.5 at weekends (weekend prices sit still for hours, then move at once). The normal day is judged
+against its own preceding normal days the same way. Why this matters: the hours before an 08:30 New York release are
+the quiet overnight session while the two hours after it contain the US stock-market open, so a baseline taken from
+the preceding hours called 45% of normal mornings "jumps" in a study of 63 real releases. Calibrated on real Binance
+prices, the shipped rule calls **9.5% of the 189 normal weekday windows of that study** a jump (08:30 and 14:00 New
+York), 7.5% of every weekday hour and 8.4% of every weekend hour of 62 days, and 21% of the release windows (CPI 19%,
+jobs 10%, FOMC 37%). The typical largest 2-hour move was 1.92% on release days against 1.37% on the matched normal
+days, and the first 15 minutes traded a median 4.6 times their normal volume (1.0 on the normal days). The "moved
+first" hour uses the same rule against the hour before the same clock time on the same normal days (9% of normal
+hours flag). Because the baseline is read from 15-minute closes, which miss part of the swings, it runs lower than the
+1-minute moves next to it: `/events` therefore shows it as the bar a jump had to clear ("a jump at that hour needed
+1.80%: 3 x 0.60%"), never as what a normal day moves; the matched normal day's own move is the like-for-like figure.
+
+**Verdicts like the scorecard's.** No verdict under 30 events per class (`macro:cpi`, `macro:fomc`, `macro:nfp`, and
+one class per headline category such as `hack-security`, `regulation`, `etf-flows`). From 30 on, the verdict says
+whether these events jump more, less or no differently than the same hour on normal days (95% ranges), and whether a
+desk that checks every 15 minutes could have looked before the jumps registered (the median minutes to register, next
+to the median minutes to the extreme). A release class line says how many releases its coin-events come from (one
+release gives one event per coin). Headline bursts less than 4 hours before or after a listed release are shown but
+kept out of the headline classes, so a release is not counted twice: after it the burst sits in the release's window,
+and before it ("Bitcoin steady ahead of CPI") the release's move sits in the burst's own window.
+
+**The release calendar** is `trader/macro_calendar.json`, typed from the official pages (BLS CPI and Employment
+Situation schedules, the Fed's FOMC calendar; US market holidays from the NYSE) and checked on 31 Oct 2026; it runs to
+10 Dec 2027 and arrives with code updates. Times are UTC, converted from 08:30 / 14:00 New York with summer time
+handled per date (a test checks every row with the time-zone database; a machine without one applies the US
+summer-time rule itself for the New York clock hour). To add or remove a date without touching the
+code, put the same format in `data/macro_calendar.json` next to the journal (a row with `"remove": true` deletes the
+shipped one); a broken file is reported once in the diary and ignored, and a missing or broken calendar never stops
+the desk (headline bursts are still measured). The desk warns in the diary when the calendar runs out within 60 days.
+
+**Cost.** Three downloads per measured coin-event (600 one-minute candles around the event, the 1,000-candle baseline,
+600 one-minute candles for the normal day; about 400 KB), at most 2 coin-events per check, under a daily budget
+`EVENTS_DAILY_REQUESTS` (default 60 = 20 coin-events a day; `0` switches the study off; 1 or 2 is less than one
+measured event, so the settings check reports it and the study stays off). Expected use is about 30
+requests a day (about 10 headline bursts across 8 coins plus the releases); the first two or three days after the
+update also measure the releases of the last 60 days. Releases are measured first; headline bursts the budget never
+reaches are dropped after 7 days and counted (`/events` says how many, and tells events still inside their 4-hour
+window from complete ones queued for measurement). A failed download pauses the study 30 minutes and tries the same
+event again, but a coin Binance refuses (a name it does not know, such as a typo in `SYMBOLS`) is recorded as not
+measured after one request, and an event whose download keeps failing for a whole day is recorded as not measured
+too, so one coin can never hold up the others. Measuring two coin-events takes about 15 ms of
+CPU on a laptop (well under a second on the small server) and 2 MB of memory while it runs; the candles are never
+stored, only the result. Headlines are kept 180 days, measured events 400 days.
+
+**Where you see it:** `/events` (the latest measured events in plain words and every class with its normal-day
+comparison and verdict), `/events macro` (one line per release with every coin), `/events btc` (one coin), one line in
+the daily report (with the release's date: the releases back-filled after an install are measured days later), and
+`EVENTS.md` in the notebook. Nothing here changes a trade; a later release may propose a measured,
+off-by-default checklist item `macro` (no new buys within 30 minutes of a release) once this record says it would have
+mattered.
+
 ## The notebook: every strategy, trade and lesson as Markdown (for you, and for Claude)
 
 Everything the desk does is in its SQLite journal, which code can read but people cannot. The notebook
@@ -449,6 +539,7 @@ so it can never disagree with the journal and can be rebuilt from any backup (`d
 | `DIARY.md` | the notable moments in order: starts, buys and sells, failed orders, brakes, coin-list changes, protection problems, pace changes, lab results, promotions, rejections, rollbacks |
 | `PERFORMANCE.md` | the report, the demo goals, the week-by-week learning curve (equity, trades, profit factor, champion), the Claude scorecard, costs |
 | `CHART.md` | the chart picture per coin now (regimes, support and resistance, the owner's line), the chart events of the last two weeks by day, a count per kind for the last week |
+| `EVENTS.md` | what prices did around scheduled releases and headline bursts, event vs the same hour on a normal day: every class with its verdict, the releases and bursts measured, the fixed parameters, the calendar and the request budget |
 | `weekly/<week>.md` | written once a week after the lab and never rewritten: the lab result, the lessons, Claude's review, the performance at that moment |
 
 **Getting it:** `/notes` on Telegram sends the folder as a zip; the weekly backup message brings it too; on the
@@ -588,7 +679,7 @@ There are two different kinds of success:
 
 ```
 trader/
-  agents/      scout, market, news, forex, technical, chart, prediction, decision, mentor, risk, execution
+  agents/      scout, market, news, forex, technical, chart, events, prediction, decision, mentor, risk, execution
   orchestrator.py   runs the cycle in order
   binance_client.py signed Binance REST calls
   llm.py            Claude calls with structured (JSON) answers
@@ -606,6 +697,9 @@ trader/
   calibration.py    the threshold study: what buy threshold each coin has earned (head trader, weekly)
   agents/head.py    the head trader: AI budget pacing, per-check thresholds, the playbook, the weekly study
   health.py         /health, /agents, the pulse, the decision funnel and the stuck-rule alert
+  agents/events.py  the event study: headlines with publication times, bursts, the release calendar, the measurement
+  events_report.py  its texts: /events, the daily-report line, EVENTS.md
+  macro_calendar.json  the scheduled US releases (official sources named inside; owner additions: data/macro_calendar.json)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer

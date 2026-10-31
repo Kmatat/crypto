@@ -302,6 +302,20 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
                     "working" if charts else "idle",
                     f"{len(charts)} coins; 4h: " + (", ".join(f"{n} {k}" for k, n in sorted(regimes.items())) or "no picture yet")
                     + f"; {chart_n} events in the last {hours:g} h"))
+    measured = j.db.execute("SELECT COUNT(*) FROM news_events WHERE settled_at >= ?", (since,)).fetchone()[0]
+    waiting = j.db.execute("SELECT COUNT(*) FROM news_events WHERE settled_at IS NULL").fetchone()[0]
+    budget = j.get("events_budget") or {}
+    used = budget.get("used", 0) if budget.get("day") == now_utc().date().isoformat() else 0
+    from .agents.events import REQUESTS_PER_EVENT, usable_budget
+    study_on = usable_budget(s) > 0 and getattr(getattr(bot, "events", None), "client", None) is not None
+    rows.append(row("Event study", "what prices did around scheduled releases and headline bursts (measures, trades "
+                                   "nothing)", "working" if study_on and measured else "idle" if study_on else "off",
+                    f"{measured} events measured in the last {hours:g} h, {waiting} waiting; {used} of "
+                    f"{s.events_daily_requests} requests today" if study_on else
+                    "switched off (EVENTS_DAILY_REQUESTS=0)" if s.events_daily_requests <= 0 else
+                    f"off: EVENTS_DAILY_REQUESTS={s.events_daily_requests} is below one measured event "
+                    f"({REQUESTS_PER_EVENT} requests)" if s.events_daily_requests < REQUESTS_PER_EVENT else
+                    "needs Binance's public prices (not in offline mode)", err("events events")))
     checks = list(s.mentor_checks)
     refused = sum(n for k, n in f["refused"].items() if k.startswith("checklist"))
     rows.append(row("Mentor (master traders' checklist)", "refuses buys that break documented trading rules",

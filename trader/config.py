@@ -36,6 +36,7 @@ ENV_KEYS = (
     "COOLDOWN_HOURS",
     "CYCLE_MINUTES",
     "DAILY_REPORT_HOUR_UTC",
+    "EVENTS_DAILY_REQUESTS",
     "FREE_AI_API_KEY",
     "FREE_AI_BASE_URL",
     "FREE_AI_DAILY_REQUESTS",
@@ -201,6 +202,7 @@ class Settings:
     telegram_chat_id: str = ""
     daily_report_hour_utc: int = 6
     pulse_hours: float = 6           # a short "the desk is alive, this is what it did" message this often; 0 = off
+    events_daily_requests: int = 60  # price downloads a day for the event study (/events; 3 per measured event); 0 = off
     migrations: tuple = ()           # settings corrected at load time (old defaults), reported once on Telegram
 
     @property
@@ -280,6 +282,13 @@ class Settings:
                 out.append("STRATEGY=trend needs at least one coin in SYMBOLS")
         if self.ai_order not in ("free-first", "claude-first"):
             out.append(f"AI_ORDER={self.ai_order!r} must be free-first or claude-first: using free-first")
+        from .agents.events import REQUESTS_PER_EVENT
+        if self.events_daily_requests < 0:
+            out.append("EVENTS_DAILY_REQUESTS must be 0 (off) or a positive number: the event study is off")
+        elif 0 < self.events_daily_requests < REQUESTS_PER_EVENT:
+            out.append(f"EVENTS_DAILY_REQUESTS={self.events_daily_requests} is below one measured event "
+                       f"({REQUESTS_PER_EVENT} downloads), so nothing could ever be measured: the event study is off; "
+                       f"use 0 (off) or at least {REQUESTS_PER_EVENT}")
         pct = self.ai_pct_month()
         ai = pct and self.starting_balance * pct / 100 / 30
         if self.use_claude and ai and min(ai, self.ai_daily_budget_usd or ai) < 0.10:
@@ -366,4 +375,5 @@ class Settings:
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             daily_report_hour_utc=int(os.getenv("DAILY_REPORT_HOUR_UTC", 6)),
             pulse_hours=_f("PULSE_HOURS", 6),
+            events_daily_requests=int(float(os.getenv("EVENTS_DAILY_REQUESTS") or 60)),
         )
