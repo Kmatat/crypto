@@ -480,3 +480,18 @@ def test_an_hourly_position_whose_trend_sale_fails_keeps_its_exits_and_is_not_ad
     assert not [r for r in out if r.get("action") == "ADOPT"] and bot.trend_report["adopted"] == []
     assert abs(j.positions()["AAAUSDT"]["stop_loss"] - price * 0.85) < 1e-9
     assert "AAAUSDT" not in (j.get("trend_positions") or {})
+
+
+def test_keep_curve_changes_nothing():
+    """1.9.0: the strategy library's opt-in daily equity curve leaves the replay's own result exactly as it was."""
+    history = {"AAAUSDT": candles(wavy(400, 100, 0.004, 0.08)), "BBBUSDT": candles(wavy(400, 50, 0.002, 0.06))}
+    s = Settings(offline=True, strategy="trend", symbols=list(history), max_open_positions=2)
+    start = history["AAAUSDT"][100]["time"]
+    plain = trend.backtest(s, history, start_ms=start)
+    kept = trend.backtest(s, history, start_ms=start, keep_curve=True)
+    curve, closed = kept.pop("curve"), kept.pop("closed")
+    assert kept == plain and "curve" not in plain
+    assert len(curve) == plain["days"] == 300 and curve[0][0] == start            # one point per replayed day
+    assert all(b[0] - a[0] == DAY for a, b in zip(curve, curve[1:]))
+    assert abs(curve[-1][1] - plain["final_balance"]) < 0.01
+    assert len(closed) == plain["trades"] and all(x[0] % DAY == 0 for x in closed)

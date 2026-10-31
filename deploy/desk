@@ -34,6 +34,27 @@ case "${1:-help}" in
   logs-update) $SUDO journalctl -u "$SERVICE-update" -n 60 --no-pager -o cat ;;
   version) "$PY" -m trader version ;;
   backtest) shift; "$PY" -m trader backtest "$@" ;;
+  library) shift
+           # A background service beside the desk, not a child of this login: it keeps the lowest CPU weight against
+           # the desk (a nice value alone only counts inside one login session) and keeps running if you disconnect.
+           UNIT="$SERVICE-library"
+           if ! command -v systemd-run >/dev/null 2>&1; then
+             "$PY" -m trader library --save --low-priority "$@"; exit $?
+           fi
+           if systemctl is-active --quiet "$UNIT"; then
+             echo "A library run is already going. Watch it with: $SUDO journalctl -u $UNIT -f -o cat"; exit 1
+           fi
+           SINCE="$(date '+%Y-%m-%d %H:%M:%S')"
+           $SUDO systemd-run --quiet --collect --unit="$UNIT" --uid="$(stat -c %U "$APP_DIR")" \
+             --gid="$(stat -c %G "$APP_DIR")" --working-directory="$APP_DIR" -p Nice=19 -p CPUWeight=1 \
+             -p IOSchedulingClass=idle -p OOMScoreAdjust=1000 "$PY" -m trader library --save --low-priority "$@" || exit 1
+           echo "Started in the background at the lowest priority; it keeps running if you disconnect. Showing its"
+           echo "progress (Ctrl+C stops watching only). The result: data/library/LIBRARY.md, or /library last on Telegram."
+           $SUDO journalctl -u "$UNIT" -f -o cat --since "$SINCE" &
+           WATCH=$!
+           trap 'kill $WATCH 2>/dev/null; echo; echo "Stopped watching; the run continues."; exit 0' INT
+           while systemctl is-active --quiet "$UNIT"; do sleep 3; done
+           sleep 2; kill $WATCH 2>/dev/null ;;
   notes)   "$PY" -m trader notes ${2:-}
            echo "Read them here with:  less $APP_DIR/data/notes/STRATEGY.md   or send /notes to the bot to get the zip on your phone." ;;
   *) cat <<'EOF'
@@ -49,6 +70,7 @@ desk reset     start the demo from scratch (old results kept in a backup file; a
 desk update    install the latest code now (tested first, restarts itself; also happens automatically)
 desk version   which version is running, and whether a newer one exists
 desk backtest  replay a strategy on real prices, e.g.  desk backtest --strategy trend --days 365
+desk library   test published trading rules on years of real prices (20-40 min; trades nothing)
 desk notes     rebuild the Markdown notebook (data/notes): strategies, trades, diary, results; add --zip for a zip file
 EOF
   ;;

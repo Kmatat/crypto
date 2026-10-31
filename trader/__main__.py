@@ -7,6 +7,7 @@
   python -m trader run --offline --cycles 200 --fast   # offline simulation with synthetic prices
   python -m trader report [--offline] # performance report
   python -m trader reset              # start a fresh journal (old one kept as a backup file)
+  python -m trader library            # published rules tested on years of real prices (trader/library.py)
 """
 from __future__ import annotations
 
@@ -14,16 +15,19 @@ import argparse
 import dataclasses
 import datetime as dt
 import fcntl
+import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
 from . import trend
-from .config import AI_BUDGET_CEILING_USD, ENV_PATH, PUBLIC_BASE_URL, TESTNET_BASE_URL, Settings
+from .config import AI_BUDGET_CEILING_USD, ENV_PATH, PUBLIC_BASE_URL, ROOT, TESTNET_BASE_URL, Settings
+from .library_report import HELP_LINE as LIBRARY_HELP
 from .journal import Journal
 from .notify import (Telegram, chart_daily_line, chart_text, pace_message, scout_message, trade_messages, trend_lines,
                      trend_message)
@@ -65,6 +69,7 @@ HELP_TEXT = (
     "/agents [days] - how many agents are working, and which strategies were created, promoted or removed (default 7 days)\n"
     "/diagnose [days] - the desk's records versus its own rules replayed on the same prices: what stopped each buy signal\n"
     "/trendtest [days] - the daily trend rule replayed on real prices over the last days (default 365), with the desk's limits\n"
+    + LIBRARY_HELP + "\n"
     "/aibudget [usd] - Claude's daily budget and where it went today; /aibudget 3 sets $3 a day, /aibudget default resets\n"
     "/ai [free-first|claude-first|default] - which AI answers first (the free AI or Claude), and the free AI's day\n"
     "/notes - the desk's notebook as a zip: strategies, trades, diary and results in Markdown, ready to give to Claude\n"
@@ -76,6 +81,19 @@ HELP_TEXT = (
     "You also get a message for every buy, sell or failed order, when the coin list or the check pace "
     "changes, a short pulse every few hours (PULSE_HOURS), and a daily report."
 )
+LIBRARY_TIMEOUT = 4 * 3600   # /library: a run still going after 4 hours is stopped
+BUSY_EXIT = 3                # trader/library.py's exit code when another run holds its lock
+
+
+def last_line(path: Path) -> str:
+    """The last non-empty line of a log file, made safe for the phone (the library's error, for /library)."""
+    try:
+        lines = [x for x in path.read_text(errors="replace").splitlines() if x.strip()]
+    except OSError:
+        return ""
+    return clean(lines[-1], 200) if lines else ""
+
+
 TREND_NO_CARDS = ("Strategy cards and challengers belong to the hourly strategy; the daily trend rule runs no card. "
                   "They wait unchanged until you choose the hourly strategy again in desk setup.")
 
@@ -99,6 +117,7 @@ def help_text(s: Settings) -> str:
         f"/watchlist - your coins and where each closed against its {sma}-day average\n"
         "/strategies - the rule in force and its settings\n"
         "/trendtest [days] - the rule replayed on real prices over the last days (default 365), with the desk's limits\n"
+        + LIBRARY_HELP + "\n"
         "/health - is everything working? last check, the daily decisions, errors, settings problems, updates\n"
         "/agents [days] - how many agents are working and what changed (default: the last 7 days)\n"
         "/diagnose [days] - the desk's records versus the rule replayed on the same daily prices\n"
@@ -1110,6 +1129,67 @@ def cmd_run(s: Settings, args) -> None:
             threading.Thread(target=work, daemon=True).start()
             return f"📈 Replaying the daily trend rule over the last {days} days. The result arrives here in a minute."
 
+        library_job: dict = {"proc": None, "started": 0.0}       # used by the Telegram thread only
+
+        def library_now(arg: str = "") -> str:
+            """/library: the strategy library in a separate low-priority process (it cannot slow the market checks,
+            and gives all its memory back when it ends); one waiter thread sends the summary. /library last: the
+            latest saved result."""
+            from .library_data import cache_dir
+            from .library_report import (BUSY_TEXT, NO_RUN_TEXT, OFFLINE_TEXT, TIMEOUT_TEXT, failure_text,
+                                         killed_text, running_text, start_text, summary_text)
+            word = arg.strip().lower().replace("-", "").replace(" ", "")
+            if word == "last":
+                report = with_journal(s, lambda j: j.get("library_report"))
+                return summary_text(report)[:MAX_LEN] if report else NO_RUN_TEXT
+            if s.offline or bot.market.client is None:
+                return OFFLINE_TEXT
+            p = library_job["proc"]
+            if p is not None and p.poll() is None:
+                return running_text(library_job["started"])
+            directory = cache_dir(s)
+            directory.mkdir(parents=True, exist_ok=True)
+            started_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            report_path, log_path = directory / "report.json", directory / "run.log"
+            first = not (directory / "candles").exists()
+            log_fh = open(log_path, "w")
+            # Progress lines go to run.log (no --quiet), so a run the server stops still shows how far it got.
+            p = subprocess.Popen([sys.executable, "-m", "trader", "library", "--save", "--low-priority", "--report",
+                                  str(report_path)] + (["--no-hourly"] if word == "nohourly" else []),
+                                 cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT)
+            try:      # lowest priority from its first instruction (importing the desk's code takes a second of CPU)
+                os.setpriority(os.PRIO_PROCESS, p.pid, 19)
+            except (AttributeError, OSError, TypeError):
+                pass  # the child lowers its own priority too, a moment later
+            library_job.update(proc=p, started=time.time())
+
+            def wait() -> None:
+                try:
+                    code = p.wait(timeout=LIBRARY_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()                      # reap the stopped child (no zombie)
+                    tg.send(TIMEOUT_TEXT)
+                    return
+                finally:
+                    log_fh.close()
+                if code == BUSY_EXIT:             # `desk library` was already running
+                    tg.send(BUSY_TEXT)
+                    return
+                if code < 0:                      # stopped by a signal: on this server, the kernel freeing memory
+                    tg.send(killed_text(-code, last_line(log_path)))
+                    return
+                try:
+                    report = json.loads(report_path.read_text())
+                    if code != 0 or not isinstance(report, dict) or str(report.get("started_at", "")) < started_iso:
+                        raise ValueError("no fresh report")
+                    tg.send_long(summary_text(report))
+                except Exception:  # noqa: BLE001 - as /trendtest: a run must never end without a message to the owner
+                    log.exception("Strategy library result failed")
+                    tg.send(failure_text(last_line(log_path)))
+            threading.Thread(target=wait, daemon=True).start()
+            return start_text(first)
+
         def aibudget_now(arg: str = "") -> str:
             return with_journal(s, lambda j: ai_budget(bot, j, arg))
 
@@ -1127,7 +1207,8 @@ def cmd_run(s: Settings, args) -> None:
                                               "Upload it to Claude and ask what to improve (see README.md inside).", notes)
             if with_journal(s, build):
                 return ("Inside the zip: README.md (start here), STRATEGY.md, TRADES.md, DIARY.md, PERFORMANCE.md, "
-                        "CHART.md, EVENTS.md, strategies/ (one file per strategy) and weekly/ (one page per week).")
+                        "CHART.md, EVENTS.md, LIBRARY.md, strategies/ (one file per strategy) and weekly/ (one page per "
+                        "week).")
             return "Could not upload the notebook. On the server it is in data/notes (or run: desk notes)."
 
         def review_now() -> str:
@@ -1172,6 +1253,7 @@ def cmd_run(s: Settings, args) -> None:
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
             "/trendtest": trendtest_now,
+            "/library": library_now,
             "/ai": ai_now,
             "/review": review_now,
             "/report": lambda: with_journal(s, lambda j: report_message(bot, s, j)),
@@ -1286,6 +1368,7 @@ def main() -> None:
     nts.add_argument("--zip", action="store_true", help="also write a zip of it next to the folder")
     nts.add_argument("--offline", action="store_true", help="the offline simulation's journal")
     sub.add_parser("backtest", add_help=False)  # arguments handled by trader/backtest.py
+    sub.add_parser("library", add_help=False)   # arguments handled by trader/library.py
     upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
     upd.add_argument("--check-only", action="store_true")
     upd.add_argument("--force", action="store_true")
@@ -1303,6 +1386,9 @@ def main() -> None:
     if args.cmd == "backtest":
         from .backtest import main as backtest_main
         sys.exit(backtest_main(sys.argv[2:]))
+    if args.cmd == "library":
+        from .library import main as library_main
+        sys.exit(library_main(sys.argv[2:]))
     if args.cmd == "update":
         from .updater import main as update_main
         sys.exit(update_main(sys.argv[2:]))

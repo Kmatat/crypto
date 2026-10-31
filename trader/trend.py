@@ -120,13 +120,16 @@ def fetch_daily(client, symbol: str, days: int, now_ms: int | None = None) -> li
     return finished(out, now_ms)
 
 
-def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end_ms: int | None = None) -> dict:
+def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end_ms: int | None = None,
+             keep_curve: bool = False) -> dict:
     """The rule as one account under the desk's own limits (the live Risk Manager decides every buy), on finished
     daily candles: decisions on a day's close, orders at the next day's open (0.1% fee + 0.05% slippage), the
     emergency stop checked on each day's low (filled at the stop, or at the open when the day opened below it, less
     0.2%), the overall loss brake as live. The daily loss limit cannot act live (the decision runs at the first check
     of the new day, when the day's result is still zero), so it is left out here too. `history` must start
-    window(TREND_SMA_DAYS) days before `start_ms` for the signals to exist from the first day."""
+    window(TREND_SMA_DAYS) days before `start_ms` for the signals to exist from the first day. keep_curve (the strategy
+    library's reference entry) also returns the equity of every replayed day and the closed trades with their days;
+    off by default, so the result is exactly as before."""
     sma_days, vol_target, stop_pct = params(s)
     risk = RiskManagerAgent(s)
     coins = list(history)
@@ -162,7 +165,7 @@ def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end
         proceeds = p["qty"] * px * (1 - PAPER_FEE)
         cash += proceeds
         trades.append({"symbol": sym, "pnl": proceeds - p["cost"], "pnl_pct": (proceeds / p["cost"] - 1) * 100,
-                       "reason": reason, "hours": (d - p["opened"]) * 24.0,
+                       "reason": reason, "hours": (d - p["opened"]) * 24.0, "day": d,
                        "fees": p["cost"] * PAPER_FEE + p["qty"] * px * PAPER_FEE})
 
     for k in range(len(days) - 1):
@@ -250,7 +253,11 @@ def backtest(s, history: dict[str, list[dict]], start_ms: int | None = None, end
                 picked.append(x)
                 left -= verdict["quote_amount"]
         holding = sorted(keep + picked)
-    return _metrics(start, final, trades, curve, len(days), hold, holding, buys_refused, len(pos))
+    r = _metrics(start, final, trades, curve, len(days), hold, holding, buys_refused, len(pos))
+    if keep_curve:
+        r["curve"] = [(d * DAY_MS, e) for d, e in zip(days, curve)]
+        r["closed"] = [(x["day"] * DAY_MS, x["pnl"], x["pnl_pct"], x["reason"], x["fees"]) for x in trades]
+    return r
 
 
 def _metrics(start, final, trades, curve, days, hold, holding, refused, still_open) -> dict:

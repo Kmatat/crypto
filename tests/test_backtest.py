@@ -52,3 +52,19 @@ def test_backtest_is_deterministic():
     history = {"AAAUSDT": synthetic("AAAUSDT", 800, 7)}
     s = Settings(offline=True, symbols=["AAAUSDT"])
     assert Backtest(s, history).run() == Backtest(s, history).run()
+
+
+def test_keep_curve_changes_nothing():
+    """1.9.0: the strategy library's opt-in equity curve leaves the replay's own result exactly as it was."""
+    history = {"AAAUSDT": synthetic("AAAUSDT", 900, 1), "BBBUSDT": synthetic("BBBUSDT", 900, 2)}
+    s = Settings(offline=True, symbols=list(history), starting_balance=10_000)
+    plain = Backtest(s, history).run()
+    kept = Backtest(s, history, keep_curve=True).run()
+    curve, closed = kept.pop("curve"), kept.pop("closed")
+    assert kept == plain and "curve" not in plain
+    assert len(curve) == 900 - WARMUP and len(closed) == plain["trades"]      # one point per replayed hour
+    assert curve[-1][1] == pytest.approx(plain["final_balance"], abs=0.01)
+    assert all(x[3] in ("stop-loss", "take-profit", "signal") for x in closed)
+    assert sum(x[4] for x in closed) == pytest.approx(plain["fees_paid"], abs=0.01)
+    empty = Backtest(s, {k: v[:100] for k, v in history.items()}, keep_curve=True).run()
+    assert empty["curve"] == [] and empty["closed"] == []

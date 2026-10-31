@@ -6,6 +6,62 @@ The number lives in `trader/__init__.py`; `/version` on Telegram and `desk versi
 the exact code revision, and every update message names the version it installed. The release calendar in
 `trader/macro_calendar.json` is refreshed from the official pages whenever its last date is within 90 days.
 
+## 1.9.0 - 2026-10-31
+
+Phase 3a of the multi-agent plan: the **strategy library** (`trader/library.py`), a measurement that trades nothing.
+
+- **What it is.** Seven published, long-only rule families, each written in-house from its source (cited in
+  LIBRARY.md with links; nothing scraped, no downloaded code run): the Turtles' Donchian breakout (Faith 2003),
+  time-series momentum (Moskowitz, Ooi, Pedersen 2012), moving-average crossovers (Brock, Lakonishok, LeBaron 1992),
+  Connors' RSI(2) (2008), Bollinger-band mean reversion (2001), MACD on 4-hour bars (Appel) and Larry Williams'
+  volatility breakout (1999); plus the desk's own hourly and daily rules as references, against holding the same 8
+  coins, Bitcoin alone and cash. 23 settings in all, each family's grid taken from its source, headline setting first.
+- **The protocol** (fixed in `trader/library_stats.py` before any library rule was run on real prices; protocol 1,
+  25 variants): settings chosen on the first 70% of the period only (the best worse half, at least 5 rule trades a
+  year), judged once on the last 30%; a rolling walk-forward (2 years to choose, the next 6 months to test, 13
+  segments stitched into one out-of-sample record); one simulator for every rule (next-open orders, 0.1% fee, 0.05%
+  slippage, 0.2% on stops, one slot per coin, at most 10% per buy, long only); the deflated Sharpe ratio (Bailey &
+  Lopez de Prado 2014) counting all 25 variants; nine PASS conditions (enough trades, beats cash and holding on the
+  Sharpe ratio in the judged period and the walk-forward, no deeper drop than holding, luck 5 in 100 or fewer).
+- **What the full run found** (2026-10-31, prices from 2018-03-15 to 2026-10-30, a 4-core laptop, Python
+  3.13: CPU 42 s, peak memory 301 MB; run twice on the same prices, same numbers): **no published rule passed.**
+  Holding the 8 coins: judged period -16.6% (Sharpe 0.20, worst drop 66%), walk-forward (re-split every 6 months, the
+  verdicts' bar) Sharpe 1.14, bought once +1,966% (Sharpe 0.96, for information); Bitcoin alone +9.0% (0.30, 53%);
+  cash 0%.
+  Donchian (20/10): judged +38.3% (Sharpe 0.61), walk-forward 1.32, 244 trades, luck about 12 in 100: FAIL on luck.
+  Time-series momentum (14 days): +48.9% (0.68), walk-forward 1.46, 921 trades, luck about 7 in 100: FAIL on luck.
+  Moving averages (1/50): +39.3% (0.55), walk-forward 1.32, 493 trades, luck about 10 in 100: FAIL on luck.
+  RSI(2) (below 5): +13.2% (0.64), walk-forward 0.53: FAIL, below holding. Bollinger (10/1.9): +9.5% (0.30),
+  walk-forward 0.71: FAIL, below holding. MACD 4-hour (12/26/9 above zero): +9.2% (0.26), walk-forward 0.93: FAIL,
+  below holding. Williams (k 1.0): -13.5% (-0.34): FAIL, lost against cash. References: the daily trend rule +45.1%
+  in the judged period (Sharpe 0.62), +5,495% over the whole period (1.25), luck about 8 in 100 counting its 20
+  research variants; the hourly rules -15.1% in the judged period (-1.44), -18.8% over their last 3 years. The full
+  table is in README "The strategy library".
+- **Sources checked before the run.** Liu & Tsyvinski (NBER w24877): the current week's return predicts the next 1 to
+  4 weeks' returns, so 1-4 weeks are prediction horizons and the paper's own look-back is one week; the 14- and
+  28-day look-backs stay as the library's declared translation (no grid change). Williams' book could not be read:
+  the k values 0.5/0.75/1.0 stay from secondary descriptions, as declared.
+- **Where you see it.** `/library` (runs in a separate, lowest-priority process; the summary arrives as one
+  message), `/library last`, `/library nohourly`, `desk library` on new installs (a background service at the lowest
+  CPU weight that survives a dropped connection), `python -m trader library` on any computer (`--no-hourly`,
+  `--refresh`, `--save`), `LIBRARY.md` in the notebook, one diary line per saved run (kept out of the review digest).
+- **Review fixes before release.** The walk-forward's holding yardstick is named for what it is (the coins re-split
+  every 6 months, as pre-declared) and shown next to the coins bought once; an intraday rule's exposure reads
+  "intraday" instead of 0%; a run the server stops (memory) says so instead of "no message"; a busy journal at the
+  end no longer throws away a finished run (the files are written first); the /library child is at the lowest
+  priority from its first instruction; the caveat now names the two crypto studies behind the momentum and
+  moving-average families.
+- **Cost.** The first run downloads about 434 public price pages (about 50 MB of JSON); later runs only the candles
+  finished since (at most about 24 requests); cached in data/library (about 8 MB, outside the journal). On the 1/8-OCPU
+  server, about 10-20 times slower than the laptop: about 7-14 min of CPU, 20-40 min at the lowest priority; about
+  300 MB of memory at the peak (115 MB without the hourly reference, which is skipped with a message when less than
+  400 MB is free at its turn). Measured on the laptop only: this machine has no systemd, so no CPU-limited run.
+- **Nothing in this release changes a decision, an order, the pace, the risk rules, the lab or an AI prompt.** No
+  trading module imports the library (a test reads every one), no setting is added, the replays' new `keep_curve`
+  option is off by default (their results are unchanged, tested), and two offline desks with and without library
+  records in their journal trade identically over 40 checks (tested).
+- Later protocol versions count this version's 25 variants in their luck adjustment (`TRIALS_BEFORE`).
+
 ## 1.8.1 - 2026-10-31
 
 Phase 2 of the multi-agent plan: **event synthesis** (`trader/agents/events.py`), a measurement that trades nothing.

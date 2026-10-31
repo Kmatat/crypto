@@ -89,8 +89,11 @@ class DailySeries:
 class Backtest:
     def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None,
                  days: int | None = None, btc_history: list[dict] | None = None, end_ms: int | None = None,
-                 analysis_cache: dict | None = None):
+                 analysis_cache: dict | None = None, keep_curve: bool = False):
         self.s = s
+        # keep_curve: also return the equity after every replayed hour and the closed trades with their times (the
+        # strategy library's reference entry; off by default, so the result is exactly as before)
+        self.keep_curve = keep_curve
         self.history = history
         # (symbol, candle time) -> (technical report, prediction report); a caller testing several windows or
         # strategy cards on the same history passes one dict so the indicators are computed once
@@ -218,9 +221,13 @@ class Backtest:
                     "buy_and_hold_pct": {}, "basket_hold_pct": None, "trades": 0, "trades_per_week": 0.0,
                     "fees_paid": 0.0, "fees_pct_of_start": 0.0, "win_rate_pct": None, "avg_win": None, "avg_loss": None,
                     "profit_factor": None, "max_drawdown_pct": 0.0, "avg_hold_hours": None,
-                    "exits": {"stop-loss": 0, "take-profit": 0, "signal": 0}, "decisions": decisions, "mentor_vetoes": {}}
+                    "exits": {"stop-loss": 0, "take-profit": 0, "signal": 0}, "decisions": decisions, "mentor_vetoes": {},
+                    **({"curve": [], "closed": []} if self.keep_curve else {})}
         result = self._metrics(trades, curve, final, decisions, traded)
         result["mentor_vetoes"] = vetoes
+        if self.keep_curve:
+            result["curve"] = curve
+            result["closed"] = [(x["t"], x["pnl"], x["pnl_pct"], x["reason"], x["fees"]) for x in trades]
         return result
 
     @staticmethod
@@ -228,7 +235,7 @@ class Backtest:
         p = positions.pop(sym)
         proceeds = p["qty"] * px * (1 - PAPER_FEE)
         trades.append({"symbol": sym, "pnl": proceeds - p["cost"], "pnl_pct": (proceeds / p["cost"] - 1) * 100,
-                       "reason": reason, "hours": (t - p["opened"]) / 3_600_000,
+                       "reason": reason, "hours": (t - p["opened"]) / 3_600_000, "t": t,
                        "fees": p["cost"] * PAPER_FEE + p["qty"] * px * PAPER_FEE})
         return proceeds
 

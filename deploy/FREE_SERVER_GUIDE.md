@@ -151,6 +151,7 @@ You can now close the browser. The desk keeps running on the server.
 | `/health` | Is everything working? Version, last market check, errors, settings problems, updates, and what happened to every buy signal in the last 24 hours |
 | `/agents` | How many agents are working and what each did; strategies created, promoted, rejected or rolled back; coins added or removed (`/agents 30` for 30 days) |
 | `/trendtest` | The daily trend rule replayed on real prices with the desk's limits: result, worst drop and trades against just holding the coins (`/trendtest 1000` for 1,000 days). Works before you switch to it too |
+| `/library` | Seven published trading rules and the desk's own two tested on years of real prices by one strict, fixed protocol, with a luck check: which ones beat simply holding the coins (20-40 minutes; it trades nothing). `/library last` shows the latest result |
 | `/diagnose` | "Check the logs" from your phone: the settings in force, every buy signal per coin and what stopped it, order failures, hours the desk was not checking, and how many trades its own rules would have made on the same prices (`/diagnose 3` for 3 days) |
 | `/ai` | Which AI answers first (the free AI or Claude), the free AI's questions used today and when its allowance restarts. `/ai free-first` saves money, `/ai claude-first` uses Claude's judgement while its budget lasts. Kept across restarts |
 | `/aibudget` | Claude's daily budget, today's spend per agent and the month at today's pace. `/aibudget 3` lets Claude spend up to $3 a day (real money, at most $20), `/aibudget default` goes back to the settings file. Kept across restarts |
@@ -182,6 +183,7 @@ Messages also arrive automatically:
 | `desk version` | Which version is running |
 | `desk notes` | Rebuild the notebook in `~/crypto-desk/data/notes` (add `--zip` for a zip file) |
 | `desk backtest --strategy trend --days 1000` | Replay the daily trend rule (servers installed before 1.7.0: `~/crypto-desk/.venv/bin/python -m trader backtest --strategy trend --days 1000` from `~/crypto-desk`, or simply `/trendtest 1000` on Telegram) |
+| `desk library` | The same strategy library as a background service at the lowest priority, with its progress on screen (Ctrl+C stops watching only; it keeps running if you disconnect). Servers installed before 1.9.0 do not have this command: send `/library` on Telegram instead |
 
 ## Is it working? (no terminal needed)
 

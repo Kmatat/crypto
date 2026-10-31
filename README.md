@@ -24,6 +24,7 @@ since 1.7.0, only Market Data, the Risk Manager and Execution work; see "The dai
 | **Market Data** | The data clerk | Pulls hourly price candles for each watched coin from Binance |
 | **News Analyst** | Reads the headlines, sets the pace | Reads CoinDesk, Cointelegraph and Decrypt. Claude rates each coin's news from -1 (bearish) to +1 (bullish) and advises how often to check the market right now. With no Claude key it uses a keyword list |
 | **Event Synthesis** | Measures what prices did around news and scheduled releases | Stores every headline with its publication time, groups headlines about a coin into bursts, and for each burst and each scheduled US release (CPI, Fed statement, jobs report) measures afterwards the price jump, how long it took to register, what it gave back and whether volume dried up, next to the same hour on a normal day. Reported by `/events` and in the notebook; **it trades nothing** (see "Event synthesis") |
+| **Strategy Library** | Tests published trading rules honestly | Seven well-known published rules (the Turtles' breakout, time-series momentum, moving-average crossovers, Connors' RSI(2), Bollinger bands, MACD, Larry Williams' breakout) and the desk's own two, written in-house from their sources and replayed on years of real prices under one fixed test: settings chosen on older years, judged on newer ones, walk-forward, and a luck check that counts every variant tried. On demand (`/library`), an occasional study rather than one of the agents in every check (so `/agents` does not count it); **it trades nothing** (see "The strategy library") |
 | **Forex / Macro** | Watches the US dollar | Follows USD vs EUR, GBP, JPY and CHF (European Central Bank rates). A fast-rising dollar usually hurts crypto ("risk-off") |
 | **Technical Analyst** | Chart reader | Standard indicators: trend averages (EMA), momentum (MACD), overbought/oversold (RSI), Bollinger bands, volatility (ATR) |
 | **Chart Reader** | Describes the market picture | From the same finished candles: is each timeframe (1-hour, the 4-hour bars built from it, daily) in **chop** (going nowhere), **trending** or **impulsive** (a fast move)? Which structural events just happened: 12/26 average crossovers (50/200-day on the daily chart), a breakout above the recent high or a breakdown below the recent low, an unusually big candle, a new high with weaker momentum or on thinner volume? Nearest support and resistance. Shown to the Portfolio Manager as context, on `/chart` and in the notebook; nothing trades on it by itself (see "Chart events") |
@@ -259,6 +260,8 @@ backstop for flash crashes). The 10% overall brake is the control that matters: 
 would have tripped and saved 6-16 points. When it trips, the desk now pauses new buys for 14 days
 (`BRAKE_PAUSE_DAYS`), then resumes at half size until the account has recovered half the loss.
 
+For the published rules next to the desk's own under one strict protocol, see "The strategy library".
+
 ## How the desk improves itself (the strategy laboratory)
 
 The desk can create, test, promote and roll back strategies on its own, but inside a frame designed to
@@ -303,6 +306,115 @@ indicators, so a loop that "keeps whatever backtested best" would mostly keep lu
   goes back to the settings file). An extra cap as a percentage of the account (`AI_BUDGET_PCT_MONTH`) is
   optional and off on demo money, because a small demo balance would starve Claude (0.25% of $100 a month is one
   cent a day).
+
+## The strategy library: published rules, tested honestly (/library)
+
+The library answers one question: **do well-known, published trading rules beat simply holding the coins, on these
+coins, after costs, once luck is taken into account?** It takes seven long-only rule families that traders and
+researchers have published, writes each one here from its published description (the source is cited next to it),
+and replays them on years of real Binance prices next to the desk's own two strategies. It is a measurement: **it
+trades nothing**, and no setting, prompt or risk rule reads its result. A rule that passes is reported as a
+*candidate*; running one would be a separate release you approve, as the daily trend rule was.
+
+**Why a curated library and not "scraping GitHub and TradingView".** Those sites' terms forbid scraping, and the
+desk never runs code it downloaded. A small library of published rules, each written and tested in-house, is
+safer and, above all, measurable: every rule goes through the same simulator and the same fixed test.
+
+| Rule | Source | Bars | Settings tried (headline first) |
+|---|---|---|---|
+| Donchian channel breakout (the Turtles' systems 1 and 2): buy a close above the 20 (55)-day high, stop 2 N below, sell below the 10 (20)-day low | Curtis Faith, *The Original Turtle Trading Rules* (2003) | daily | 20/10, 55/20 |
+| Time-series momentum: hold while the price is above where it was 4 weeks ago, sized by its swing | Moskowitz, Ooi, Pedersen, *Journal of Financial Economics* 2012; Liu, Tsyvinski, *Review of Financial Studies* 2021 for crypto | daily | 28, 14, 91, 182 days |
+| Moving-average crossover: hold while the short daily average is above the long one | Brock, Lakonishok, LeBaron, *Journal of Finance* 1992 (their five pairs) | daily | 1/50, 1/150, 5/150, 1/200, 2/200 |
+| Connors' RSI(2): buy a dip (2-day RSI below 10 or 5) above the 200-day average, sell above the 5-day average | Connors & Alvarez, *Short Term Trading Strategies That Work* (2008) | daily | 10, 5 |
+| Bollinger bands: buy a close below the lower band above the 200-day average, sell above the middle band (a control: Bollinger warns against exactly this) | John Bollinger, *Bollinger on Bollinger Bands* (2001) | daily | 20/2, 10/1.9, 50/2.1 |
+| MACD: hold while the MACD line is above its signal line (and, in two variants, above zero) | Gerald Appel (2005); StockCharts ChartSchool | 4-hour | 12/26/9, 5/35/5, each with and without the zero filter |
+| Larry Williams' volatility breakout: buy when the price rises above the open plus k x yesterday's range, sell at the close | Larry Williams, *Long-Term Secrets to Short-Term Trading* (1999) | daily | k = 0.5, 0.75, 1.0 |
+
+The links are in `LIBRARY.md`. The desk's own **daily trend rule** and **hourly rules** run through their own replays
+with their tested defaults, as references; and three yardsticks: **holding the same 8 coins**, **Bitcoin alone**,
+**cash**.
+
+**The test, fixed in code (`trader/library_stats.py`) before any rule was run on real prices** (protocol 1):
+
+- The 8 coins the desk's research tested (BTC ETH SOL BNB XRP ADA DOGE LINK). Each coin joins 210 days after its first
+  Binance candle (so every 200-day average exists from its first day): the period runs from 2018-03-15 (BTC, ETH) to
+  the last finished day; SOL joins in March 2021.
+- **Settings chosen on the first 70% of the days only** (the best "worse half": a setting must work in both halves of
+  the window, with at least 5 rule trades a year), then **judged once on the last 30%** (the "judged period"), which the
+  choice never saw.
+- **Walk-forward:** choose on 2 years, test the next 6 months, step 6 months, and stitch the test months into one
+  record that is entirely out of sample (13 segments, 2020-03 to the last day).
+- The same simulator for every library rule: decisions on a finished bar's close, orders at the next open, 0.1% fee
+  per order, 0.05% slippage (0.2% on stops), one slot per coin, at most 10% of the account per buy, long only, no
+  leverage; every window starts flat and sells what it holds at its end (those closes do not count as the rule's
+  trades).
+- **The luck check** (the deflated Sharpe ratio of Bailey & Lopez de Prado, 2014) counts every variant tried: 23
+  library settings plus the 2 references = 25. The more settings tried, the better the best one looks by luck alone,
+  so the bar rises with them. "Luck about k in 100" means: if none of the variants had a real edge, a record at least
+  this good would turn up by luck about k times in 100. It is not the chance that the rule is luck. The check is
+  against cash; beating holding is measured, not luck-checked.
+- **A rule PASSES only if all nine conditions hold:** an eligible setting in the first 70%; at least 30 rule trades in
+  the judged period and 50 in the walk-forward; a positive Sharpe ratio and return in the judged period and in the
+  walk-forward (beats cash); a higher Sharpe ratio than holding the coins in both (beats buy-and-hold, risk-adjusted); a
+  worst drop no deeper than holding's in both; and a luck figure of 5 in 100 or fewer. Otherwise it FAILS, with every
+  reason listed.
+- A later change of any grid, threshold or cost is a new protocol version, and the luck check then also counts the
+  25 variants of this one. Every saved run is kept (LIBRARY.md "Earlier runs"): a rule that passes once and fails in
+  other runs is not evidence.
+- The desk's own two strategies are **references, never candidates**: their settings were chosen by earlier research on
+  some of these years (about 200 hourly variants, about 20 daily ones), so their figures are not a clean test; their
+  luck figure counts those variants.
+
+**What the full run found (2026-10-31, prices to 2026-10-30, version 1.9.0; two runs on the same prices gave the same numbers):**
+
+| Rule | Setting chosen (first 70%) | Judged period: return / Sharpe / worst drop / trades | Walk-forward: return / Sharpe / worst drop / trades | Luck in 100 | Verdict |
+|---|---|---|---|---|---|
+| Hold the 8 coins | - | -16.6% / 0.20 / 66% / - | re-split every 6 months: +5,100% / 1.14 / 80% / - | - | yardstick (the bar) |
+| Hold the 8 coins, bought once | - | (as above) | +1,966% / 0.96 / 86% / - | - | for information |
+| Bitcoin alone | - | +9.0% / 0.30 / 53% / - | restarted every 6 months: +1,235% / 0.96 / 77% / - | - | yardstick |
+| Cash | - | 0% / 0.00 / 0% / - | 0% / 0.00 / 0% / - | - | yardstick |
+| Donchian / Turtle | entry 20, exit 10 | +38.3% / 0.61 / 30% / 117 | +1,169% / 1.32 / 32% / 244 | 12 | FAIL: luck about 12 in 100 |
+| Time-series momentum | 14 days | +48.9% / 0.68 / 35% / 479 | +1,705% / 1.46 / 35% / 921 | 7 | FAIL: luck about 7 in 100 |
+| Moving averages | 1/50 | +39.3% / 0.55 / 34% / 248 | +4,295% / 1.32 / 55% / 493 | 10 | FAIL: luck about 10 in 100 |
+| RSI(2) dips | below 5 | +13.2% / 0.64 / 5% / 89 | +74% / 0.53 / 12% / 220 | 90 | FAIL: walk-forward Sharpe 0.53 below holding's 1.14 |
+| Bollinger bands | 10 / 1.9 | +9.5% / 0.30 / 18% / 86 | +138% / 0.71 / 16% / 174 | 72 | FAIL: walk-forward Sharpe 0.71 below holding's 1.14 |
+| MACD 4-hour | 12/26/9 above zero | +9.2% / 0.26 / 36% / 1,234 | +328% / 0.93 / 47% / 3,750 | 43 | FAIL: walk-forward Sharpe 0.93 below holding's 1.14 |
+| Williams breakout | k 1.0 | -13.5% / -0.34 / 26% / 1,276 | +85% / 0.53 / 50% / 4,131 | 85 | FAIL: lost against cash in the judged period |
+| Desk, daily trend rule (reference) | tested defaults | +45.1% / 0.62 / 30% / 248 | whole period: +5,495% / 1.25 / 40% / 660 | 8 (20 variants) | REFERENCE |
+| Desk, hourly rules (reference) | tested defaults | -15.1% / -1.44 / 16% / 1,157 | last 3 years: -18.8% / -1.18 / 26% / 1,565 | 100 (200 variants) | REFERENCE |
+
+Sharpe ratios in yearly terms; by luck alone the best of 25 variants would show about 0.86 a year. **No published rule
+passed.** The three trend rules (Turtle breakout, momentum, moving averages) beat both cash and holding on the
+Sharpe ratio, in the judged period and in the walk-forward, with shallower drops than holding; each fails only the
+luck check (7 to 12 in 100 against the 5 or fewer required). The dip-buying rules, MACD and the Williams breakout did not
+beat holding over the walk-forward. The desk's daily trend rule shows the same picture as the published trend rules
+(luck about 8 in 100, not a clean test), and the hourly rules lost money again. Nothing changed on the desk.
+
+**Which "holding" the walk-forward uses.** Each 6-month walk-forward segment starts flat, for the rules and for
+holding alike (declared before the first run). For holding, that means the 8 coins are re-split equally every 6
+months: +5,100%, Sharpe 1.14. The same coins bought once over the same dates made +1,966% (Sharpe 0.96, worst drop
+86%). The verdicts use the re-split basket, the stricter bar in this run; the bought-once row is for information.
+The Sharpe ratio is return per unit of swing: the Turtle breakout (+1,169%) and momentum (+1,705%) made less money than
+coins bought once, but with drops of 32-35% instead of 86%.
+
+**Cost.** On a 4-core laptop (Python 3.13) the full run took 42 seconds of CPU and 301 MB of memory at its peak (the
+hourly reference is 30 of those seconds and about 190 MB); without the hourly reference 12 seconds and 115 MB. The
+1/8-OCPU server is taken as 10-20 times slower: about 7-14 minutes of CPU, 20-40 minutes at the lowest priority. The
+first run downloads about 434 public price pages (about 50 MB of JSON, 1-2 minutes here); later runs only what is new
+(at most about 24 requests). The prices are kept in `data/library` (about 8 MB). `/library` runs it as a separate
+process at the lowest CPU priority beside the desk, so the market checks come first; it skips the hourly reference
+with a message when the server has less than 400 MB of free memory at that moment, and if the server still stops it
+for memory, the message says so (`/library nohourly` then leaves out the hourly part).
+
+**How to run it:** `/library` on Telegram is the recommended way (the result arrives as one message; `/library last`
+shows the latest one again; `/library nohourly` without the hourly reference). On the server, `desk library` starts it
+as a background service at the lowest CPU weight and shows its progress (Ctrl+C stops watching only; it keeps running
+if you disconnect). The `desk` helper is installed by `deploy/setup.sh`, so servers installed before 1.9.0 do not have
+`desk library`: use `/library` there (the manual `cd ~/crypto-desk && .venv/bin/python -m trader library --save
+--low-priority` runs inside your login, so it competes with the desk at equal weight and stops if the connection
+drops). Or `python -m trader library` on any computer with the project. Options: `--no-hourly` (without the hourly reference), `--refresh` (download every price
+again), `--save` (store the result in the journal, for `/notes` and `/library last`). The full table, the sources, every
+setting tried, the walk-forward choices and the caveats are in `LIBRARY.md` in the notebook.
 
 ## A free AI next to Claude (small budgets)
 
@@ -540,6 +652,7 @@ so it can never disagree with the journal and can be rebuilt from any backup (`d
 | `PERFORMANCE.md` | the report, the demo goals, the week-by-week learning curve (equity, trades, profit factor, champion), the Claude scorecard, costs |
 | `CHART.md` | the chart picture per coin now (regimes, support and resistance, the owner's line), the chart events of the last two weeks by day, a count per kind for the last week |
 | `EVENTS.md` | what prices did around scheduled releases and headline bursts, event vs the same hour on a normal day: every class with its verdict, the releases and bursts measured, the fixed parameters, the calendar and the request budget |
+| `LIBRARY.md` | the strategy library's latest result: every rule with its source, the settings tried and chosen, the judged-period and walk-forward results against holding and cash, the luck check, the verdicts, the caveats and how to reproduce it |
 | `weekly/<week>.md` | written once a week after the lab and never rewritten: the lab result, the lessons, Claude's review, the performance at that moment |
 
 **Getting it:** `/notes` on Telegram sends the folder as a zip; the weekly backup message brings it too; on the
@@ -699,6 +812,10 @@ trader/
   health.py         /health, /agents, the pulse, the decision funnel and the stuck-rule alert
   agents/events.py  the event study: headlines with publication times, bursts, the release calendar, the measurement
   events_report.py  its texts: /events, the daily-report line, EVENTS.md
+  library.py        the strategy library: seven published rules, one simulator, the protocol (python -m trader library)
+  library_data.py   its prices: Binance's public candles, cached in data/library
+  library_stats.py  how a rule is judged: the 70/30 split, the walk-forward, the luck check, the nine conditions
+  library_report.py its texts: /library, the terminal table, LIBRARY.md
   macro_calendar.json  the scheduled US releases (official sources named inside; owner additions: data/macro_calendar.json)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server

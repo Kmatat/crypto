@@ -13,6 +13,7 @@ by hand, and nothing in it can change how the desk trades.
   data/notes/DIARY.md            the notable moments in order: starts, trades, brakes, scout, lab, promotions
   data/notes/PERFORMANCE.md      results, goals, the week-by-week learning curve, the Claude scorecard
   data/notes/weekly/<week>.md    one snapshot a week, written once: what was known and decided at the time
+  data/notes/LIBRARY.md          the strategy library's latest result (a measurement; nothing trades on it)
 
 With the daily trend rule (STRATEGY=trend, trader/trend.py) STRATEGY.md describes the rule, its settings and each
 coin's latest daily decision instead; the hourly strategy's cards are kept as they were, for STRATEGY=hourly.
@@ -30,6 +31,7 @@ from . import trend
 from .ai_router import effective_order
 from .config import Settings
 from .events_report import events_md
+from .library_report import library_md
 from .journal import Journal
 from .report import goals, goals_text, performance, report_text
 from .strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line, thresholds_line
@@ -39,7 +41,9 @@ log = logging.getLogger(__name__)
 STAMP = "%Y-%m-%d %H:%M"
 ICONS = {"start": "🚀", "trade": "💱", "order": "❌", "brake": "🛑", "watchlist": "🔭", "protection": "🛡️",
          "pace": "⏱️", "lab": "🔬", "strategy": "🏆", "challenger": "🧪", "rollback": "⏪", "error": "⚠️",
-         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝", "chart": "📊", "events": "📰"}
+         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝", "chart": "📊", "events": "📰", "library": "📚"}
+LIBRARY_ROW = ("published trading rules and the desk's own, tested on years of real prices by one fixed protocol: the "
+               "latest result, sources and caveats (a measurement; nothing trades on it)")
 PARAM_LABELS = [
     ("buy_threshold", "Buy when the weighted score is at least"),
     ("stop_loss_atr", "Stop-loss distance (ATR)"),
@@ -304,7 +308,8 @@ class Notes:
                        self._write("DIARY.md", self.diary_md()),
                        self._write("PERFORMANCE.md", self.performance_md(trades, hist, prices, scorecard)),
                        self._write("CHART.md", self.chart_md()),
-                       self._write("EVENTS.md", events_md(self.j, self.s))]
+                       self._write("EVENTS.md", events_md(self.j, self.s)),
+                       self._write("LIBRARY.md", library_md(self.j))]   # never raises (a damaged report: a short page)
             for card, entry in self.cards():
                 written.append(self._write(f"strategies/{card.id}.md", self.card_md(card, entry, trades, hist)))
             return written
@@ -448,6 +453,7 @@ class Notes:
                               "crossovers, breakouts, levels)"],
                  ["EVENTS.md", "what prices did around scheduled releases and headline bursts, event vs a normal day at the "
                                "same hour (a measurement; nothing trades on it)"],
+                 ["LIBRARY.md", LIBRARY_ROW],
                  ["weekly/<week>.md", "one snapshot a week, never rewritten: what was known and decided at the time"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -504,6 +510,7 @@ class Notes:
                               "rule does not use it"],
                  ["EVENTS.md", "the hourly agents' event study (what prices did around scheduled releases and headline "
                                "bursts); the daily trend rule does not run it"],
+                 ["LIBRARY.md", LIBRARY_ROW],
                  ["weekly/<week>.md", "the hourly strategy's weekly pages, never rewritten (the trend rule adds none)"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -950,9 +957,10 @@ class Notes:
         for t in trades[::-1][:trades_limit]:
             recent += self._trade_block(t, hist)
         parts.append("\n".join(recent))
-        # the event study's diary lines (kind "events") stay out: its records are a measurement for the owner, and
-        # the review's summary reaches the decision prompt through the playbook (no AI prompt reads the study)
-        ev = [e for e in self.j.events() if e["kind"] != "events"][-events_limit:]
+        # the event study's and the strategy library's diary lines (kinds "events", "library") stay out: their records
+        # are measurements for the owner, and the review's summary reaches the decision prompt through the playbook
+        # (no AI prompt reads the study or the library)
+        ev = [e for e in self.j.events() if e["kind"] not in ("events", "library")][-events_limit:]
         parts.append("# Recent diary\n\n" + "\n".join(f"- {_ts(e['ts'])} {e['kind']}: {e['text']}" for e in ev))
         if now_table := self.chart_now_table():   # a few hundred bytes: the chart reader's picture per coin
             parts.append("# Chart picture\n\n" + now_table)
