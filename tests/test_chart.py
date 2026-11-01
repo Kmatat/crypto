@@ -71,6 +71,8 @@ class FakeMarket:
         self.daily = daily or {}
         self.downloads: list[str] = []     # every daily download, in order (the request budget)
         self._fresh: set[str] = set()      # coins whose daily rows are "less than an hour old" (the real cache)
+        self.aside_downloads: list[str] = []   # the downloads into the records' own copy (daily_rows_aside)
+        self._aside_fresh: set[str] = set()    # that copy: never read by daily_rows / daily_cached
 
     def candles(self, sym, limit=200):
         return self.series[sym][-limit:]
@@ -99,6 +101,15 @@ class FakeMarket:
 
     def daily_closes(self, sym, limit=260):
         return [r["close"] for r in self.daily_rows(sym, limit)]
+
+    def daily_rows_aside(self, sym, limit=260, download=True):
+        if sym not in self._aside_fresh:
+            if not download:
+                return []
+            self.downloads.append(sym)
+            self.aside_downloads.append(sym)
+            self._aside_fresh.add(sym)
+        return self._rows(sym)
 
     def price(self, sym):
         return self.series[sym][-1]["close"]

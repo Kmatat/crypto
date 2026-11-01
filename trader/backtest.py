@@ -17,10 +17,11 @@ import itertools
 import sys
 import time
 
+from .agents import memory as mem
 from .agents.chart import ChartEventsAgent
 from .agents.decision import DecisionAgent
 from .agents.execution import PAPER_FEE, STOP_SLIPPAGE
-from .agents.mentor import ALL_CHECKS, MentorAgent
+from .agents.mentor import ALL_CHECKS, OWNER_ONLY, MentorAgent
 from .agents.prediction import PredictionAgent
 from .agents.risk import RiskManagerAgent
 from .agents.technical import TechnicalAnalysisAgent
@@ -89,7 +90,9 @@ class DailySeries:
 class Backtest:
     def __init__(self, s: Settings, history: dict[str, list[dict]], decision: DecisionAgent | None = None,
                  days: int | None = None, btc_history: list[dict] | None = None, end_ms: int | None = None,
-                 analysis_cache: dict | None = None, keep_curve: bool = False):
+                 analysis_cache: dict | None = None, keep_curve: bool = False,
+                 memory_seed: list[dict] | None = None, memory_rule: str = "test", record: bool = False,
+                 releases: tuple | None = None):
         self.s = s
         # keep_curve: also return the equity after every replayed hour and the closed trades with their times (the
         # strategy library's reference entry; off by default, so the result is exactly as before)
@@ -104,8 +107,16 @@ class Backtest:
         self.risk = RiskManagerAgent(s)
         self.technical, self.prediction = TechnicalAnalysisAgent(), PredictionAgent()
         self.mentor = MentorAgent(s.mentor_checks, s.min_reward_risk, s.cooldown_hours) if s.mentor_checks else None
-        # the chart reader is needed only by the checklist's `regime` rule: without it nothing is computed
-        self.chart = ChartEventsAgent(s.interval) if self.mentor and "regime" in s.mentor_checks else None
+        # the post-mortem & memory agent (1.9.1): the `memory` rule, judged walk-forward on this replay's own trades
+        # (closed before each decision), and `record`, the trade records with their context at entry (the seed)
+        self.use_memory = bool(self.mentor) and "memory" in s.mentor_checks
+        self.memory_seed, self.memory_rule, self.record = memory_seed, memory_rule, record
+        # the chart reader is needed only by the checklist's `regime` and `memory` rules and by the trade records:
+        # without them nothing is computed
+        self.chart = ChartEventsAgent(s.interval) if (self.mentor and {"regime", "memory"} & set(s.mentor_checks)) \
+            or record else None
+        self.releases = (releases if releases is not None else mem.release_times(mem.owner_calendar())) \
+            if self.use_memory or record else ([], None)
         self.daily = {sym: DailySeries(h) for sym, h in history.items()}
         self.btc = btc_history if btc_history is not None else history.get("BTCUSDT")
         self.btc_daily = DailySeries(self.btc) if self.btc else None
@@ -125,7 +136,20 @@ class Backtest:
         vetoes: dict[str, int] = {}
         last_stop: dict[str, int] = {}
         brake_tripped_at: int | None = None
-        for t in times[WARMUP:] if not self.days else times:
+        loop = times[WARMUP:] if not self.days else times
+        step = INTERVAL_MS.get(s.interval, 3_600_000)
+        book, refused = None, []
+        if self.use_memory:   # seed rows opened inside the replayed period would count the same signals twice
+            first = loop[0] if loop else 0
+            book = mem.MemoryBook([r for r in self.memory_seed or [] if r["opened_ms"] < first], self.memory_rule)
+
+        def close(sym, px, reason, t):
+            proceeds = self._close(positions, trades, sym, px, reason, t, step=step)
+            if book is not None:   # a sale on a signal happens at the check, after that check's buys were judged
+                row = trades[-1]   # (live too): the memory sees it from the next decision; the trade record is unchanged
+                book.add(dict(row, closed_ms=row["closed_ms"] + 1) if reason == "signal" else row)
+            return proceeds
+        for t in loop:
             date = dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).date()
             idx = {sym: by_time[sym][t] for sym in self.history}
             if any(i < WARMUP - 1 for i in idx.values()):
@@ -138,10 +162,10 @@ class Backtest:
             for sym, p in list(positions.items()):
                 c = candles[sym][-1]
                 if c["low"] <= p["stop"]:
-                    cash += self._close(positions, trades, sym, p["stop"] * (1 - STOP_SLIPPAGE), "stop-loss", t)
+                    cash += close(sym, p["stop"] * (1 - STOP_SLIPPAGE), "stop-loss", t)
                     last_stop[sym] = t
                 elif c["high"] >= p["take"]:
-                    cash += self._close(positions, trades, sym, p["take"], "take-profit", t)
+                    cash += close(sym, p["take"], "take-profit", t)
             # indicators depend only on the candles, not on the strategy: computed once per (coin, hour) and shared
             # across the laboratory's windows and cards through `analysis_cache`
             analysis = {}
@@ -181,7 +205,7 @@ class Backtest:
                 if d["action"] == "SELL":
                     verdict = self.risk.review(d, sym, price[sym], atr, portfolio)
                     if verdict["approved"]:
-                        cash += self._close(positions, trades, sym, price[sym], "signal", t)
+                        cash += close(sym, price[sym], "signal", t)
                 elif d["action"] == "BUY":
                     buys.append((d["confidence"], d["combined_score"], sym, atr, d))
             for _, _, sym, atr, d in sorted(buys, reverse=True):
@@ -192,13 +216,12 @@ class Backtest:
                     brake_tripped_at = t
                 if not verdict["approved"]:
                     continue
+                chart, entry = None, None
+                btc_daily = (self.btc_daily.at(self.btc_index[t], self.btc[self.btc_index[t]]["close"])
+                             if (self.mentor or self.record) and self.btc_daily and t in self.btc_index else None)
                 if self.mentor:
-                    btc_daily = (self.btc_daily.at(self.btc_index[t], self.btc[self.btc_index[t]]["close"])
-                                 if self.btc_daily and t in self.btc_index else None)
-                    chart = None
-                    if self.chart:   # the same 200-candle window and the finished days before this candle's day, as live
-                        ds = self.daily[sym]
-                        chart = self.chart.run(candles[sym], ds.completed[:ds.before[idx[sym]]])
+                    if self.chart and "regime" in s.mentor_checks:
+                        chart = self._chart_at(sym, candles, idx)
                     review = self.mentor.review(sym, candles[sym], self.daily[sym].at(idx[sym], price[sym]), price[sym],
                                                 verdict["stop_loss"], verdict["take_profit"], atr, btc_daily,
                                                 last_stop.get(sym), t, chart=chart)
@@ -206,10 +229,25 @@ class Backtest:
                         for name in review["failed"]:
                             vetoes[name] = vetoes.get(name, 0) + 1
                         continue
+                if self.use_memory or self.record:
+                    # only for the candidates the other rules let through: the memory's verdict does not depend on
+                    # them, and any failed rule refuses anyway, so the trades are the same as judging it with them
+                    if chart is None:
+                        chart = self._chart_at(sym, candles, idx)
+                    entry = mem.entry_features(sym, candles[sym], price[sym], atr, verdict["stop_loss"], chart,
+                                               self.daily[sym].at(idx[sym], price[sym]), btc_daily, *self.releases,
+                                               s.interval)
+                    if book is not None:
+                        mv = book.verdict(entry["bucket"], t + step)
+                        if mv["ok"] is False:
+                            vetoes["memory"] = vetoes.get("memory", 0) + 1
+                            refused.append((sym, t, price[sym], atr))
+                            continue
                 quote = verdict["quote_amount"]
                 positions[sym] = {"qty": quote * (1 - PAPER_FEE) / price[sym], "cost": quote, "entry": price[sym],
                                   "stop": verdict["stop_loss"], "take": verdict["take_profit"], "opened": t,
-                                  "high": price[sym]}
+                                  "high": price[sym], "atr": atr, "entry_ctx": entry, "score": d["combined_score"],
+                                  "technical": analysis[sym][0], "prediction": analysis[sym][2]}
                 cash -= quote
             curve.append((t, cash + sum(p["qty"] * price[sym] for sym, p in positions.items())))
 
@@ -228,15 +266,75 @@ class Backtest:
         if self.keep_curve:
             result["curve"] = curve
             result["closed"] = [(x["t"], x["pnl"], x["pnl_pct"], x["reason"], x["fees"]) for x in trades]
+        if book is not None:
+            result["memory"] = self._memory_result(book, refused, trades, traded[-1] + step)
+        if self.record:
+            result["trade_records"] = self._records(trades)
         return result
 
+    def _chart_at(self, sym: str, candles: dict, idx: dict) -> dict:
+        """The chart reader on the same 200-candle window and the finished days before this candle's day, as live."""
+        ds = self.daily[sym]
+        return self.chart.run(candles[sym], ds.completed[:ds.before[idx[sym]]])
+
+    def _memory_result(self, book, refused: list[tuple], trades: list[dict], end_ms: int) -> dict:
+        """What the memory rule did: its refusals replayed anyway with scorecard.replay_trade (one per coin while the
+        previous what-if trade would still be open: the desk holds one position per coin), the trades made replayed the
+        same way (like with like: replay_trade has a 120-hour horizon and no signal exits, unlike the replay's own
+        trades), and the memory at the end."""
+        from .scorecard import replay_trade
+        index = {sym: {c["time"]: i for i, c in enumerate(h)} for sym, h in self.history.items()}
+
+        def after(sym, t):
+            i = index[sym].get(t)
+            return self.history[sym][i + 1:] if i is not None else []
+        busy: dict[str, float] = {}
+        whatif = []
+        for sym, t, entry, atr in sorted(refused, key=lambda x: (x[0], x[1])):
+            if t < busy.get(sym, 0):
+                continue
+            out = replay_trade(after(sym, t), entry, atr, self.s)
+            whatif.append(out)
+            busy[sym] = t + out["hours"] * 3_600_000
+        made = [replay_trade(after(x["symbol"], x["opened"]), x["entry"], x["atr"], self.s) for x in trades
+                if x.get("atr")]
+        cells = book.cells(end_ms)
+        judged = sorted(b for b, (n, _) in cells.items() if n >= mem.MIN_SIMILAR)
+        refusing = [b for b in judged if book.verdict(b, end_ms)["ok"] is False]
+
+        def summary(rows):
+            n = len(rows)
+            return {"n": n, "losers": sum(1 for r in rows if r["pnl_pct"] <= 0),
+                    "mean_pct": round(sum(r["pnl_pct"] for r in rows) / n, 3) if n else None}
+        return {"rule": book.rule, "refused": len(refused), "whatif": summary(whatif), "made": summary(made),
+                "end": {"pool": sum(n for n, _ in cells.values()), "groups": len(judged), "refusing": refusing}}
+
+    def _records(self, trades: list[dict]) -> list[dict]:
+        """The closed trades with their context at entry and the failed-breakout result worked out from the history
+        in hand (the same function the live desk uses on its candles)."""
+        out = []
+        step = INTERVAL_MS.get(self.s.interval, 3_600_000)
+        for x in trades:
+            r = dict(x)
+            ctx = r.get("ctx") or {}
+            brk = ctx.get("breakout")
+            r["breakout_failed"] = mem.breakout_failed(self.history[r["symbol"]], ctx.get("decision_ms"), brk["level"],
+                                                       brk["hours"], step) if brk else None
+            out.append(r)
+        return out
+
     @staticmethod
-    def _close(positions, trades, sym, px, reason, t) -> float:
+    def _close(positions, trades, sym, px, reason, t, step: int = 0) -> float:
         p = positions.pop(sym)
         proceeds = p["qty"] * px * (1 - PAPER_FEE)
+        # the keys after "fees" (the post-mortem's trade record) are read by neither _metrics nor keep_curve
         trades.append({"symbol": sym, "pnl": proceeds - p["cost"], "pnl_pct": (proceeds / p["cost"] - 1) * 100,
                        "reason": reason, "hours": (t - p["opened"]) / 3_600_000, "t": t,
-                       "fees": p["cost"] * PAPER_FEE + p["qty"] * px * PAPER_FEE})
+                       "fees": p["cost"] * PAPER_FEE + p["qty"] * px * PAPER_FEE,
+                       "opened": p["opened"], "closed_ms": t + step, "entry": p["entry"], "exit": px, "cost": p["cost"],
+                       "atr": p.get("atr"), "bucket": (p.get("entry_ctx") or {}).get("bucket"),
+                       "ctx": p.get("entry_ctx"), "score": p.get("score"), "technical": p.get("technical"),
+                       "prediction": p.get("prediction"), "loss": proceeds - p["cost"] <= 0})
         return proceeds
 
     def _metrics(self, trades, curve, final, decisions, times) -> dict:
@@ -356,6 +454,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--sma", type=int, help="trend: days of the average (default 50)")
     ap.add_argument("--vol-target", type=float, help="trend: yearly swing a full share allows (default 0.5)")
     ap.add_argument("--trend-stop", type=float, help="trend: emergency stop below the entry (default 0.25)")
+    ap.add_argument("--memory-rule", default="test", choices=mem.RULES,
+                    help="with --checks ...,memory: 'test' (the desk's rule: a group's losses far above the usual "
+                         "rate) or 'owner60' (the first plan: more than 60%% losers among 10 or more similar trades; "
+                         "replay only)")
     args = ap.parse_args(argv)
     if args.strategy == "trend":
         return trend_main(args)
@@ -372,8 +474,8 @@ def main(argv: list[str]) -> int:
     live = Settings()  # the live desk's defaults: a flag-less backtest measures exactly what trades
     if args.checks is None:
         checks = live.mentor_checks
-    elif args.checks == "all":
-        checks = tuple(ALL_CHECKS)
+    elif args.checks == "all":   # the price rules; an owner-only rule (memory) is always named
+        checks = tuple(c for c in ALL_CHECKS if c not in OWNER_ONLY)
     elif args.checks in ("", "none"):
         checks = ()
     else:
@@ -394,7 +496,7 @@ def main(argv: list[str]) -> int:
                         trail_atr=pick(args.trail, live.trail_atr))
 
     def run(s):
-        return Backtest(s, history, days=args.days, btc_history=btc).run()
+        return Backtest(s, history, days=args.days, btc_history=btc, memory_rule=args.memory_rule).run()
 
     if args.coin_buy:
         dmod.COIN_THRESHOLDS.clear()
@@ -406,6 +508,9 @@ def main(argv: list[str]) -> int:
         print_result(r)
         if r["mentor_vetoes"]:
             print(f"Checklist vetoes      {r['mentor_vetoes']}")
+        if r.get("memory"):
+            from .postmortem_report import replay_memory_text
+            print(replay_memory_text(r["memory"]))
         return 0
 
     print(f"Sweep with checklist={','.join(checks) or 'none'} risk={pick(args.risk, live.risk_per_trade_pct * 100):g}% "

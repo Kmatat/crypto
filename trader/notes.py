@@ -14,6 +14,7 @@ by hand, and nothing in it can change how the desk trades.
   data/notes/PERFORMANCE.md      results, goals, the week-by-week learning curve, the Claude scorecard
   data/notes/weekly/<week>.md    one snapshot a week, written once: what was known and decided at the time
   data/notes/LIBRARY.md          the strategy library's latest result (a measurement; nothing trades on it)
+  data/notes/POSTMORTEM.md       why each closed trade won or lost, losers against winners, and the memory rule's record
 
 With the daily trend rule (STRATEGY=trend, trader/trend.py) STRATEGY.md describes the rule, its settings and each
 coin's latest daily decision instead; the hourly strategy's cards are kept as they were, for STRATEGY=hourly.
@@ -32,18 +33,21 @@ from .ai_router import effective_order
 from .config import Settings
 from .events_report import events_md
 from .library_report import library_md
+from .postmortem_report import digest_section, memory_on, postmortem_md
 from .journal import Journal
 from .report import goals, goals_text, performance, report_text
-from .strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line, thresholds_line
+from .strategy import BOUNDS, MAX_CHANGES, StrategyCard, summary_line, thresholds_line, with_owner_rules
 
 log = logging.getLogger(__name__)
 
 STAMP = "%Y-%m-%d %H:%M"
 ICONS = {"start": "🚀", "trade": "💱", "order": "❌", "brake": "🛑", "watchlist": "🔭", "protection": "🛡️",
          "pace": "⏱️", "lab": "🔬", "strategy": "🏆", "challenger": "🧪", "rollback": "⏪", "error": "⚠️",
-         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝", "chart": "📊", "events": "📰", "library": "📚"}
+         "update": "🔄", "review": "🧠", "owner": "👤", "lesson": "📝", "chart": "📊", "events": "📰", "library": "📚", "memory": "🧠"}
 LIBRARY_ROW = ("published trading rules and the desk's own, tested on years of real prices by one fixed protocol: the "
                "latest result, sources and caveats (a measurement; nothing trades on it)")
+POSTMORTEM_ROW = ("why each closed trade won or lost (fills, US releases, chop, failed breakouts, noise), losers against "
+                  "winners, and the memory rule's record (a measurement after the fact)")
 PARAM_LABELS = [
     ("buy_threshold", "Buy when the weighted score is at least"),
     ("stop_loss_atr", "Stop-loss distance (ATR)"),
@@ -128,23 +132,35 @@ def _in_era(era: tuple[str, str | None] | None, ts: str) -> bool:
 
 
 # ---------------------------------------------------------------- strategy helpers
+# the lineage events after which another card is in force: a promotion (the lab, /approve, a rollback, the owner's
+# settings) or, since 1.9.1, "settings" (the owner switched the memory rule behind the card in force: its id changes,
+# nobody promoted it). "rollback" records follow a promotion record of the same card
+IN_FORCE_EVENTS = ("promote", "settings")
+
+
 def champion_at(history: list[dict], ts: str) -> dict | None:
-    """The promotion record in force at `ts` (the last promotion at or before it)."""
+    """The promotion (or settings) record in force at `ts` (the last one at or before it)."""
     current = None
     for h in history:
-        if h.get("event") == "promote" and h.get("ts", "") <= ts:
+        if h.get("event") in IN_FORCE_EVENTS and h.get("ts", "") <= ts:
             current = h
     return current
 
 
-def card_periods(history: list[dict], card_id: str) -> list[tuple[str, str | None]]:
-    """When was this card the champion? [(from, until-or-None), ...]"""
-    promotions = [h for h in history if h.get("event") == "promote"]
+def card_periods(history: list[dict], card_id: str, through_settings: bool = False) -> list[tuple[str, str | None]]:
+    """When was this card the champion? [(from, until-or-None), ...]. `through_settings`: a period that began with a
+    'settings' event (the owner switched the memory rule behind a lab or /approve card) starts where the card it
+    replaced began, back to that card's promotion: the same champion, as 'Champion since' and the lab's rollback watch
+    count it."""
+    promotions = [h for h in history if h.get("event") in IN_FORCE_EVENTS]
     out = []
     for i, h in enumerate(promotions):
         if h.get("id") == card_id:
             until = promotions[i + 1]["ts"] if i + 1 < len(promotions) else None
-            out.append((h["ts"], until))
+            k = i
+            while through_settings and k > 0 and promotions[k].get("event") == "settings":
+                k -= 1
+            out.append((promotions[k]["ts"], until))
     return out
 
 
@@ -228,8 +244,8 @@ def lineage_text(j: Journal, limit: int = 15) -> str:
         for c in items[-limit:]:
             card = StrategyCard.from_dict(c["card"])
             bits = [f"[{card.id}] {card.name} ({card.source or 'proposal'}): {STATUS_WORDS.get(c['status'], c['status'])}"]
-            if champ_card is not None:
-                bits.append(f"changes: {card.describe_diff(champ_card)}")
+            if champ_card is not None:   # a card stored before the owner switched the memory rule: no change of its own
+                bits.append(f"changes: {with_owner_rules(card, champ_card.checks).describe_diff(champ_card)}")
             if c.get("lab"):
                 v = c["lab"].get("verdict", {})
                 bits.append(f"exam mean {_pct(c['lab']['mean_return'])}, beat champion {v.get('wins')}/{v.get('tests')}")
@@ -309,7 +325,8 @@ class Notes:
                        self._write("PERFORMANCE.md", self.performance_md(trades, hist, prices, scorecard)),
                        self._write("CHART.md", self.chart_md()),
                        self._write("EVENTS.md", events_md(self.j, self.s)),
-                       self._write("LIBRARY.md", library_md(self.j))]   # never raises (a damaged report: a short page)
+                       self._write("LIBRARY.md", library_md(self.j)),   # never raises (a damaged report: a short page)
+                       self._write("POSTMORTEM.md", postmortem_md(self.j, self.s))]   # never raises either
             for card, entry in self.cards():
                 written.append(self._write(f"strategies/{card.id}.md", self.card_md(card, entry, trades, hist)))
             return written
@@ -454,6 +471,7 @@ class Notes:
                  ["EVENTS.md", "what prices did around scheduled releases and headline bursts, event vs a normal day at the "
                                "same hour (a measurement; nothing trades on it)"],
                  ["LIBRARY.md", LIBRARY_ROW],
+                 ["POSTMORTEM.md", POSTMORTEM_ROW],
                  ["weekly/<week>.md", "one snapshot a week, never rewritten: what was known and decided at the time"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -511,6 +529,7 @@ class Notes:
                  ["EVENTS.md", "the hourly agents' event study (what prices did around scheduled releases and headline "
                                "bursts); the daily trend rule does not run it"],
                  ["LIBRARY.md", LIBRARY_ROW],
+                 ["POSTMORTEM.md", POSTMORTEM_ROW],
                  ["weekly/<week>.md", "the hourly strategy's weekly pages, never rewritten (the trend rule adds none)"]]
         return "\n".join([
             "# Trading desk notebook", "",
@@ -552,7 +571,8 @@ class Notes:
                   "### Exam (how the champion scores on the laboratory's tests)", "",
                   exam_table(self.j.get("strategy_champion_eval")), "",
                   "### Live record under this champion", "",
-                  live_record_text(live_record(trades, card_periods(hist, champ.id) or [(state.get("since", ""), None)])),
+                  live_record_text(live_record(trades, card_periods(hist, champ.id, through_settings=True)
+                                               or [(state.get("since", ""), None)])),
                   "", f"Replicate the backtest: `{replicate_command(champ, self.s)}`", ""]
         study = self.j.get("threshold_study")
         if study:
@@ -575,7 +595,8 @@ class Notes:
             forward = (f"{_pct(fwd['challenger_return'])} vs {_pct(fwd['champion_return'])} over {fwd['days']:.0f} days"
                        if fwd.get("ready") else (f"{fwd.get('days', 0):.0f} days in, needs more" if fwd else "not yet"))
             rows.append([f"[{card.id}](strategies/{card.id}.md)", card.name, card.source or "proposal",
-                         _ts(c.get("proposed_at"), "%Y-%m-%d"), card.describe_diff(champ),
+                         _ts(c.get("proposed_at"), "%Y-%m-%d"),
+                         with_owner_rules(card, champ.checks).describe_diff(champ),
                          STATUS_WORDS.get(c["status"], c["status"]), exam, forward,
                          "; ".join(str(n) for n in (c.get("notes") or [])[:2])])
         lines += [_table(["Id", "Name", "Source", "Proposed", "Changes vs champion", "Status", "Exam", "Forward test",
@@ -686,7 +707,8 @@ class Notes:
         if card.rationale:
             lines += [f"Rationale: {card.rationale}", ""]
         if champ is not None and not is_champ:
-            lines += [f"Changes versus the current champion [{champ.id}]: {card.describe_diff(champ)}", ""]
+            lines += [f"Changes versus the current champion [{champ.id}]: "
+                      f"{with_owner_rules(card, champ.checks).describe_diff(champ)}", ""]
         lines += ["## Parameters", "", params_table(card), ""]
         ev = self.j.get("strategy_champion_eval") if is_champ else (entry or {}).get("lab")
         lines += ["## Exam", "", exam_table(ev)]
@@ -959,10 +981,18 @@ class Notes:
         parts.append("\n".join(recent))
         # the event study's and the strategy library's diary lines (kinds "events", "library") stay out: their records
         # are measurements for the owner, and the review's summary reaches the decision prompt through the playbook
-        # (no AI prompt reads the study or the library)
-        ev = [e for e in self.j.events() if e["kind"] not in ("events", "library")][-events_limit:]
+        # (no AI prompt reads the study or the library). The post-mortem's (kind "memory") stay out too, unless the
+        # owner switched the memory rule on: then the AI already sees its verdicts in the checklist
+        on = memory_on(self.j, self.s)
+        hidden = ("events", "library") if on else ("events", "library", "memory")
+        ev = [e for e in self.j.events() if e["kind"] not in hidden][-events_limit:]
         parts.append("# Recent diary\n\n" + "\n".join(f"- {_ts(e['ts'])} {e['kind']}: {e['text']}" for e in ev))
         if now_table := self.chart_now_table():   # a few hundred bytes: the chart reader's picture per coin
             parts.append("# Chart picture\n\n" + now_table)
+        if on:
+            try:
+                parts.append(digest_section(self.j, self.s))
+            except Exception as e:  # noqa: BLE001 - the digest is a by-product
+                log.warning("Post-mortem digest section failed: %s", e)
         text = "\n\n".join(parts)
         return text if len(text) <= max_chars else text[:max_chars] + "\n\n[truncated]"

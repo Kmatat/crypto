@@ -8,6 +8,7 @@
   python -m trader report [--offline] # performance report
   python -m trader reset              # start a fresh journal (old one kept as a backup file)
   python -m trader library            # published rules tested on years of real prices (trader/library.py)
+  python -m trader postmortem         # why the last trades won or lost (trader/postmortem_report.py)
 """
 from __future__ import annotations
 
@@ -41,8 +42,10 @@ from .agents.research import ResearchAgent, review_text
 from .calibration import study_text
 from .notes import Notes, default_dir, lineage_text
 from .events_report import events_line, events_text
+from .postmortem_report import (lessons_text, memory_daily_line, postmortem_text, seed_coins, seed_done_text,
+                                seed_refusal, seed_start_text)
 from .notify import MAX_LEN, clean
-from .scorecard import CandleCache, claude_scorecard, news_scorecard, scorecard_text
+from .scorecard import CandleCache, checklist_scorecard, claude_scorecard, news_scorecard, scorecard_text
 from .updater import DESK_STARTED, HEARTBEAT, read_status, revision, version_string
 from .ai_router import ORDERS, AIRouter, is_ai_source
 from .health import (agents_text, diagnose_text, free_ai_line, health_text, pulse_text, since_iso, stuck_rule_for,
@@ -60,6 +63,9 @@ HELP_TEXT = (
     "/events [coin|macro] - what prices did around scheduled US releases (CPI, Fed, jobs) and headline bursts: the "
     "jump, how long it took, what it gave back, and the same hour on a normal day. Measured after the fact, not a "
     "forecast\n"
+    "/postmortem [n] - why the last trades won or lost (fills, US releases, chop, failed breakouts, normal noise), "
+    "each cause counted among losers and among winners; /postmortem memory - the similar-trades memory. Measured after "
+    "the fact, not a forecast\n"
     "/watchlist - which coins the desk watches and why\n"
     "/strategies - the strategy in use, challengers under test, and what you can approve\n"
     "/approve <id> or /reject <id> - decide on a challenger that passed all tests\n"
@@ -121,6 +127,8 @@ def help_text(s: Settings) -> str:
         "/health - is everything working? last check, the daily decisions, errors, settings problems, updates\n"
         "/agents [days] - how many agents are working and what changed (default: the last 7 days)\n"
         "/diagnose [days] - the desk's records versus the rule replayed on the same daily prices\n"
+        "/postmortem [n] - why recent trades won or lost (fills and US releases; the chart causes belong to the hourly "
+        "agents)\n"
         "/notes - the desk's notebook as a zip: trades, diary and results in Markdown, ready to give to Claude\n"
         "/review - Claude reads the notebook and writes a plain-language review ("
         + ("uses a little of the AI budget" if s.use_claude else "needs Claude, which desk setup adds") + ")\n"
@@ -328,6 +336,8 @@ def maybe_daily_report(bot: Orchestrator, tg: Telegram, s: Settings) -> None:
         text += "\n" + chart_line
     if not s.trend and (ev_line := events_line(bot.journal, today)):   # the event study's day (hourly agents only)
         text += "\n" + ev_line
+    if not s.trend and "memory" in bot.s.mentor_checks and (line := memory_daily_line(bot.journal, since_iso(24))):
+        text += "\n" + line   # the memory rule's day, only when the owner switched it on
     text += "\n\n" + goals_text(goals(bot.journal, perf, bot.last_price, trend=s.trend), perf)
     if s.trend and (block := trend_day_text(bot, bot.journal)):
         text += "\n\n" + block
@@ -456,12 +466,18 @@ def scorecard_block(bot: Orchestrator, j: Journal) -> str:
             if card["cases"]:
                 free.append((bot.free_ai.label, card))
         news = news_scorecard(j, candles_after)
+        # the memory rule's refusals, only while the rule is in force: after the owner switched it off, its old
+        # refusals stay out of the scorecard text (which the review digest, an AI prompt, reads) and the report is
+        # 1.9.0's; /postmortem memory and POSTMORTEM.md keep its last stored record
+        memory_card = checklist_scorecard(j, bot.s, candles_after) if "memory" in bot.s.mentor_checks else {"cases": 0}
+        if memory_card["cases"]:
+            j.set("memory_scorecard", memory_card)
     except Exception as e:
         log.warning("Scorecard failed: %s", e)
         return ""
-    if not claude["cases"] and not news["judged"] and not free:
+    if not claude["cases"] and not news["judged"] and not free and not memory_card["cases"]:
         return ""
-    text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0), free)
+    text = scorecard_text(claude, news, float(j.get("ai_spend_total") or 0), free, memory=memory_card)
     j.set("scorecard_text", text)  # reused by the notebook between daily reports
     j.set("news_scorecard", news)  # the head trader tilts thresholds on news only once this shows news predicts
     return text
@@ -604,6 +620,8 @@ def run_lab(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, reason:
         week = dt.datetime.now(dt.timezone.utc).strftime("%G-W%V")
         bot.notes.weekly_snapshot(week, [("Laboratory", text), ("Lessons (post-mortem of the last 30 days)",
                                           "\n".join(f"- {n}" for n in lessons.get("notes", [])) or "- nothing notable"),
+                                         ("Post-mortem (losers against winners)",
+                                          lessons_text(lessons.get("causes") or {})),
                                          ("Threshold study", study_text(study_result) if study_result else ""),
                                          ("Playbook", bot.head.playbook(private=True) if bot.head else ""),
                                          ("Claude's review", review or "(Claude not configured, or unavailable this week)"),
@@ -630,6 +648,76 @@ def maybe_weekly_lab(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: t
         log.exception("Weekly lab failed")
         bot.journal.event("error", f"Weekly lab failed: {e}")
         tg.send_once("lab", f"⚠️ The weekly strategy lab failed: {e}. The champion strategy keeps trading.")
+
+
+def memory_seed_due(bot: Orchestrator, s: Settings, today: str) -> bool:
+    """The memory needs a (new) replay seed: the rule is in the strategy in force, the desk trades the hourly agents
+    online, and the seed is missing, failed or of another strategy (a seed of the same card with the memory rule
+    switched the other way counts: memory.strategy_ids); at most one attempt per UTC day."""
+    from .agents import memory
+    if s.trend or s.offline or "memory" not in bot.s.mentor_checks or bot.market.client is None:
+        return False
+    seed = bot.journal.get("memory_seed") or {}
+    if seed.get("tried_day") == today:
+        return False
+    return not seed or bool(seed.get("error")) or seed.get("card_id") not in memory.strategy_ids(bot.card)
+
+
+def memory_seed_requested(bot: Orchestrator, s: Settings) -> bool:
+    """A /postmortem seed that a restart stopped (state memory_seed_requested): it runs after the restart, whether the
+    rule is on or off, and the result goes to the phone as the request promised."""
+    if s.trend or s.offline or bot.market.client is None:
+        return False
+    return bool(bot.journal.get("memory_seed_requested"))
+
+
+# one replay seed at a time: /postmortem seed taps and the automatic seed never queue a second full replay
+SEED_RUNNING = threading.Lock()
+SEED_BUSY = "🧠 A replay is already running; the result arrives here."
+
+
+def run_memory_seed(bot: Orchestrator, tg: Telegram, trade_lock: threading.Lock, should_stop=None) -> dict:
+    """Replay the strategy in force to fill the memory (trader/agents/memory.py run_seed). Holds the trade lock like the
+    weekly lab: market checks wait meanwhile, positions keep their exchange stops. One Telegram line at the end. The
+    caller holds SEED_RUNNING. A stop of the desk raises memory.SeedInterrupted: no message; it runs after the
+    restart (the automatic seed is still due; a /postmortem seed is kept as memory_seed_requested)."""
+    from .agents import memory
+    from .strategy import StrategyCard
+    with trade_lock:
+        heartbeat(bot, note="filling the memory from a replay (no market checks until it finishes)")
+        card = bot.card or StrategyCard.from_settings(bot.base)
+        meta = memory.run_seed(bot.base, card, bot.journal, bot.market.client, seed_coins(bot.base),
+                               int(time.time() * 1000), should_stop=should_stop)
+    bot.journal.set("memory_seed_requested", None)   # the replay ended (filled, not needed or failed): answered
+    text = seed_done_text(meta, "memory" in bot.s.mentor_checks)
+    bot.journal.event("memory", text.removeprefix("🧠 ").removeprefix("⚠️ "))
+    tg.send(text)
+    return meta
+
+
+def maybe_memory_seed(bot: Orchestrator, tg: Telegram, s: Settings, trade_lock: threading.Lock, should_stop=None) -> None:
+    """Right after the weekly lab: fill the memory automatically when the memory rule is on and has no seed of the
+    strategy in force (at most one attempt per UTC day; nothing at all with the rule off, or while the desk stops),
+    and run a /postmortem seed that a restart stopped (memory_seed_requested), also with the rule off."""
+    from .agents.memory import SeedInterrupted
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    if should_stop and should_stop():
+        return
+    try:
+        due = memory_seed_due(bot, s, today) or memory_seed_requested(bot, s)
+        if due and SEED_RUNNING.acquire(blocking=False):   # busy: that replay covers it
+            try:
+                run_memory_seed(bot, tg, trade_lock, should_stop=should_stop)
+            finally:
+                SEED_RUNNING.release()
+    except SeedInterrupted:
+        bot.journal.event("memory", "Filling the memory was interrupted by a restart; it runs again after the restart")
+    except Exception as e:  # noqa: BLE001 - the desk trades normally without a seed
+        log.exception("Memory seed failed")
+        bot.journal.event("error", f"Memory seed failed: {e}")
+        if bot.journal.get("memory_seed_requested"):   # answer the owner's request once; no retry at every check
+            bot.journal.set("memory_seed_requested", None)
+            tg.send(f"⚠️ The memory could not be filled: {e}. The desk trades normally meanwhile.")
 
 
 def ai_budget(bot: Orchestrator, j: Journal, arg: str = "") -> str:
@@ -1023,7 +1111,11 @@ def cmd_run(s: Settings, args) -> None:
             card = with_journal(s, lambda j: Lab(bot.base, j, client=None).promote(card_id, by="owner"))
             if not card:
                 return f"No challenger [{card_id}] is ready to approve. See /strategies."
-            return f"✅ Promoted {card.name} [{card.id}]. The desk switches at its next check.\n{card.describe_diff(bot.card)}"
+            stored = "" if card.id == card_id else (     # stored with the other memory choice: the ids differ
+                f" (the challenger [{card_id}] with your current choice of the memory rule: "
+                f"{'on' if 'memory' in card.checks else 'off'})")
+            return (f"✅ Promoted {card.name} [{card.id}]{stored}. The desk switches at its next check.\n"
+                    f"{card.describe_diff(bot.card)}")
 
         def reject(arg: str) -> str:
             if s.trend:
@@ -1190,6 +1282,42 @@ def cmd_run(s: Settings, args) -> None:
             threading.Thread(target=wait, daemon=True).start()
             return start_text(first)
 
+        def postmortem_now(arg: str = "") -> str:
+            """/postmortem [n | memory | seed]: the texts in this thread's own journal connection; `seed` starts the
+            replay that fills the memory in a thread holding the trade lock (like /lab)."""
+            if arg.strip().lower() == "seed":
+                if why := seed_refusal(s):
+                    return why
+                from .agents.memory import SeedInterrupted, live_start, seed_span
+                if not SEED_RUNNING.acquire(blocking=False):   # a second tap must not queue a second full replay
+                    return SEED_BUSY
+
+                def seed_thread():
+                    try:
+                        run_memory_seed(bot, tg, trade_lock, should_stop=stop.is_set)
+                    except SeedInterrupted:   # the desk is stopping: the request runs after the restart
+                        try:
+                            bot.journal.set("memory_seed_requested", True)
+                        except Exception:  # noqa: BLE001
+                            log.exception("Keeping the /postmortem seed request failed")
+                    except Exception as e:  # noqa: BLE001
+                        log.exception("Memory seed failed")
+                        tg.send(f"⚠️ The memory could not be filled: {e}. The desk trades normally meanwhile.")
+                    finally:
+                        SEED_RUNNING.release()
+                try:
+                    until, days = with_journal(s, lambda j: (live_start(j), seed_span(j, int(time.time() * 1000))[1]))
+                    threading.Thread(target=seed_thread, daemon=True).start()
+                except Exception:
+                    SEED_RUNNING.release()
+                    raise
+                return seed_start_text(seed_coins(s), until, days=days)
+            text = with_journal(s, lambda j: postmortem_text(j, s, arg))
+            if len(text) > MAX_LEN - 100:   # many lines: several messages, split on line breaks (as /chart)
+                tg.send_long(text)
+                return ""
+            return text
+
         def aibudget_now(arg: str = "") -> str:
             return with_journal(s, lambda j: ai_budget(bot, j, arg))
 
@@ -1250,6 +1378,7 @@ def cmd_run(s: Settings, args) -> None:
             "/agents": agents_now,
             "/chart": chart_now,
             "/events": lambda arg="": with_journal(s, lambda j: events_text(j, s, arg)),
+            "/postmortem": postmortem_now,
             "/diagnose": diagnose_now,
             "/aibudget": aibudget_now,
             "/trendtest": trendtest_now,
@@ -1320,6 +1449,7 @@ def cmd_run(s: Settings, args) -> None:
                     break
             weekly_backup(bot, tg)
             maybe_weekly_lab(bot, tg, s, trade_lock, should_stop=stop.is_set)
+            maybe_memory_seed(bot, tg, s, trade_lock, should_stop=stop.is_set)
             if bot.free_ai:
                 for p in bot.free_ai.take_problems():
                     tg.send_once(f"free-ai-{p['kind']}", f"🆓 Free AI: {p['text']}", every_hours=12)
@@ -1369,6 +1499,7 @@ def main() -> None:
     nts.add_argument("--offline", action="store_true", help="the offline simulation's journal")
     sub.add_parser("backtest", add_help=False)  # arguments handled by trader/backtest.py
     sub.add_parser("library", add_help=False)   # arguments handled by trader/library.py
+    sub.add_parser("postmortem", add_help=False)   # arguments handled by trader/postmortem_report.py
     upd = sub.add_parser("update", help="fetch, test, install and restart (see trader/updater.py)")
     upd.add_argument("--check-only", action="store_true")
     upd.add_argument("--force", action="store_true")
@@ -1389,6 +1520,9 @@ def main() -> None:
     if args.cmd == "library":
         from .library import main as library_main
         sys.exit(library_main(sys.argv[2:]))
+    if args.cmd == "postmortem":
+        from .postmortem_report import main as pm_main
+        sys.exit(pm_main(sys.argv[2:]))
     if args.cmd == "update":
         from .updater import main as update_main
         sys.exit(update_main(sys.argv[2:]))

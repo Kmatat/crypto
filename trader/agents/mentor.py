@@ -18,6 +18,9 @@ computed from price data are included; nothing here copies anyone's live calls.
   regime       Dow theory / Wyckoff: no new buy while the hourly or 4-hour chart is in chop (going
                nowhere), or right after a breakdown below the recent low. Off by default; measure it
                first with the replay (python -m trader backtest --checks ...,regime).
+  memory       The desk's own record: no new buy when similar past trades (same 4-hour chart side, Bitcoin side
+               of its 200-day average, time of day, US release nearby) lost clearly more often than the desk's
+               trades usually do. Off by default; measure it with the replay (... --checks ...,memory).
 
 Sizing (the Turtle Traders' "units", Richard Dennis) and trailing stops (Ed Seykota,
 "cut losses, let profits run") live in the Risk Manager and the orchestrator; this
@@ -29,11 +32,13 @@ import datetime as dt
 
 from .technical import ema
 
-ALL_CHECKS = ("trend200", "alignment", "overextended", "btc", "reward", "cooldown", "regime")
+ALL_CHECKS = ("trend200", "alignment", "overextended", "btc", "reward", "cooldown", "regime", "memory")
+OWNER_ONLY = ("memory",)   # rules only the owner's MENTOR_CHECKS adds: the research agent may neither propose nor drop them
 SOURCES = {
     "trend200": "Paul Tudor Jones", "alignment": "Mark Minervini", "overextended": "Minervini / Livermore",
     "btc": "Druckenmiller (don't fight the tape)", "reward": "Paul Tudor Jones", "cooldown": "Jesse Livermore",
     "regime": "Dow theory / Wyckoff (trade with the trend, not inside the range)",
+    "memory": "the desk's own record (exact binomial test against its base loss rate)",
 }
 
 
@@ -66,11 +71,12 @@ class MentorAgent:
 
     def review(self, symbol: str, candles: list[dict], daily: list[float], price: float, stop: float, take: float,
                atr: float, btc_daily: list[float] | None, last_stop_ms: int | None, now_ms: int,
-               chart: dict | None = None) -> dict:
+               chart: dict | None = None, memory: dict | None = None) -> dict:
         """Returns {"pass": bool, "checks": {name: {"ok", "detail", "source"}}, "failed": [names]}.
         A check that cannot be computed (not enough history) is reported as unknown and does not block.
         `chart` is the Chart Events agent's report for the coin (trader/agents/chart.py), read only by the
-        `regime` rule; the other rules work without it."""
+        `regime` rule; `memory` is the memory's verdict on this buy (trader/agents/memory.py MemoryBook.verdict), read
+        only by the `memory` rule; the other rules work without them."""
         out: dict[str, dict] = {}
 
         def add(name, ok, detail):
@@ -122,6 +128,11 @@ class MentorAgent:
                                     else "; no recent event")
                 # no usable frame yet (a new listing): unknown, like the other rules with too little history
                 add("regime", None if not short else (not chop and not after_breakdown), detail)
+        if "memory" in self.checks:
+            if not memory:
+                add("memory", None, "no memory verdict")
+            else:
+                add("memory", memory["ok"], memory["detail"])   # ok None (too few trades) never blocks
         failed = [n for n, c in out.items() if c["ok"] is False]
         return {"pass": not failed, "checks": out, "failed": failed}
 

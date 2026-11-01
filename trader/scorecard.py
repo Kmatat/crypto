@@ -141,6 +141,65 @@ def claude_scorecard(j: Journal, s: Settings, candles_after, position_usd: float
             "verdict": verdict}
 
 
+CHECKLIST_REASON = "master traders' checklist: {} not met"   # the buys loop's reason, one rule refused alone
+MEMORY_MIN_CASES = 30
+
+
+def checklist_scorecard(j: Journal, s: Settings, candles_after, check: str = "memory",
+                        position_usd: float | None = None) -> dict:
+    """The memory rule's refusals judged on real later prices, like the AI vetoes: each buy that `check` alone refused
+    (another failed rule means the memory did not decide) is replayed with the same stop, target and trail the rules
+    would have used (replay_trade). One case per coin while the previous case's what-if trade of that coin would still
+    be open (the desk holds one position per coin). A refusal "saved" money when the what-if trade lost, "cost" money
+    when it won. Cached in state memory_cases like scorecard_cases."""
+    size = position_usd or s.starting_balance * s.max_position_pct
+    rows = j.db.execute("SELECT id, ts, symbol, reports FROM decisions WHERE action='BUY' AND risk_approved=0 AND "
+                        "risk_reason=? ORDER BY id", (CHECKLIST_REASON.format(check),)).fetchall()
+    out = {"cases": 0, "losers": 0, "saved_usd": 0.0, "cost_usd": 0.0, "net_usd": 0.0, "base_loss_pct": None,
+           "verdict": f"not enough refused buys judged yet (need {MEMORY_MIN_CASES})"}
+    if not rows:
+        return out
+    cached = j.get("memory_cases") or {}
+    busy: dict[str, int] = {}
+    cases = []
+    for r in rows:
+        ts_ms = int(dt.datetime.fromisoformat(r["ts"]).timestamp() * 1000)
+        if ts_ms < busy.get(r["symbol"], 0):
+            continue
+        key = str(r["id"])
+        if key in cached and cached[key].get("final"):
+            case = cached[key]
+        else:
+            try:
+                reports = json.loads(r["reports"])
+                price, atr = reports["technical"]["price"], reports["technical"]["atr"]
+            except (KeyError, TypeError, ValueError):
+                continue
+            try:
+                candles = candles_after(r["symbol"], ts_ms)
+            except Exception as e:
+                log.warning("Memory scorecard: no prices for %s: %s", r["symbol"], e)
+                continue
+            res = replay_trade(candles, price, atr, s)
+            case = {"symbol": r["symbol"], "ts": r["ts"], "pnl_usd": round(size * res["pnl_pct"] / 100, 2),
+                    "pnl_pct": res["pnl_pct"], "exit": res["exit"], "hours": res["hours"],
+                    "final": res["exit"] != "open" or len(candles) >= HORIZON_HOURS}
+            cached[key] = case
+        busy[r["symbol"]] = ts_ms + int(case.get("hours") or 0) * 3_600_000
+        cases.append(case)
+    j.set("memory_cases", cached)
+    saved = sum(-c["pnl_usd"] for c in cases if c["pnl_usd"] < 0)
+    cost = sum(c["pnl_usd"] for c in cases if c["pnl_usd"] >= 0)
+    first = min((c["ts"] for c in cases), default=None)
+    made = [p for p in j.closed_positions() if first and p["opened_at"] >= first]
+    out.update(cases=len(cases), losers=sum(1 for c in cases if c["pnl_pct"] <= 0), saved_usd=round(saved, 2),
+               cost_usd=round(cost, 2), net_usd=round(saved - cost, 2),
+               base_loss_pct=round(sum(1 for p in made if p["loss"]) / len(made) * 100, 1) if made else None)
+    if len(cases) >= MEMORY_MIN_CASES:
+        out["verdict"] = "the memory rule saved money" if saved > cost else "the memory rule cost money versus buying anyway"
+    return out
+
+
 def news_scorecard(j: Journal, candles_after, days: int = 30) -> dict:
     """Hit rate of the news scores: did a positive score precede a rise over the next 24 hours?"""
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
@@ -176,8 +235,10 @@ def news_scorecard(j: Journal, candles_after, days: int = 30) -> dict:
                     "not enough strong news scores judged yet (need 30)"}
 
 
-def scorecard_text(claude: dict, news: dict, ai_cost_usd: float, free: list[tuple[str, dict]] | None = None) -> str:
-    """`free`: [(label, scorecard)] for each free AI that made decisions; it costs nothing, so no bill line."""
+def scorecard_text(claude: dict, news: dict, ai_cost_usd: float, free: list[tuple[str, dict]] | None = None,
+                   memory: dict | None = None) -> str:
+    """`free`: [(label, scorecard)] for each free AI that made decisions; it costs nothing, so no bill line. `memory`:
+    the memory rule's refusals judged (checklist_scorecard), shown only when there are cases."""
     lines = ["🧪 Claude vs the free rules (computed from real later prices)",
              f"Divergent decisions judged: {claude['cases']} · vetoes saved ${claude['saved_usd']:,.2f} · "
              f"vetoes cost ${claude['cost_usd']:,.2f} · net ${claude['net_usd']:+,.2f} · AI bill so far ${ai_cost_usd:,.2f}",
@@ -191,4 +252,7 @@ def scorecard_text(claude: dict, news: dict, ai_cost_usd: float, free: list[tupl
     if len(by) > 1:
         lines.append("News hit rate by reader: " + ", ".join(f"{k} {v['hit_rate_pct']}% ({v['judged']})"
                                                            for k, v in sorted(by.items())))
+    if memory and memory.get("cases"):
+        from .postmortem_report import memory_score_line
+        lines.append(memory_score_line(memory))
     return "\n".join(lines)

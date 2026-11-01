@@ -6,6 +6,90 @@ The number lives in `trader/__init__.py`; `/version` on Telegram and `desk versi
 the exact code revision, and every update message names the version it installed. The release calendar in
 `trader/macro_calendar.json` is refreshed from the official pages whenever its last date is within 90 days.
 
+## 1.9.1 - 2026-10-31
+
+Phase 3b of the multi-agent plan: **post-mortem and memory** (`trader/agents/memory.py`). Apart from one fix (the
+`btc` rule: alt buys while the desk holds Bitcoin, and at a check where Bitcoin's daily prices could not be
+downloaded; the first point below), nothing changes how the desk trades unless you add `memory` to MENTOR_CHECKS.
+
+- **Fix: the `btc` rule while the desk holds Bitcoin.** Since 1.8.0 the btc rule let alt buys through unchecked while
+  the desk held Bitcoin; it now reads Bitcoin's history again, as 1.7 did. This changes trading on hourly desks that
+  hold Bitcoin with the checklist on (the `btc` rule is in the default checklist): while Bitcoin is below its 200-day
+  average, alt buys are refused again, as the replays always assumed. Bitcoin's daily prices are then downloaded at
+  most once an hour, only while the `btc` rule is on and only at checks where the desk judges a coin it does not hold.
+- **Side effect on a held Bitcoin's chart picture** (which the AI reads): it has its daily frame at most checks while
+  the desk also judges a coin it does not hold. At the normal 15-minute pace it is missing only at the check after the
+  hour-old copy expires; the slower the checks, the less often it is there (every other check at 30 minutes, never at
+  60), and never while the desk holds every coin it watches. When it is missing, Bitcoin's line now reads "daily: not
+  refreshed at this check (while the btc rule is on, the desk reads Bitcoin's daily prices at most once an hour, at
+  checks where it judges a coin it does not hold)" instead of "the desk downloads no extra prices for it", which is no
+  longer true for Bitcoin.
+- **When that download fails** the btc rule reads "?" at that check and is not tried again before the next check.
+  This also changes trading on desks that only watch Bitcoin, at such a check: 1.9.0 tried again for every alt and,
+  when that failed too, also skipped the alt's own 200-day checks; now only the btc rule reads "?" and the alt's own
+  rules are still judged. So for that one check an alt buy can go through that 1.9.0 refused (Bitcoin below its
+  average), or be refused where 1.9.0 let it through (the alt below its own average).
+
+- **What the desk knew at each buy** is recorded in a new journal table (`trade_context`): the chart regimes and
+  latest chart event, the score and its parts, RSI, volatility, Bitcoin against its 200-day average, the news score,
+  the minutes to and since a listed US release, the time, and the planned and filled prices. Trades bought before this
+  release (closed, or still open at the upgrade) get a row rebuilt once from their stored entry decision.
+- **Why each trade won or lost**: every closed trade, winners too, is tagged with the causes the record supports -
+  execution (fill or stop exit worse than the replay assumes, partial fills), a US release or a measured news jump
+  during the trade, bought in chop, a failed breakout, a stop inside the coin's normal 2-hour dip - and each cause is
+  counted among losers and among winners with a plain chance figure. `/postmortem [n]`, `POSTMORTEM.md`, the lab's
+  lessons and the weekly page.
+- **The memory rule** (`memory`, off by default): refuses a buy only when at least 10 similar past trades lost so much
+  more often than the desk's trades usually do (about two in three, by design) that chance would rarely do it (an
+  exact binomial test; the 5% limit is split over the groups judged). Filled from a replay of the strategy in force on
+  real past prices (labelled replay) and the desk's own trades, the last 365 days. Measured with
+  `desk backtest --checks ...,memory`; its refusals are judged on later prices in `/report`. The first plan's literal
+  rule ("more than 60% lost") is measurable in the replay only (`--memory-rule owner60`). The rule always follows
+  MENTOR_CHECKS, also behind a strategy the lab or `/approve` put in force (adding or removing `memory` takes effect at
+  the next start; the card keeps its other checks, and the lab's rollback still returns to the strategy it replaced;
+  the lineage shows the switch as a "settings" change, not as a promotion). The lab examines, forward-tests, promotes
+  and rolls back every strategy with your current choice of the rule, also a challenger stored before you switched it,
+  and its texts do not count that old choice as a change of the challenger. After such a switch the "one rule refused
+  every buy signal" alarm judges only the decisions made since the switch, and the notebook's live record under the
+  champion still counts from its promotion, as `/strategies` and the rollback watch do. `/report` judges the rule's
+  refusals only while the rule is on.
+- **Measured before release** (replays on real Binance prices ending 31 Oct 2026, default checklist; the memory starts
+  empty and fills with the replay's own trades closed before each decision): the memory rule refused nothing in three
+  of four runs (365 days BTC/ETH/SOL 96 trades +2.01%, 730 days 8 coins 847 trades -11.56%, 365 days 8 coins 172 trades
+  +1.43%: identical to the runs without it) and 8 buy signals of one group in one week in the fourth (730 days
+  BTC/ETH/SOL: 415 trades, -9.41% -> -9.39%; 3 of the 8 replayed anyway: 2 losers and 1 winner (-0.97%, -2.00%,
+  +2.13%), -0.28% per trade on average against -0.22% for the trades made, replayed the same way). The first plan's 60%
+  rule: 96 -> 87 trades and +2.01% -> +2.33%; 415 -> 223 and -9.41% -> -3.67%; 172 -> 135 and +1.43% -> +4.11%; 847 ->
+  324 and -11.56% -> +5.06% - partly "trade less of a strategy that loses" (refusing at random also helped both losing
+  runs, but the 60% rule beat random refusals of a similar number of buys in 14 of 15 runs), in-sample on two
+  overlapping years, so these years are spent for it and it stays replay-only. The cause mix of the replays' trades: a
+  failed breakout is clearly more common among losers on 730 days, 8 coins (27% of 584 losers against 16% of 263
+  winners, chance about 1 in 2,700; losers 79% with it, 66% without), chop on 365 days, 8 coins (86% against 65%, about
+  1 in 530); everything else within chance or as common among winners (the four runs overlap: not four
+  confirmations). Cost on the build machine:
+  a 730-day replay with memory 9.3 s CPU and 147 MB on 3 coins (9.0 s and 141 MB without), 23.9 s and 243 MB on 8 coins
+  (23.6 s, 227 MB); the seed (365 days, 6 coins, 84 public price pages) 8.8 s CPU, 145 MB, 25 s with its download.
+- Release times from November 2024 (`trader/macro_history.json`, 55 dates) so the replay knows the past releases.
+- No new setting. Requests: besides the btc fix's above, an alt's entry record (and, with the rule on, its memory
+  group) needs Bitcoin's side of its 200-day average: it reuses the checklist's read, and when the checklist read none
+  (MENTOR_CHECKS=none, or `btc` off while the desk holds Bitcoin) it downloads Bitcoin's daily prices itself, at most
+  once an hour, into a copy nothing else reads (an entry record after the buy's exchange orders; the memory rule when
+  it judges a buy). With the rule off this changes no trade and nothing an AI reads. The replay that fills the memory
+  runs once (and again when the strategy changes, but not when only the memory rule is switched: the replay never
+  applies that rule), about 2-4 minutes on the server with its download (market checks wait meanwhile; positions keep
+  their exchange stops), only when the rule is on or you ask (`/postmortem seed`, `python -m trader postmortem
+  --seed`). It covers only the part of the last 365 days before the desk's own record starts, so its download stays
+  365 days long and it is not needed at all once the desk's own trades cover a year. A restart during its download
+  postpones it until after the restart (no failure is recorded; a `/postmortem seed` request is kept, also with the
+  rule off, and its result still arrives on the phone), and a second `/postmortem seed` while one runs is
+  answered "already running" instead of queuing a second replay.
+- With the rule off, every AI prompt gets exactly 1.9.0's input except where the btc fix above changes it (the
+  checklist's btc line for alts while the desk holds Bitcoin, the held Bitcoin's daily chart frame and its line when
+  that frame is missing, and an alt's checklist lines at a check where Bitcoin's daily prices could not be
+  downloaded): the lessons' new cause mix reaches the lab's proposal prompt and the review digest only with the rule
+  on, the research agent can neither propose nor drop the rule, and `--checks all` keeps meaning the seven price rules.
+  `desk postmortem` on new installs; `/health` has one more row.
+
 ## 1.9.0 - 2026-10-31
 
 Phase 3a of the multi-agent plan: the **strategy library** (`trader/library.py`), a measurement that trades nothing.

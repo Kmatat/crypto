@@ -34,6 +34,7 @@ case "${1:-help}" in
   logs-update) $SUDO journalctl -u "$SERVICE-update" -n 60 --no-pager -o cat ;;
   version) "$PY" -m trader version ;;
   backtest) shift; "$PY" -m trader backtest "$@" ;;
+  postmortem) shift; "$PY" -m trader postmortem "$@" ;;
   library) shift
            # A background service beside the desk, not a child of this login: it keeps the lowest CPU weight against
            # the desk (a nice value alone only counts inside one login session) and keeps running if you disconnect.
@@ -71,6 +72,7 @@ desk update    install the latest code now (tested first, restarts itself; also 
 desk version   which version is running, and whether a newer one exists
 desk backtest  replay a strategy on real prices, e.g.  desk backtest --strategy trend --days 365
 desk library   test published trading rules on years of real prices (20-40 min; trades nothing)
+desk postmortem  why the last trades won or lost, losers against winners (add --replay --days 730 for a replay's)
 desk notes     rebuild the Markdown notebook (data/notes): strategies, trades, diary, results; add --zip for a zip file
 EOF
   ;;

@@ -18,16 +18,15 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
-import time
 
 from .agents import decision as dmod
 from .agents.decision import DecisionAgent
-from .backtest import EXTRA_DAYS, Backtest, fetch_history
+from .backtest import Backtest, fetch_history
 from .calibration import HOLDOUT_DAYS
 from .binance_client import BinanceClient
 from .config import PUBLIC_BASE_URL, Settings
 from .journal import Journal
-from .strategy import MAX_CHANGES, StrategyCard, summary_line, thresholds_line
+from .strategy import MAX_CHANGES, StrategyCard, summary_line, thresholds_line, with_owner_rules
 
 log = logging.getLogger(__name__)
 
@@ -108,16 +107,25 @@ class Lab:
         migrate_ids(journal)
 
     # ---- state ----
+    def owned(self, card: StrategyCard) -> StrategyCard:
+        """The card with the owner's choice of the owner-only rules (the memory rule: `self.s` is the owner's settings,
+        bot.base). A stored card keeps the choice it was stored with; whatever the lab puts in force, examines or
+        compares gets the owner's current one, as the desk's own card does (Orchestrator.apply_champion)."""
+        return with_owner_rules(card, self.s.mentor_checks)
+
     def champion(self) -> StrategyCard:
         d = self.journal.get("strategy_champion")
-        if d:
-            return StrategyCard.from_dict(d["card"])
+        if d:   # before the desk's next check the stored card may still carry the owner's earlier memory choice
+            return self.owned(StrategyCard.from_dict(d["card"]))
         card = StrategyCard.from_settings(self.s)
         if not self.s.trend:   # the daily trend rule runs no card: nothing is recorded as champion while it trades
             self.set_champion(card, by="owner settings", note="first run")
         return card
 
-    def set_champion(self, card: StrategyCard, by: str, note: str = "") -> None:
+    def set_champion(self, card: StrategyCard, by: str, note: str = "") -> StrategyCard:
+        """Put `card`, with the owner's choice of the memory rule (owned), in force; returns the card stored. A
+        challenger, or the card a rollback returns to, may have been stored before the owner switched the rule."""
+        card = self.owned(card)
         prev = self.journal.get("strategy_champion")
         self.journal.set("strategy_champion", {"card": card.to_dict(), "since": now_iso(), "by": by,
                                                "previous": prev["card"] if prev else None})
@@ -130,6 +138,7 @@ class Lab:
                                            f"Changes versus {old.name} [{old.id}]: {card.describe_diff(old)}")
         else:
             self.journal.event("strategy", f"First champion recorded: {summary_line(card)} ({by})")
+        return card
 
     def challengers(self) -> list[dict]:
         return self.journal.get("strategy_challengers") or []
@@ -244,8 +253,9 @@ class Lab:
                 "worst_gap": round(worst_gap, 2), "reasons": reasons}
 
     def forward_test(self, entry: dict, champion: StrategyCard) -> dict:
-        """The weeks since the proposal: data that did not exist when the idea was born."""
-        card = StrategyCard.from_dict(entry["card"])
+        """The weeks since the proposal: data that did not exist when the idea was born. The challenger runs with the
+        owner's current choice of the memory rule, like the champion (like with like)."""
+        card = self.owned(StrategyCard.from_dict(entry["card"]))
         proposed = dt.datetime.fromisoformat(entry["proposed_at"])
         days = (dt.datetime.now(dt.timezone.utc) - proposed).total_seconds() / 86400
         if days < FORWARD_MIN_DAYS:
@@ -296,9 +306,9 @@ class Lab:
             if self.should_stop():
                 self._save_challengers(items)
                 raise LabInterrupted()
-            card = StrategyCard.from_dict(entry["card"])
+            card = StrategyCard.from_dict(entry["card"])   # its stored id: the one /approve and /strategies show
             if entry["status"] == "proposed":
-                ev = self.evaluate(card)
+                ev = self.evaluate(self.owned(card))         # examined with the owner's memory choice, as the champion
                 verdict = self.compare(ev, champ_eval, strict_holdout=(card.source or "").startswith("study"))
                 entry["lab"] = {**ev, "verdict": verdict}
                 entry["status"] = "lab_passed" if verdict["passed"] else "lab_failed"
@@ -319,8 +329,7 @@ class Lab:
                                        + ("" if not fwd["passed"] else ("; promoted automatically" if self.s.auto_promote
                                                                         else "; waiting for the owner's /approve")))
             if entry["status"] == "ready" and self.s.auto_promote and promoted is None:
-                promoted = card
-                self.promote(card.id, by="auto-promote")
+                promoted = self.promote(card.id, by="auto-promote") or self.owned(card)   # the card put in force
                 entry["status"] = "promoted"
         self._save_challengers(items)
         self.journal.set("lab_last_run", now_iso())
@@ -337,8 +346,7 @@ class Lab:
             return None
         for entry in self.challengers():
             if entry["card"]["id"] == card_id and entry["status"] in ("ready", "lab_passed", "promoted"):
-                card = StrategyCard.from_dict(entry["card"])
-                self.set_champion(card, by=by, note=entry["status"])
+                card = self.set_champion(StrategyCard.from_dict(entry["card"]), by=by, note=entry["status"])
                 items = self.challengers()
                 for e in items:
                     if e["card"]["id"] == card_id:
@@ -364,7 +372,7 @@ class Lab:
         state = self.journal.get("strategy_champion") or {}
         prev = state.get("previous")
         card = StrategyCard.from_dict(prev) if prev else StrategyCard.from_settings(self.s, "owner settings")
-        self.set_champion(card, by="rollback", note=reason)
+        card = self.set_champion(card, by="rollback", note=reason)   # with the owner's current memory choice
         hist = self.journal.get("strategy_history") or []
         hist.append({"ts": now_iso(), "event": "rollback", "id": card.id, "name": card.name, "by": "lab", "note": reason})
         self.journal.set("strategy_history", hist[-100:])
@@ -415,7 +423,7 @@ def status_text(lab: Lab) -> str:
                 extra += f"; forward {c['forward']['challenger_return']:+.2f}% vs {c['forward']['champion_return']:+.2f}%"
             note = f" - {c['notes'][0]}" if c.get("notes") else ""
             lines.append(f"• [{card.id}] {card.name}: {c['status']}{extra}{note}")
-            lines.append(f"    changes: {card.describe_diff(champ)}")
+            lines.append(f"    changes: {with_owner_rules(card, champ.checks).describe_diff(champ)}")
     ready = [c for c in items if c["status"] == "ready"]
     if ready:
         lines.append("\nReady for your decision: send /approve <id> or /reject <id>.")
@@ -427,7 +435,7 @@ def status_text(lab: Lab) -> str:
 def week_report(result: dict) -> str:
     champ = result["champion"]
     ev = result["champion_eval"]
-    lines = [f"🔬 Weekly strategy lab", f"Champion {champ.name} [{champ.id}]: exam mean {ev['mean_return']:+.2f}%, "
+    lines = ["🔬 Weekly strategy lab", f"Champion {champ.name} [{champ.id}]: exam mean {ev['mean_return']:+.2f}%, "
              f"worst {ev['worst_return']:+.2f}%, {ev['total_trades']} trades"]
     fresh = [c for c in result["challengers"] if c.get("lab") and c["lab"].get("evaluated_at", "") >= ev["evaluated_at"][:10]]
     for c in fresh:

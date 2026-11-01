@@ -219,7 +219,9 @@ exchange-side exits) over real hourly Binance history and prints return, trade c
 factor and drawdown next to the buy-and-hold result for the same coins and period. `--sweep` tries a grid
 of thresholds and stop/take-profit distances; `--checks`, `--trail`, `--risk`, `--position`, `--symbols`
 test the principles, sizing and coin sets (`--checks trend200,btc,cooldown,reward,regime` adds the chart reader's
-`regime` rule, see "Chart events"). News, forex and Claude's judgement have no history and are left
+`regime` rule, see "Chart events"; `--checks trend200,btc,cooldown,reward,memory` adds the memory rule, judged on the
+replay's own earlier trades, and `--memory-rule owner60` the first plan's "more than 60% lost" rule for comparison, see
+"Post-mortem and memory"; `--checks all` means the seven price rules). News, forex and Claude's judgement have no history and are left
 out, so the backtest measures the free rule core: the floor the AI layer has to beat.
 
 What the backtests showed when the defaults were chosen (BTC, ETH, SOL; buy-and-hold of the same coins in
@@ -514,8 +516,15 @@ every check, from the finished hourly candles the desk already downloads: the ho
 from those candles (aligned to 00:00, 04:00, ... UTC; a bar is used only once its four hours are finished) and the
 daily closes. **It makes no new request**: the daily prices come from the download the checklist already makes for
 coins the desk does not hold, so a coin you hold keeps its daily line for an hour after the buy and then reads
-"daily: not refreshed while the coin is held" until the position closes (its hourly and 4-hour lines go on). With
-`MENTOR_CHECKS=none` no daily prices are downloaded at all, and the daily line says so.
+"daily: not refreshed while the coin is held" until the position closes (its hourly and 4-hour lines go on). Bitcoin
+is the exception since 1.9.1: while the `btc` rule is on, the checklist reads Bitcoin's daily prices for the alts it
+judges (at most once an hour, later in the same check), so a held Bitcoin has its daily line at most checks at the
+normal 15-minute pace while the desk also judges a coin it does not hold (about 3 in 4: the line is missing at the
+check after the hour-old copy expires). The slower the checks, the less often: every other check at 30 minutes, never
+at 60; and never while the desk holds every coin it watches (no alt is judged, so nothing reads Bitcoin's daily
+prices). When it is missing, Bitcoin's line says "daily: not refreshed at this check" and that the desk reads
+Bitcoin's daily prices at most once an hour, at checks where it judges a coin it does not hold. With
+`MENTOR_CHECKS=none` the chart reader gets no daily prices at all, and the daily line says so.
 
 **The regime** is one number per timeframe, the *straightness* of the last 20 bars (the net move divided by the
 length of the path the price took: 1 is a straight line, near 0 is going back and forth; a random walk scores about
@@ -636,6 +645,118 @@ the daily report (with the release's date: the releases back-filled after an ins
 off-by-default checklist item `macro` (no new buys within 30 minutes of a release) once this record says it would have
 mattered.
 
+## Post-mortem and memory: why each trade won or lost (/postmortem)
+
+**What is recorded at each buy.** Every buy, the hourly agents' and the daily trend rule's alike, gets one row in the
+journal table `trade_context`: what the desk knew at that moment. The chart regimes (1-hour, 4-hour, daily) and the
+latest chart event, the score and its parts, RSI, the ATR as a share of the price, Bitcoin against its 200-day average,
+the news score and who scored it, the minutes to the next and since the last listed US release, the hour and weekday,
+the planned and filled prices and amounts, the strategy and its card. Nothing later is written into it except one fact
+the post-mortem needs: whether a breakout the desk bought on fell back below its level within the next 6-8 hours.
+Trades bought before 1.9.1 (closed, or still open at the upgrade) get a row rebuilt once from their stored entry
+decision (no prices are downloaded for it).
+
+**Why each closed trade won or lost.** Every closed trade, winners too, gets the same tests. Each cause that applies
+is shown with its evidence:
+
+| Cause | Rule | Why this threshold |
+|---|---|---|
+| Execution worse than the replay assumes | a stop exit sold more than 0.4% below its stop price; bought more than 0.25 ATR above the finished candle's close; the demo exchange filled more than 0.5% from the real market; less than 98% of the planned amount bought, or sold in parts | twice the 0.2% stop slippage every replay assumes; a quarter ATR is an eighth of the 2-ATR stop spent before the trade starts |
+| US release or news jump during the trade | a listed US release (CPI, jobs report, FOMC) from 2 hours before the buy to the sale, or a jump the event study measured in that window | the event study measures a release's move over the 2 hours after it |
+| Chop at entry | the hourly or 4-hour chart was going nowhere at the buy | the chart reader's own definition (efficiency ratio below 0.30) |
+| Failed breakout | bought on a breakout that closed back below its level within 6 hourly / 2 four-hour bars of the decision | the published failed-breakout pattern (Connors and Raschke, 1995); judged on the price path, so winners can have it too |
+| Inside normal noise | the stop was no farther than the dip the coin reached in 1 of 10 ordinary 2-hour stretches of the week before | Kase's idea of stops from the coin's own two-bar range |
+
+A cause only matters when it is **clearly more common among losers than among winners**: each one is counted among
+losers and among winners, with a plain chance figure ("about 1 in 7": how often luck alone gives such a gap). Five
+causes are compared at once, so each is judged at 1.02% and the chance of any false alarm stays at 5%. Below 20
+losers or 10 winners it says "too few trades to compare yet". Trades bought together often win or lose together, so
+the true chance is somewhat larger than the figure. A loser with no tag is an ordinary loss: the hourly rules lose
+about two trades in three by design (many small losses, a few larger wins), the daily trend rule most of its trades
+(it wins 20-30%).
+
+**The memory rule (`memory`, off by default).** With `memory` in MENTOR_CHECKS, before each buy the desk looks up the
+past closed trades in the same group: the same side of the 4-hour chart (chop, rising or falling), the same side of
+Bitcoin's 200-day average, the same 6-hour block of the day (UTC) and a listed US release within 2 hours or not. It
+refuses the buy only when the group holds at least 10 trades **and** lost so much more often than all trades in memory
+that chance would do it rarely (an exact binomial test; the 5% limit is split over the groups judged at that moment,
+Šidák's rule). It is **not** "more than 60% lost": the hourly rules lose about 69% of their trades by design, so a fixed
+60% would refuse most buys once the memory is full (on the replay seed, 5 of its 7 groups with 10 or more trades,
+holding about 3 in 4 of its trades, lost more than 60%), the winners that pay for the losses included. Only trades
+closed in the last 365 days count (so a refused group can reopen), and it does not judge before 30 trades are in memory.
+The memory holds the desk's own closed trades and a **replay of the strategy in force** on real past prices (the lab's
+coins: your SYMBOLS plus LAB_ALT_SYMBOLS, six by default; labelled "replay"). The replay stops where the desk's own
+record starts, so no signal counts twice, and covers only the part of the last 365 days before that start (none once the
+desk's own trades cover a whole year). The replay is made automatically within a day when the rule is on (2-4 minutes on
+the server; market checks wait, positions keep their exchange stops), or with `/postmortem seed` (a second request while
+one runs is answered "already running"; a restart during it postpones it until after the restart, and the result still arrives on the phone). A replay made with
+the rule off still counts when you switch it on: the replay never applies the memory rule itself, and your earlier
+trades stay trades of the same strategy. The rule never scales a position: it is a yes/no check the replay can measure.
+It always follows MENTOR_CHECKS, also when the strategy in force came from the lab or `/approve`: adding or removing
+`memory` switches it on or off at the desk's next start, and the card keeps its other checks (if its live trades then
+turn bad, the lab's rollback still returns to the strategy it replaced, with your choice of the memory rule; the lineage
+shows the switch as a "settings" change, not as a promotion). The lab also examines, forward-tests and puts in force
+every strategy with your current choice of the memory rule, including a challenger it stored before you switched the
+rule.
+
+**What it did on real prices** (`desk backtest --days 365|730 --checks trend200,btc,cooldown,reward,memory`, Binance
+prices ending 31 Oct 2026; 8 coins = `--symbols BTC,ETH,SOL,BNB,XRP,ADA,DOGE,LINK`; the memory starts empty and fills
+with the replay's own trades closed before each decision):
+
+| Replay | Without memory | Memory rule | The first plan's ">60% lost" rule (replay only) |
+|---|---|---|---|
+| 365 days, BTC/ETH/SOL | 96 trades, +2.01%, PF 1.28 | refused nothing (identical) | 87 trades, +2.33%, PF 1.38 |
+| 730 days, BTC/ETH/SOL | 415 trades, -9.41%, PF 0.71 | refused 8 signals in one week; 415 trades, -9.39%, PF 0.72 | 223 trades, -3.67%, PF 0.81 |
+| 365 days, 8 coins | 172 trades, +1.43%, PF 1.07 | refused nothing (identical) | 135 trades, +4.11%, PF 1.33 |
+| 730 days, 8 coins | 847 trades, -11.56%, PF 0.87 | refused nothing (identical) | 324 trades, +5.06%, PF 1.10 |
+
+What to make of it: the memory rule **stays silent almost all the time**. Its one refusal episode (8 buy signals of one
+group, 4-hour chart rising, 18:00-24:00 UTC, 29 Sep to 6 Oct 2025) replayed anyway gave 3 trades, 2 of them losers.
+The first plan's 60% rule cut 9% to 62% of the trades in these replays (96 -> 87, 415 -> 223, 172 -> 135, 847 -> 324),
+whose memory starts empty; it did better in all four, but part of that is simply "trade less of a strategy that
+loses": refusing buys **at random** also improved both losing runs (the design's control on the same two years, 5
+random seeds per run). The 60% rule beat random refusals of a similar number of buys in 14 of 15
+runs, yet refusing at random down to about half its trades beat it in 3 of 6 (730 days, 3 coins); its refused signals,
+replayed anyway, did worse than the trades it let through, replayed the same way, in all four runs (+0.09% to -0.52%
+per refused trade against +0.17% to -0.26% per trade made). These are in-sample results on two overlapping years and
+nested coin sets, not proof, and **these two years are now spent for the 60% rule**: switching it on would first need a test on prices after 31 Oct 2026. That is why
+only the significance rule can be switched on (`--memory-rule owner60` shows the other one in the replay).
+
+The chance figures count each trade separately and are worked out again at every check, so a refusal can still be
+luck. Live and replay agree: both use the same finished candles, the same release list, the same daily closes
+(Bitcoin's too, also while the desk holds Bitcoin) and the same verdict function; the only differences are the live
+price at the check (the replay uses the close) and that live trades carry real fills, news and AI decisions.
+
+**Where you see it:** `/postmortem [n]` (the last n closed trades, default 5, at most 20, each with its causes; the
+losers-against-winners mix; the replay's mix), `/postmortem memory` (what is in memory, the groups, the limit, the group
+closest to it, the refusals so far), `/postmortem seed`, `POSTMORTEM.md` in the notebook, the lab's weekly page, one
+line in the daily report while the rule is on, the memory rule's refusals judged on later prices in `/report` (like
+the AI vetoes), and a row in `/health`. On the server: `desk postmortem` (servers installed before 1.9.1:
+`cd ~/crypto-desk && .venv/bin/python -m trader postmortem`), `... postmortem --replay --days 730 --symbols BTC,ETH,SOL`
+for the cause mix of a replay, `... postmortem --seed` to fill the memory by hand (a second process beside the desk:
+about 150 MB and 2-4 minutes on the server; `/postmortem seed` is the usual way).
+
+Nothing here changes how the desk trades unless you add `memory` to MENTOR_CHECKS: the records are written after the
+protective orders, never read by a decision with the rule off, and kept out of every AI prompt (the lessons' cause mix
+reaches the lab's proposal prompt and the review digest only with the rule on; the research agent can neither propose
+nor drop the rule). No new setting. An alt's record (and, with the rule on, its group) needs Bitcoin's side of its
+200-day average: it reuses the checklist's read, and when the checklist read none (`MENTOR_CHECKS=none`, or `btc` off
+while the desk holds Bitcoin) it downloads Bitcoin's daily prices itself, at most once an hour, into a copy that nothing
+else reads (a record after the buy's exchange orders; the memory rule when it judges a buy).
+
+**One fix in 1.9.1 does change trading** (the only exception to the paragraph above): from 1.8.0 to 1.9.0 the
+checklist's `btc` rule let alt buys through unchecked while the desk held Bitcoin ("? btc: Bitcoin history
+unavailable", because a held coin's daily prices are not re-read). It now reads Bitcoin's history again as 1.7 did, so
+on hourly desks that hold Bitcoin with the checklist on, alt buys are refused again while Bitcoin is below its 200-day
+average, as the replays always assumed (Bitcoin's daily prices are read at most once an hour; when they cannot be
+read, the rule reads "?" for that check). The checklist's btc line, which the AI reads, changes with it, and a held
+Bitcoin's chart keeps its daily frame at most checks (see "Chart events"). It also changes trading at a check where
+Bitcoin's daily prices cannot be downloaded while Bitcoin is watched but not held: 1.9.0 tried again for every alt, and
+when that failed too it also skipped the alts' own 200-day rules. 1.9.1 does not try again: the btc rule reads "?" for
+that check and the alts' own rules are still judged. So for that one check an alt buy can go through that 1.9.0
+refused (Bitcoin below its average), or be refused where 1.9.0 let it through (the alt below its own average); the
+checklist lines the AI reads change the same way.
+
 ## The notebook: every strategy, trade and lesson as Markdown (for you, and for Claude)
 
 Everything the desk does is in its SQLite journal, which code can read but people cannot. The notebook
@@ -653,6 +774,7 @@ so it can never disagree with the journal and can be rebuilt from any backup (`d
 | `CHART.md` | the chart picture per coin now (regimes, support and resistance, the owner's line), the chart events of the last two weeks by day, a count per kind for the last week |
 | `EVENTS.md` | what prices did around scheduled releases and headline bursts, event vs the same hour on a normal day: every class with its verdict, the releases and bursts measured, the fixed parameters, the calendar and the request budget |
 | `LIBRARY.md` | the strategy library's latest result: every rule with its source, the settings tried and chosen, the judged-period and walk-forward results against holding and cash, the luck check, the verdicts, the caveats and how to reproduce it |
+| `POSTMORTEM.md` | why each closed trade won or lost (fills, US releases, chop, failed breakouts, noise) with the evidence, each cause among losers against winners (live and replay), the memory rule's state and refusals, the last 50 closed trades |
 | `weekly/<week>.md` | written once a week after the lab and never rewritten: the lab result, the lessons, Claude's review, the performance at that moment |
 
 **Getting it:** `/notes` on Telegram sends the folder as a zip; the weekly backup message brings it too; on the
@@ -817,6 +939,9 @@ trader/
   library_stats.py  how a rule is judged: the 70/30 split, the walk-forward, the luck check, the nine conditions
   library_report.py its texts: /library, the terminal table, LIBRARY.md
   macro_calendar.json  the scheduled US releases (official sources named inside; owner additions: data/macro_calendar.json)
+  agents/memory.py  the post-mortem & memory agent: the context at each buy, the causes, the statistics, the memory rule
+  postmortem_report.py  its texts: /postmortem, POSTMORTEM.md, the checklist line (python -m trader postmortem)
+  macro_history.json   the listed US releases from November 2024 to July 2026 (for the replay; the event study never reads it)
 deploy/
   FREE_SERVER_GUIDE.md  click-by-click guide for a free 24/7 server
   setup.sh          one-command server installer

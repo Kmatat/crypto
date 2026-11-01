@@ -127,7 +127,7 @@ def test_health_in_trend_mode():
     hourly.journal.set("heartbeat", {"ts": iso(), "cycle": 1})
     hourly.llm, hourly.free_ai = ClaudeJSON("claude-haiku-5-5", "k", 0), free_ai()
     plain = health_text(hourly, hourly.journal, "1.7.0", iso(), {"checked_at": iso()}, "1.7.0")
-    assert "trend mode" not in plain and "📈" not in plain and "of 16 working" in plain
+    assert "trend mode" not in plain and "📈" not in plain and "of 17 working" in plain   # 1.9.1: + post-mortem row
 
 
 def test_the_pulse_says_when_the_rule_last_decided():

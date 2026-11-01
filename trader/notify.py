@@ -456,7 +456,9 @@ def daily_missing_text(bot, j, sym: str) -> str:
     """Why a coin has no daily frame, in words (the checklist-off reason first: with it off, no coin gets daily prices,
     held or not)."""
     from .agents.chart import daily_missing_reason
-    return daily_missing_reason(bool(getattr(bot, "mentor", None)), sym in j.positions())
+    mentor = getattr(bot, "mentor", None)
+    return daily_missing_reason(bool(mentor), sym in j.positions(),
+                                btc_rule=sym == "BTCUSDT" and "btc" in (getattr(mentor, "checks", None) or ()))
 
 
 def _no_picture_text(bot, j, coin: str, known: set) -> str:

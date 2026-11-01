@@ -4,7 +4,7 @@ import signal
 import time
 from types import SimpleNamespace
 
-from trader import __main__ as main, trend
+from trader import __main__ as main, health, trend
 from trader.config import Settings
 from trader.journal import Journal
 from trader.llm import ClaudeJSON
@@ -234,11 +234,13 @@ def test_ai_commands_say_only_review_uses_claude_in_trend_mode():
 
 # ---- the loop's helpers ----
 class Clock(dt.datetime):
+    """Today (UTC) at hour_now:30, so the day the test sets with yesterday() is the day the desk expects."""
     hour_now = 1
 
     @classmethod
     def now(cls, tz=None):
-        return dt.datetime(2026, 10, 27, cls.hour_now, 30, tzinfo=dt.timezone.utc)
+        today = dt.datetime.now(dt.timezone.utc).date()
+        return dt.datetime(today.year, today.month, today.day, cls.hour_now, 30, tzinfo=dt.timezone.utc)
 
 
 def test_late_daily_decisions_are_reported_from_two_oclock(monkeypatch):
@@ -250,6 +252,8 @@ def test_late_daily_decisions_are_reported_from_two_oclock(monkeypatch):
     sent, fake = phone()
     monkeypatch.setattr(main, "dt", SimpleNamespace(datetime=Clock, timezone=dt.timezone, timedelta=dt.timedelta,
                                                     date=dt.date))
+    monkeypatch.setattr(health, "now_utc", Clock.now)      # the health check reads the same clock (any real hour)
+    monkeypatch.setattr(Clock, "hour_now", 1)
     main.maybe_pulse(bot, fake, bot.base)
     assert sent == []                                      # 01:30 UTC: a retry is still normal
     Clock.hour_now = 3

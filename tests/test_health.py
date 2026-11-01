@@ -20,6 +20,8 @@ from trader.strategy import StrategyCard
 from tests.test_lab import TEST_WINDOWS, fake_fetch
 from tests.test_updater import FakeTG, git, make, publish, repos  # noqa: F401 - the repos fixture
 
+__all__ = ["repos"]   # the pytest fixture imported above, named here so pyflakes sees it used
+
 
 def iso(minutes_ago: float = 0) -> str:
     return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
@@ -137,12 +139,12 @@ def test_agents_report_counts_agents_and_strategy_changes(monkeypatch, tmp_path)
     assert "Created: 3" in text and "Coins added: XRP" in text and "removed: SOL" in text
     rows = roster(bot, bot.journal)
     names = [r["name"] for r in rows]
-    assert len(rows) == 16 and "Head trader" in names and "Laboratory" in names and "Chart reader" in names
-    assert "Event study" in names
+    assert len(rows) == 17 and "Head trader" in names and "Laboratory" in names and "Chart reader" in names
+    assert "Event study" in names and "Post-mortem & memory" in names   # 1.9.1: one more row
     by = {r["name"]: r for r in rows}
     assert by["Market data"]["status"] == "working" and by["Market scout"]["status"] == "off"   # offline: no scout
     report = agents_text(bot, bot.journal, 1)
-    assert report.startswith("🤖 16 agents:") and "Strategy in force" in report and "🧪 Strategies (last 1 days)" in report
+    assert report.startswith("🤖 17 agents:") and "Strategy in force" in report and "🧪 Strategies (last 1 days)" in report
     bot.journal.event("error", "Market data BTCUSDT: timeout")
     assert {r["name"]: r for r in roster(bot, bot.journal)}["Market data"]["status"] == "failing"
     assert "1 failing" in roster_text(roster(bot, bot.journal))

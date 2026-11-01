@@ -21,6 +21,7 @@ class MarketDataAgent:
         self._synthetic: dict[str, list[dict]] = {}
         self._daily: dict[str, tuple[float, list[dict]]] = {}   # coin -> (read at, the raw daily rows)
         self._daily_candles: dict[str, tuple[float, int, list[dict]]] = {}   # coin -> (read at, rows asked, rows)
+        self._daily_aside: dict[str, tuple[float, list[dict]]] = {}   # the records' own copy (daily_rows_aside)
         self._rng: dict[str, random.Random] = {}
 
     def candles(self, symbol: str, limit: int = 200) -> list[dict]:
@@ -55,6 +56,22 @@ class MarketDataAgent:
         request for them."""
         cached = self._daily.get(symbol)
         return cached[1] if cached and time.time() - cached[0] < 3600 else []
+
+    def daily_rows_aside(self, symbol: str, limit: int = 260, download: bool = True) -> list[dict]:
+        """The daily rows for the post-mortem's records only (an entry record's and the memory's Bitcoin side), kept in
+        a cache of their own: a read here never fills the cache the checklist and the chart reader use, so it cannot
+        change a trade or what an AI reads. One download per coin per hour at most; `download=False`: this cache or
+        none; offline: none."""
+        if self.offline or self.client is None:
+            return []
+        cached = self._daily_aside.get(symbol)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        if not download:
+            return []
+        rows = self.client.klines(symbol, "1d", limit)
+        self._daily_aside[symbol] = (time.time(), rows)
+        return rows
 
     def daily_closes(self, symbol: str, limit: int = 260) -> list[float]:
         """Daily closing prices (for the 50- and 200-day averages). Cached for an hour; offline: none."""

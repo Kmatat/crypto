@@ -57,10 +57,17 @@ def interval_ms(interval: str) -> int:
     return max(1, number) * unit
 
 
-def daily_missing_reason(checklist_on: bool, held: bool) -> str:
-    """Why a coin has no daily frame, in words: the desk downloads daily prices only where the checklist does."""
+def daily_missing_reason(checklist_on: bool, held: bool, btc_rule: bool = False) -> str:
+    """Why a coin has no daily frame, in words: the desk downloads daily prices only where the checklist does.
+    `btc_rule`: the coin is Bitcoin and the checklist's `btc` rule is on; that rule reads Bitcoin's daily prices for the
+    alts it judges (orchestrator._btc_rule_closes, at most once an hour), held or not, so a held Bitcoin misses its
+    daily frame at a check where that copy has expired or was not made yet (before the check's own read), and at every
+    check while the desk holds all the coins it watches (no alt is judged, so nothing reads Bitcoin's daily prices)."""
     if not checklist_on:
         return "not available (the checklist is off, so no daily prices are downloaded)"
+    if held and btc_rule:
+        return ("not refreshed at this check (while the btc rule is on, the desk reads Bitcoin's daily prices at most "
+                "once an hour, at checks where it judges a coin it does not hold)")
     if held:
         return "not refreshed while the coin is held (the desk downloads no extra prices for it)"
     return "no daily prices yet"

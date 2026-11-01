@@ -16,7 +16,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
-from .agents.mentor import ALL_CHECKS
+from .agents.mentor import ALL_CHECKS, OWNER_ONLY
 from .config import Settings
 
 # What a self-generated strategy may vary, and how far. Everything else is fixed by the owner.
@@ -186,6 +186,18 @@ class StrategyCard:
         dmod.WEIGHTS.update(self.weights)
         dmod.COIN_THRESHOLDS.clear()
         dmod.COIN_THRESHOLDS.update({k: float(v) for k, v in self.coin_thresholds.items()})
+
+
+def with_owner_rules(card: StrategyCard, checks) -> StrategyCard:
+    """`card` with the choice of the rules only the owner's MENTOR_CHECKS adds (OWNER_ONLY: the memory rule) taken from
+    `checks` (the owner's MENTOR_CHECKS, or the checks of the card in force); its other checks are left as they are.
+    The very same card when it already has that choice, so a desk that never switched the memory rule on sees no
+    change anywhere. The lab applies it to every card it puts in force or examines, the desk to the card it runs
+    (Orchestrator.apply_champion), the texts before comparing a challenger with the champion."""
+    want = tuple(c for c in checks if c in OWNER_ONLY)
+    if set(card.checks) & set(OWNER_ONLY) == set(want):
+        return card
+    return dataclasses.replace(card, checks=tuple(c for c in card.checks if c not in OWNER_ONLY) + want)
 
 
 def summary_line(card: StrategyCard) -> str:

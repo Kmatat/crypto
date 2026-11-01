@@ -18,7 +18,7 @@ import logging
 
 from ..llm import ClaudeJSON
 from ..strategy import BOUNDS, INTERVALS, MAX_CHANGES, StrategyCard
-from .mentor import ALL_CHECKS
+from .mentor import ALL_CHECKS, OWNER_ONLY
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,8 @@ PROPOSAL_SCHEMA = {
                 "source": {"type": "string", "description": "book, trader or URL the idea comes from"},
                 "buy_threshold": {"type": "number"}, "stop_loss_atr": {"type": "number"},
                 "take_profit_atr": {"type": "number"}, "trail_atr": {"type": "number"},
-                "checks": {"type": "array", "items": {"type": "string", "enum": list(ALL_CHECKS)}},
+                "checks": {"type": "array", "items": {"type": "string",   # the owner's rules (memory) are never proposed
+                                                      "enum": [c for c in ALL_CHECKS if c not in OWNER_ONLY]}},
                 "cooldown_hours": {"type": "number"}, "min_reward_risk": {"type": "number"},
                 "risk_per_trade_pct": {"type": "number"}, "max_position_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"}, "interval": {"type": "string", "enum": list(INTERVALS)},
@@ -146,6 +147,14 @@ class ResearchAgent:
         if not rows:
             notes.append("no closed trades in the period")
         out["notes"] = notes
+        # the post-mortem's cause mix (1.9.1): new keys only. `notes` is what the playbook quotes to the decision AI,
+        # so it stays exactly as before; the proposal prompt shows the mix only when the memory rule is on
+        try:
+            from ..postmortem_report import lessons_causes
+            out["causes"], out["cause_notes"] = lessons_causes(journal, days, exclude)
+        except Exception as e:  # noqa: BLE001 - the lessons must never fail because of the post-mortem
+            log.warning("Post-mortem lessons failed: %s", e)
+            out["causes"], out["cause_notes"] = {}, []
         return out
 
     # ---- proposals ----
@@ -192,6 +201,8 @@ class ResearchAgent:
             "(books, well-known traders, academic or exchange research). Summarise 4-6 concrete, testable ideas with "
             "their source and the parameter values they imply.", max_searches=5, caller="research")
         notes = research["text"] if research else "(web research unavailable)"
+        if "memory" not in champion.checks:   # by default the proposals get exactly the input they had before 1.9.1
+            lessons = {k: v for k, v in lessons.items() if k not in ("causes", "cause_notes")}
         prompt = (
             f"Champion strategy (JSON):\n{json.dumps(champion.params(), indent=1)}\n\n"
             f"Bounds (min, max) per parameter:\n{json.dumps({k: v for k, v in BOUNDS.items() if k != 'weights'})}\n\n"
@@ -213,7 +224,10 @@ class ResearchAgent:
             try:
                 card = StrategyCard(name=p["name"][:60], buy_threshold=float(p["buy_threshold"]),
                                     stop_loss_atr=float(p["stop_loss_atr"]), take_profit_atr=float(p["take_profit_atr"]),
-                                    trail_atr=float(p["trail_atr"]), checks=tuple(sorted(set(p["checks"]))),
+                                    trail_atr=float(p["trail_atr"]),
+                                    # the owner's rules stay as the owner chose them: never added, never dropped
+                                    checks=tuple(sorted((set(p["checks"]) - set(OWNER_ONLY))
+                                                        | (set(champion.checks) & set(OWNER_ONLY)))),
                                     cooldown_hours=float(p["cooldown_hours"]), min_reward_risk=float(p["min_reward_risk"]),
                                     risk_per_trade_pct=float(p["risk_per_trade_pct"]),
                                     max_position_pct=float(p["max_position_pct"]),

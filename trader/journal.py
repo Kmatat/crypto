@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS news_events (
   placebo_volume_exhausted INTEGER);
 CREATE INDEX IF NOT EXISTS news_events_symbol_ts ON news_events (symbol, ts_utc);
 CREATE INDEX IF NOT EXISTS news_events_open ON news_events (settled_at, ts_utc);
+-- trade_context belongs to the post-mortem & memory agent (trader/agents/memory.py): what the desk knew at each buy
+-- (source 'live') and the replay seed of the strategy in force (source 'replay'); nothing trades on it unless the
+-- owner adds `memory` to MENTOR_CHECKS
+CREATE TABLE IF NOT EXISTS trade_context (
+  id INTEGER PRIMARY KEY, source TEXT, symbol TEXT, opened_at TEXT, decision_ms INTEGER, strategy TEXT, card_id TEXT,
+  features_version INTEGER, bucket TEXT, regime_base TEXT, regime_4h TEXT, regime_1d TEXT, latest_event TEXT,
+  breakout_level REAL, breakout_hours INTEGER, breakout_failed INTEGER, score REAL, technical REAL, prediction REAL,
+  news REAL, forex REAL, news_source TEXT, rsi REAL, atr_pct REAL, stop_pct REAL, normal_dip REAL, btc_above INTEGER,
+  release_near TEXT, mins_to_release INTEGER, mins_since_release INTEGER, release_name TEXT, hour_utc INTEGER,
+  weekday INTEGER, decision_price REAL, signal_price REAL, fill_price REAL, market_price REAL, quote_planned REAL,
+  quote_filled REAL, closed_at TEXT, exit_price REAL, exit_reason TEXT, pnl REAL, pnl_pct REAL, hours REAL,
+  backfilled INTEGER DEFAULT 0, created_at TEXT, UNIQUE (source, symbol, opened_at));
+CREATE INDEX IF NOT EXISTS trade_context_pending ON trade_context (source, symbol, breakout_failed);
 """
 
 
@@ -269,6 +282,77 @@ class Journal:
         cur = self.db.execute("DELETE FROM chart_events WHERE ts < ?", (cutoff,))
         self.db.commit()
         return cur.rowcount
+
+    # ---- the post-mortem & memory agent (trader/agents/memory.py): what the desk knew at each buy ----
+    def _context_columns(self) -> list[str]:
+        return [r[1] for r in self.db.execute("PRAGMA table_info(trade_context)") if r[1] != "id"]
+
+    def _context_insert(self, row: dict, columns: list[str]):
+        unknown = sorted(set(row) - set(columns))
+        if unknown:
+            raise ValueError(f"unknown trade_context columns: {', '.join(unknown)}")
+        keys = list(row)
+        return self.db.execute(f"INSERT OR IGNORE INTO trade_context ({', '.join(keys)}) VALUES "
+                               f"({', '.join('?' * len(keys))})", [row[k] for k in keys])
+
+    def add_trade_context(self, row: dict) -> int | None:
+        """INSERT OR IGNORE one row (columns from the dict's keys, unknown keys refused with ValueError); returns the
+        id, or None when the row already existed (one row per source, coin and opening time). Commits."""
+        cur = self._context_insert(row, self._context_columns())
+        self.db.commit()
+        return cur.lastrowid if cur.rowcount == 1 else None
+
+    def trade_contexts(self, source: str = "live", symbol: str | None = None) -> list[dict]:
+        """The context rows of one source (oldest first), optionally of one coin."""
+        if symbol:
+            rows = self.db.execute("SELECT * FROM trade_context WHERE source=? AND symbol=? ORDER BY opened_at, id",
+                                   (source, symbol))
+        else:
+            rows = self.db.execute("SELECT * FROM trade_context WHERE source=? ORDER BY opened_at, id", (source,))
+        return [dict(r) for r in rows]
+
+    def closed_positions(self) -> list[dict]:
+        """One dict per position that is fully closed: its closed_trades rows summed (a position sold in parts has
+        several rows with the same symbol and opened_at), leaving out positions still open (a partly sold position is
+        not finished). pnl_pct = pnl / cost x 100; loss = pnl <= 0 (the same rule as the report and the replay)."""
+        rows = self.db.execute(
+            "SELECT symbol, opened_at, MAX(closed_at) AS closed_at, SUM(pnl) AS pnl, SUM(cost) AS cost, "
+            "SUM(proceeds) AS proceeds, COUNT(*) AS sales, GROUP_CONCAT(exit_reason, ' + ') AS exit_reason, "
+            "MIN(entry_price) AS entry_price FROM (SELECT * FROM closed_trades ORDER BY id) GROUP BY symbol, opened_at "
+            "ORDER BY MAX(closed_at), symbol").fetchall()
+        still_open = {(p["symbol"], p["opened_at"]) for p in self.positions().values()}
+        out = []
+        for r in rows:
+            if (r["symbol"], r["opened_at"]) in still_open:
+                continue
+            p = dict(r)
+            p["exit_reasons"] = str(p["exit_reason"] or "").split(" + ")
+            p["pnl_pct"] = p["pnl"] / p["cost"] * 100 if p["cost"] else 0.0
+            p["loss"] = p["pnl"] <= 0
+            out.append(p)
+        return out
+
+    def set_breakout_result(self, row_id: int, failed: bool) -> None:
+        """Store whether the breakout the desk bought on fell back below its level within its window (post-mortem
+        only; the memory never reads it)."""
+        self.db.execute("UPDATE trade_context SET breakout_failed=? WHERE id=?", (int(bool(failed)), row_id))
+        self.db.commit()
+
+    def replace_seed(self, rows: list[dict], meta: dict) -> int:
+        """In one transaction: delete the replay rows, insert the new ones, set state memory_seed = meta. A failure
+        rolls back and leaves the previous seed. Returns the rows written."""
+        columns = self._context_columns()
+        written = 0
+        try:
+            self.db.execute("DELETE FROM trade_context WHERE source='replay'")
+            for row in rows:
+                written += self._context_insert(row, columns).rowcount
+            self.db.execute("INSERT OR REPLACE INTO state VALUES (?, ?)", ("memory_seed", json.dumps(meta)))
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        return written
 
     def log_equity(self, equity: float) -> None:
         self.db.execute("INSERT INTO equity VALUES (?,?,?)", (now(), equity, self.cash))

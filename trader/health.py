@@ -151,12 +151,16 @@ def judged_since(j: Journal, hours: float = 24, trend: bool = False) -> str:
     """The stuck-rule alarm judges only decisions made under the strategy and settings now in force: refusals from
     before a correction (for example the old take-profit fixed at start) say nothing about the corrected desk.
     The daily trend rule (`trend`) makes a few buy signals a week: it is judged on the last 7 days, never before the
-    day it started (nothing yet before its first daily decisions)."""
+    day it started (nothing yet before its first daily decisions). The owner's switch of the memory rule behind a
+    lab or /approve card keeps the card's 'since' (for the lab's rollback watch) but changes the rules in force: the
+    alarm then starts at that 'settings' event too."""
     if trend:
         start = (j.get("trend_start") or {}).get("ts") or now_utc().isoformat(timespec="seconds")
         return max(since_iso(7 * 24), start)
     state = j.get("strategy_champion") or {}
-    return max(since_iso(hours), state.get("since") or "")
+    switched = max((h.get("ts") or "" for h in j.get("strategy_history") or [] if h.get("event") == "settings"),
+                   default="")
+    return max(since_iso(hours), state.get("since") or "", switched)
 
 
 TREND_PAUSES = ("overall loss brake", "daily loss limit", "all position slots in use")
@@ -205,6 +209,7 @@ def strategy_changes(j: Journal, since: str) -> dict:
         "forward_failed": sum(1 for c in items if examined(c, "forward") and c["forward"].get("passed") is False),
         "promoted": [h for h in hist if h["event"] == "promote"],
         "rolled_back": [h for h in hist if h["event"] == "rollback"],
+        "settings": [h for h in hist if h["event"] == "settings"],   # the owner switched the memory rule (1.9.1)
         "rejected_by_owner": sum(1 for e in j.events(since=since) if e["kind"] == "owner" and "rejected" in e["text"]),
         "in_forward_test": [c for c in items if c["status"] == "lab_passed"],
         "awaiting_approval": [c for c in items if c["status"] == "ready"],
@@ -234,7 +239,10 @@ def strategy_changes_text(c: dict, days: float) -> str:
                      + (f": {clean(h['note'], 160)}" if h.get("note") else "") + ")")
     for h in c["rolled_back"]:
         lines.append(f"⏪ {h['ts'][:10]}: rolled back to {h.get('name')} [{h.get('id')}]: {clean(h.get('note'), 160)}")
-    if not c["promoted"] and not c["rolled_back"]:
+    for h in c.get("settings") or []:
+        lines.append(f"⚙️ {h['ts'][:10]}: {h.get('name')} [{h.get('id')}] stays in force; "
+                     f"{clean(h.get('note'), 160)}")
+    if not c["promoted"] and not c["rolled_back"] and not c.get("settings"):
         lines.append("Strategy in force: unchanged in this period")
     if c["coins_added"] or c["coins_removed"]:
         lines.append("Coins added: " + (", ".join(x.removesuffix("USDT") for x in c["coins_added"]) or "none")
@@ -316,6 +324,14 @@ def roster(bot, j: Journal, hours: float = 24) -> list[dict]:
                     f"off: EVENTS_DAILY_REQUESTS={s.events_daily_requests} is below one measured event "
                     f"({REQUESTS_PER_EVENT} requests)" if s.events_daily_requests < REQUESTS_PER_EVENT else
                     "needs Binance's public prices (not in offline mode)", err("events events")))
+    try:
+        from .postmortem_report import health_parts
+        status, detail = health_parts(j, s, since)
+        rows.append(row("Post-mortem & memory", "why trades won or lost; the memory rule (off unless MENTOR_CHECKS has "
+                                                "memory)", status, detail))
+    except Exception as e:  # noqa: BLE001 - one row must never break /health
+        rows.append(row("Post-mortem & memory", "why trades won or lost; the memory rule (off unless MENTOR_CHECKS has "
+                                                "memory)", "idle", "", error=f"post-mortem unavailable: {e}"))
     checks = list(s.mentor_checks)
     refused = sum(n for k, n in f["refused"].items() if k.startswith("checklist"))
     rows.append(row("Mentor (master traders' checklist)", "refuses buys that break documented trading rules",

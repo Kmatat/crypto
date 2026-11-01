@@ -23,10 +23,13 @@ records the real price next to the fill price so the report can show the gap.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import time
+from pathlib import Path
 
 from . import free_ai, trend
+from .agents import memory
 from .agents.chart import NOTABLE, ChartEventsAgent, daily_missing_reason, finished_daily, phrase
 from .agents.decision import NEWS_VETO, DecisionAgent
 from .agents.events import EventsAgent
@@ -46,7 +49,7 @@ from .config import AI_BUDGET_CEILING_USD, PUBLIC_BASE_URL, TESTNET_BASE_URL, Se
 from .journal import Journal
 from .llm import ClaudeJSON
 from .notes import Notes, default_dir
-from .strategy import StrategyCard, summary_line
+from .strategy import StrategyCard, summary_line, with_owner_rules
 
 log = logging.getLogger("orchestrator")
 TREND_TRIES = 4   # checks in a row the daily trend step is tried when a coin's prices or a sale fail
@@ -88,6 +91,9 @@ class Orchestrator:
         self.charts: dict[str, dict] = {}           # the latest chart report per coin (for /chart and /status)
         self.charts_at: str | None = None           # when those reports were made (ISO, UTC)
         self._daily_rows: dict[str, list | None] = {}   # daily prices read this check, per coin (None: the read failed)
+        self._btc_checklist: list[float] | None = None   # Bitcoin's daily closes as the checklist read them this check
+        self._btc_failed = False                         # a read of Bitcoin's daily prices failed this check
+        self._btc_aside_failed = False                   # the records' own read of them failed this check
         self.prediction = PredictionAgent()
         self.news = NewsAgent(self.ai, offline=s.offline, cache_seconds=s.news_refresh_minutes * 60)
         self.forex = ForexAgent(offline=s.offline)
@@ -109,6 +115,34 @@ class Orchestrator:
         self._trend_logged: set = set()        # (day, coin, action, reason) already recorded: retries add no duplicates
         self.champion_note: str | None = None    # set when the strategy in force was replaced at start (see apply_champion)
         self._scout_retry_at = 0.0
+        # the post-mortem & memory agent (1.9.1): a context row at every buy, the failed-breakout result, and - only
+        # with `memory` in MENTOR_CHECKS - the memory's verdict in the checklist. The release list is the event study's
+        # owner file next to the journal plus the shipped calendar and the shipped history of past releases
+        self._release_owner = Path(s.db_path).with_name("macro_calendar.json") if s.db_path != ":memory:" else None
+        self._memory_book: memory.MemoryBook | None = None
+        self._releases: tuple = ([], None)
+        self._backfill_memory()
+
+    def _release_list(self) -> tuple:
+        """The listed US releases and their coverage (cached by file times inside the memory module)."""
+        try:
+            return memory.release_times(self._release_owner)
+        except Exception:  # noqa: BLE001 - a broken calendar makes the release feature 'unknown', nothing more
+            log.exception("Reading the release calendar failed")
+            return [], None
+
+    def _backfill_memory(self) -> None:
+        """Once, at the first start of 1.9.1: context rows for the closed trades recorded before it (from their
+        stored entry decisions only). Never raises."""
+        try:
+            if self.journal.get("memory_backfilled"):
+                return
+            n = memory.backfill(self.journal, *self._release_list())
+            self.journal.set("memory_backfilled", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+            if n:
+                log.info("Post-mortem: %s earlier trades got an entry record from their stored decisions", n)
+        except Exception:  # noqa: BLE001 - bookkeeping must never stop the desk from starting
+            log.exception("Back-filling the entry records failed")
 
     # ---- portfolio helpers ----
     def equity(self) -> float:
@@ -295,6 +329,11 @@ class Orchestrator:
             elif (problems := card.violations()) and owner.id != card.id:   # never re-promote the same card each check
                 self._replace_champion(state, owner, "owner settings", f"the strategy in force could not trade ({problems[0]})")
                 card = owner
+            elif (fixed := self._owner_only_rules(card)) is not None:
+                # a card the lab, /approve or a rollback put in force keeps its other checks, but the rules only the
+                # owner's MENTOR_CHECKS adds (the memory rule) always follow the owner's settings, both ways
+                self._sync_owner_rules(state, fixed)
+                card = fixed
         else:
             card = StrategyCard.from_settings(self.base)
             now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -319,6 +358,29 @@ class Orchestrator:
                                                f"{card.describe_diff(self.card)}")
             self.card = card
         return card
+
+    def _owner_only_rules(self, card: StrategyCard) -> StrategyCard | None:
+        """The card with the owner's own choice of the rules only MENTOR_CHECKS adds (the memory rule), or None when it
+        already has that choice. Its other checks are left as they are."""
+        fixed = with_owner_rules(card, self.base.mentor_checks)
+        return None if fixed is card else fixed
+
+    def _sync_owner_rules(self, state: dict, card: StrategyCard) -> None:
+        """Only the card's owner-only rules change (_owner_only_rules): who put it in force, since when and the card a
+        rollback returns to stay as they are, so the lab's rollback watch and its way back are kept (the lab gives the
+        card it puts in force, a rollback's too, the owner's choice itself: Lab.set_champion). Every card is stored
+        with the owner's choice of its time, so this runs only after the owner changed MENTOR_CHECKS. The lineage
+        records a 'settings' event: the card in force changed (notes.champion_at, card_periods), but nobody promoted
+        one (health.strategy_changes)."""
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        why = "the owner's settings changed: the memory rule is now " + ("on" if "memory" in card.checks else "off")
+        self.journal.set("strategy_champion", {**state, "card": card.to_dict()})
+        hist = self.journal.get("strategy_history") or []
+        hist.append({"ts": now, "event": "settings", "id": card.id, "name": card.name, "by": "owner settings",
+                     "note": why})
+        self.journal.set("strategy_history", hist[-100:])
+        self.journal.event("strategy", f"Strategy in force is now {summary_line(card)} because {why}")
+        self.champion_note = why
 
     def _replace_champion(self, state: dict, card: StrategyCard, by: str, why: str) -> None:
         now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
@@ -348,6 +410,9 @@ class Orchestrator:
         # 1-2. prices, analysis, exchange-side exits, desk-side backup exits
         ctx: dict[str, dict] = {}
         self._daily_rows = {}
+        self._btc_checklist, self._btc_failed, self._btc_aside_failed = None, False, False
+        self._memory_book = None             # built at most once per check, only when the memory rule asks
+        self._releases = self._release_list()
         for sym in symbols:
             try:
                 candles = self.market.candles(sym)
@@ -358,6 +423,7 @@ class Orchestrator:
                 technical = self.technical.run(closed)
                 technical["price"] = price
                 chart = self._chart(sym, closed, position)   # never raises; None when the picture could not be drawn
+                self._track_breakouts(sym, closed)            # never raises; the post-mortem's failed-breakout result
                 if position:
                     position, exit_result = self._sync_protection(sym, position)
                     if exit_result:
@@ -482,7 +548,11 @@ class Orchestrator:
                 if review:
                     result["mentor"] = MentorAgent.summary(review)
                 if verdict["approved"]:
-                    result.update(self._buy(sym, decision, verdict))
+                    # the entry record is built after the exchange orders (_record_context): its Bitcoin read may be
+                    # a download, and nothing may sit between the risk approval and the order
+                    result.update(self._buy(sym, decision, verdict,
+                                            context=functools.partial(self._entry_context, sym, c, reports, decision,
+                                                                      verdict)))
                 summary.append(result)
             except Exception as e:
                 log.exception("Buy failed for %s", sym)
@@ -768,7 +838,8 @@ class Orchestrator:
                 decision = decide(sym, "BUY", f"buys {share:.1%} of the account", verdict)
                 result = self._result(sym, {"price": price}, decision, verdict)
                 if verdict["approved"]:
-                    result.update(self._buy(sym, decision, verdict))
+                    result.update(self._buy(sym, decision, verdict,
+                                            context=self._trend_context(sym, sigs.get(sym), price, verdict, now_ms)))
                     if sym in self.journal.positions():
                         managed[sym] = self.journal.positions()[sym]["opened_at"]
                 out.append(result)
@@ -784,9 +855,11 @@ class Orchestrator:
                 "score": decision["combined_score"], "approved": verdict["approved"], "risk": verdict["reason"],
                 "reasoning": decision["reasoning"], "source": decision.get("source")}
 
-    def _buy(self, sym: str, decision: dict, verdict: dict) -> dict:
+    def _buy(self, sym: str, decision: dict, verdict: dict, context=None) -> dict:
         """Place an approved buy, record it and put its stop-loss / take-profit on the exchange at once.
-        Returns the fields for this check's summary entry."""
+        Returns the fields for this check's summary entry. `context`: what the desk knew at the decision (the
+        post-mortem's entry record) or a function that builds it from that (it never raises), written after the
+        protective orders."""
         out: dict = {}
         trend_buy = decision.get("source") == "trend"
         real = self._real_price(sym, self.last_price[sym])   # the real market just before the order
@@ -811,8 +884,111 @@ class Orchestrator:
                     out.update(self._sell(sym, position, why))  # already past an exit level
             else:
                 out["protected"] = self.journal.positions()[sym]["protected"]
+            # after the protective orders, so neither a slow disk nor the record's Bitcoin read delays the exchange stop
+            self._record_context(sym, context, fill, verdict, position["opened_at"])
         out.update(order=fill, stop_loss=verdict["stop_loss"], take_profit=verdict["take_profit"])
         return out
+
+    # ---- the post-mortem & memory agent (trader/agents/memory.py) ----
+    def _entry_context(self, sym: str, c: dict, reports: dict, decision: dict, verdict: dict) -> dict | None:
+        """The context row of a buy, from what the check had at the decision (the coin's daily rows from this check's
+        read; Bitcoin's from _btc_for_memory: the checklist's list, or the records' own copy, at most one download an
+        hour). Called after the buy's exchange orders (_buy -> _record_context). Never raises: an error gives None."""
+        try:
+            entry = c.get("entry")
+            if entry is None:
+                rows = self._daily_rows.get(sym)
+                daily = [r["close"] for r in rows] if isinstance(rows, list) else []
+                btc_daily = self._btc_for_memory(sym, daily, self._btc_checklist)
+                entry = memory.entry_features(sym, c["candles"], c["price"], c["technical"]["atr"], verdict["stop_loss"],
+                                              c.get("chart"), daily, btc_daily, *self._releases, self.market.interval)
+            row = memory.context_columns(entry)
+            row.update(strategy="hourly", card_id=self.card.id if self.card else None,
+                       score=decision.get("combined_score"), technical=(reports.get("technical") or {}).get("score"),
+                       prediction=(reports.get("prediction") or {}).get("score"),
+                       news=(reports.get("news") or {}).get("score"), forex=(reports.get("forex") or {}).get("score"),
+                       news_source=(reports.get("news") or {}).get("source"), decision_price=c["price"])
+            return row
+        except Exception:  # noqa: BLE001 - bookkeeping must never skip a buy
+            log.exception("Building the entry record of %s failed", sym)
+            return None
+
+    def _trend_context(self, sym: str, sig: dict | None, price: float, verdict: dict, now_ms: int) -> dict | None:
+        """The daily trend rule's context row; it runs before the order, so any error gives None (never a skipped buy)."""
+        try:
+            f = memory.trend_features(sym, sig, price, verdict["stop_loss"], now_ms, *self._release_list())
+            row = memory.context_columns(f)
+            row.update(strategy="trend", card_id="trend", score=f.get("score"), technical=f.get("technical"),
+                       decision_price=price, bucket=None)
+            return row
+        except Exception:  # noqa: BLE001
+            log.exception("Building the trend entry record of %s failed", sym)
+            return None
+
+    def _record_context(self, sym: str, context, fill: dict, verdict: dict, opened_at: str) -> None:
+        """Write the context row of a filled buy (`context`: the row, or the function that builds it). Never raises."""
+        try:
+            if callable(context):
+                context = context()   # _entry_context: never raises
+            if context is None:
+                return
+            row = dict(context)
+            row.update(source="live", symbol=sym, opened_at=opened_at, fill_price=fill.get("avg_price"),
+                       market_price=fill.get("market_price"), quote_planned=verdict.get("quote_amount"),
+                       quote_filled=fill.get("quote"), backfilled=0,
+                       created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+            self.journal.add_trade_context(row)
+        except Exception:  # noqa: BLE001 - bookkeeping after a fill must never stop the check
+            log.exception("Recording the entry record of %s failed", sym)
+
+    def _track_breakouts(self, sym: str, closed: list[dict]) -> None:
+        """The post-mortem's failed-breakout result for this coin's recent buys on a breakout, once the window has
+        passed (one indexed query, usually empty). Never raises; the memory never reads it."""
+        try:
+            rows = self.journal.db.execute(
+                "SELECT id, decision_ms, breakout_level, breakout_hours FROM trade_context WHERE source='live' AND "
+                "symbol=? AND breakout_failed IS NULL AND breakout_level IS NOT NULL", (sym,)).fetchall()
+            if not rows:
+                return
+            step = memory.interval_ms(self.market.interval)
+            for r in rows:
+                res = memory.breakout_failed(closed, r["decision_ms"], r["breakout_level"], r["breakout_hours"], step)
+                if res is not None:
+                    self.journal.set_breakout_result(r["id"], res)
+        except Exception:  # noqa: BLE001
+            log.exception("Tracking the breakouts of %s failed", sym)
+
+    def _btc_for_memory(self, sym: str, daily: list, btc_daily: list | None) -> list | None:
+        """Bitcoin's daily closes for the memory's group and the entry record of a buy (Bitcoin itself: its own): the
+        checklist's list (`btc_daily`) when it read one, else this check's read, else the records' own copy
+        (MarketDataAgent.daily_rows_aside: one download an hour at most, into a cache nothing else reads, so a record
+        never changes a trade or what an AI reads; the replay always knows Bitcoin's side, so the live record must
+        too). After a failed Bitcoin read this check: that copy only, never a second attempt. Never raises."""
+        if sym == "BTCUSDT":
+            return daily
+        if btc_daily:
+            return btc_daily
+        rows = self._daily_rows.get("BTCUSDT")
+        if isinstance(rows, list) and rows:
+            return [r["close"] for r in rows]
+        failed = ("BTCUSDT" in self._daily_rows and rows is None) or self._btc_failed or self._btc_aside_failed
+        try:
+            rows = self.market.daily_rows_aside("BTCUSDT", download=not failed)
+        except Exception as e:  # noqa: BLE001 - optional context: Bitcoin's side is then unknown
+            log.warning("Daily history unavailable for BTCUSDT: %s", e)
+            self._btc_aside_failed = True
+            return None
+        return [r["close"] for r in rows] or None
+
+    def _memory_verdict(self, bucket: str, decision_ms: int) -> dict:
+        """The memory's verdict on one buy; the book is built once per check from the journal."""
+        if self._memory_book is None:
+            from .notes import card_periods
+            exclude = card_periods(self.journal.get("strategy_history") or [], "trend")
+            # the seed of this card with the memory rule switched the other way counts too (memory.strategy_ids)
+            self._memory_book = memory.MemoryBook(memory.pool_rows(self.journal, memory.strategy_ids(self.card),
+                                                                   exclude))
+        return self._memory_book.verdict(bucket, decision_ms)
 
     def _note_brake(self, verdict: dict) -> None:
         if verdict.get("trip"):
@@ -970,8 +1146,9 @@ class Orchestrator:
         try:
             report = self.chart.run(closed, daily)
             if daily is None:              # say why the daily part is missing, the same words /chart uses
-                report["summary"] = ChartEventsAgent.summary(report, daily_missing_reason(bool(self.mentor),
-                                                                                         position is not None))
+                report["summary"] = ChartEventsAgent.summary(report, daily_missing_reason(
+                    bool(self.mentor), position is not None,
+                    btc_rule=sym == "BTCUSDT" and bool(self.mentor) and "btc" in self.mentor.checks))
         except Exception:  # noqa: BLE001
             log.exception("Chart analysis failed for %s", sym)
             self.charts.pop(sym, None)     # no picture from this check: never show last hour's as fresh
@@ -1010,16 +1187,59 @@ class Orchestrator:
                 raise RuntimeError("daily prices could not be read this check")
             else:
                 daily = [r["close"] for r in read]
-            btc_read = self._daily_rows.get("BTCUSDT")
-            btc_daily = daily if sym == "BTCUSDT" else \
-                [r["close"] for r in btc_read] if isinstance(btc_read, list) else self.market.daily_closes("BTCUSDT")
+            btc_read = self._daily_rows.get("BTCUSDT", "unread")
+            if sym == "BTCUSDT":
+                btc_daily = daily
+            elif isinstance(btc_read, str):           # Bitcoin was not analysed this check: as in 1.9.0
+                try:
+                    btc_daily = self.market.daily_closes("BTCUSDT")
+                except Exception:
+                    self._btc_failed = True           # the records make no second attempt (_btc_for_memory)
+                    raise                             # as in 1.9.0: the coin's own daily rules read '?' too
+            else:
+                btc_daily = self._btc_rule_closes(btc_read)
         except Exception as e:
             log.warning("Daily history unavailable for %s: %s", sym, e)
             daily, btc_daily = [], None
+        if btc_daily and sym != "BTCUSDT":
+            self._btc_checklist = btc_daily           # the entry record of a buy reuses it (_entry_context)
         atr = c["technical"]["atr"]
         stop, take = c["price"] - self.s.stop_loss_atr * atr, c["price"] + self.s.take_profit_atr * atr
+        verdict = None
+        if "memory" in self.mentor.checks:   # only when the owner chose the rule: otherwise nothing is computed here
+            try:
+                c["entry"] = memory.entry_features(sym, c["candles"], c["price"], atr, stop, c.get("chart"), daily,
+                                                   self._btc_for_memory(sym, daily, btc_daily), *self._releases,
+                                                   self.market.interval)
+                verdict = self._memory_verdict(c["entry"]["bucket"], c["entry"]["decision_ms"])
+            except Exception:  # noqa: BLE001 - a broken memory must not freeze buying: unknown never blocks
+                log.exception("The memory check failed for %s", sym)
+                c.pop("entry", None)
+                verdict = {"ok": None, "detail": "memory unavailable this check (see the log)"}
         return self.mentor.review(sym, c["candles"], daily, c["price"], stop, take, atr, btc_daily,
-                                  self.journal.last_stop_loss_ms(sym), int(time.time() * 1000), chart=c.get("chart"))
+                                  self.journal.last_stop_loss_ms(sym), int(time.time() * 1000), chart=c.get("chart"),
+                                  memory=verdict)
+
+    def _btc_rule_closes(self, rows: list | None) -> list[float] | None:
+        """Bitcoin's daily closes for the `btc` rule from this check's read of them (the chart step's). That read is
+        empty while the desk holds Bitcoin and the hour-old copy has expired (a held coin's chart step never
+        downloads): then, as 1.7 did, the checklist reads them itself, but only when the `btc` rule is on
+        (MarketDataAgent.daily_closes: one download an hour at most, into the copy the chart reader shares, so a held
+        Bitcoin's chart also has its daily frame at the next checks). From 1.8.0 to 1.9.0 the rule let alt buys
+        through unchecked there. After a failed read this check (None): no second attempt, the rule reads '?' this
+        check. A failure here touches only the `btc` rule."""
+        if rows is None:
+            return None
+        if rows or "btc" not in self.mentor.checks:
+            return [r["close"] for r in rows]   # this check's read, as in 1.9.0, even after an earlier failed attempt
+        if self._btc_failed:
+            return None
+        try:
+            return self.market.daily_closes("BTCUSDT")
+        except Exception as e:  # noqa: BLE001 - the rule then reads '?' this check, as with a failed chart-step read
+            log.warning("Daily history unavailable for BTCUSDT: %s", e)
+            self._btc_failed = True
+            return None
 
     def _trail_price(self, position: dict, closed: list[dict]) -> float:
         """The highest finished-candle close since the position was opened (the entry price before the first one)."""

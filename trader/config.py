@@ -191,7 +191,7 @@ class Settings:
     # ---- master traders' checklist (trader/agents/mentor.py) and related disciplines ----
     # Defaults chosen from backtests on 90/180/365 days (see README "Measuring the strategy"):
     # trend200 + btc + cooldown + reward with trailing stops and 1% risk sizing was the robust set.
-    mentor_checks: tuple = ("trend200", "btc", "cooldown", "reward")  # also available: alignment, overextended
+    mentor_checks: tuple = ("trend200", "btc", "cooldown", "reward")  # also available: alignment, overextended, regime, memory
     min_reward_risk: float = 2.0     # PTJ: target distance must be >= this x stop distance
     cooldown_hours: float = 24       # Livermore: no re-entry this soon after a stop-loss on the same coin
     risk_per_trade_pct: float = 0.01  # Turtles: size so a stop-loss costs 1% of equity; 0 = fixed MAX_POSITION_PCT
